@@ -33,6 +33,12 @@ quiet=0
 # Text font. Currently only "jetbrains" is bundled. Empty = default.
 #font=jetbrains
 
+# Theme. If set, Visor loads \EFI\visor\themes\<name>.conf and the UI values in
+# that file OVERRIDE the ones below. A theme file may contain any of the UI keys
+# in this file (colors, sizes, icons, underline, power, background, title...).
+# Boot entries always stay here in boot.conf - themes are UI-only.
+#theme=nord
+
 # --- Colors -----------------------------------------------------------------
 # Title text color.
 #title_color=#7AA2F7
