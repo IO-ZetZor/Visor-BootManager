@@ -1,11 +1,3 @@
-/* Visor EFI linker script.
- *
- * Adapted from gnu-efi's elf_x86_64_efi.lds.  The ONLY change from the stock
- * script is that ImageBase is declared HIDDEN: binutils >= 2.36 refuses the
- * crt0 "R_X86_64_PC32 against ImageBase" relocation in a -shared link while
- * ImageBase is an exported (preemptible) global.  Hiding it keeps the symbol
- * out of .dynsym so the reference resolves at link time.  Newer upstream
- * gnu-efi scripts already do this. */
 OUTPUT_FORMAT("elf64-x86-64", "elf64-x86-64", "elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
@@ -13,12 +5,9 @@ SECTIONS
 {
   . = 0;
   HIDDEN(ImageBase = .);
-  /* .hash and/or .gnu.hash MUST come first! */
   .hash : { *(.hash) }
   .gnu.hash : { *(.gnu.hash) }
   . = ALIGN(4096);
-  /* DWARF unwind / exception data is unused at UEFI runtime and makes ld
-   * choke ("refers to overlapping FDEs") in this -shared link, so drop it. */
   /DISCARD/ :
   {
    *(.eh_frame)
@@ -48,12 +37,6 @@ SECTIONS
    *(.data*)
    *(.sdata)
 
-   /*
-    * Note that these aren't the using the GNU "CONSTRUCTOR" output section
-    * command, so they don't start with a size.  Because of p2align and the
-    * end/END definitions, and the fact that they're mergeable, they can also
-    * have NULLs which aren't guaranteed to be at the end.
-    */
    . = ALIGN(16);
    __init_array_start = .;
    *(SORT(.init_array.*))
@@ -75,8 +58,6 @@ SECTIONS
    *(.fini_array)
    __fini_array_end = .;
 
-   /* the EFI loader doesn't seem to like a .bss section, so we stick
-      it all into .data: */
    *(.sbss)
    *(.scommon)
    *(.dynbss)
