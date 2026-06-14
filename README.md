@@ -11,10 +11,9 @@ engine — just a config file and a handful of PNG assets.
 # Visor Menu
 
 <p align="center">
-  <img src="docs/ss1.png" width="32%">
-  <img src="docs/ss3.png" width="32%">
+  <img src="docs/ss1.png" width="50%">
+  <img src="docs/ss3.png" width="50%">
 </p>)
----
 
 ## Features
 
