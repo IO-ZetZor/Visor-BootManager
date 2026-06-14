@@ -8,11 +8,10 @@ Images) or chainloads **Windows** (Windows Boot Manager). It is intentionally
 small: a single ~260 KB `.efi`, no external runtime dependencies, no scripting
 engine — just a config file and a handful of PNG assets.
 
-#Visor Menu
+# Visor Menu
 
 <p align="center">
   <img src="docs/ss1.png" width="32%">
-  <img src="docs/ss2.png" width="32%">
   <img src="docs/ss3.png" width="32%">
 </p>)
 ---
