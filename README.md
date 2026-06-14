@@ -115,7 +115,7 @@ Visor is unsigned, so with Secure Boot enabled you must sign it with your own
 keys. The easiest way is [`sbctl`](https://github.com/Foxboron/sbctl):
 
 ```bash
-sudo sbctl sign -s /boot/efi/EFI/visor/visor_x64.efi
+sudo sbctl sign -s /<ESP>/EFI/visor/visor_x64.efi
 ```
 
 (Re-run that after every rebuild, since signing covers the exact binary.)
