@@ -23,6 +23,7 @@ CRT0        ?= $(firstword $(wildcard \
 GNU_EFI_LIB ?= $(dir $(CRT0))
 
 VERS = efi.vers
+LDS  = visor_x86_64.lds
 
 EFI_LDFLAGS = -nostdlib -znocombreloc -z notext -T $(LDS) -shared \
               -Bsymbolic -Wl,--version-script=$(VERS) -L $(GNU_EFI_LIB) \
@@ -39,7 +40,6 @@ FONT_PX ?= 64
 
 all: check-env $(TARGET)
 
-.
 check-env:
 	@test -n "$(GNU_EFI_INC)" || { \
 	  echo "ERROR: gnu-efi headers not found (looked in /usr/include/efi)."; \
