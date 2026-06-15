@@ -28,7 +28,7 @@ quiet=0
 #   (absent / empty) -> the default title "Visor"
 #   none             -> no title at all
 #   anything else    -> shown verbatim
-#title=My Rig
+#title=Visor
 
 # Text font. Currently only "jetbrains" is bundled. Empty = default.
 #font=jetbrains
@@ -81,7 +81,6 @@ quiet=0
 
 # --- Background -------------------------------------------------------------
 # Full-screen background image (PNG, RGB or RGBA). Omit for a solid backdrop.
-# If the image is missing or corrupt, Visor falls back to
 # \EFI\visor\backgrounds\default.png, then to a solid color.
 background=\EFI\visor\backgrounds\default.png
 
@@ -104,7 +103,7 @@ background=\EFI\visor\backgrounds\default.png
 #        initrd  = \path\to\initrd          (linux only, optional)
 #        cmdline = "kernel command line"     (linux only, optional)
 #        color   = #RRGGBB                   (optional per-entry name color)
-#        uuid    = partition-uuid            (windows chainload hint, optional)
+#        uuid    = partition-uuid        
 #    }
 # ----------------------------------------------------------------------------
 
@@ -122,7 +121,7 @@ linux {
 }
 
 # Windows example - chainloads the Windows Boot Manager. "kernel" is the path
-# to bootmgfw.efi; Visor loads it via its device path so the BCD is found.
+# to bootmgfw.efi;
 windows {
     name   = "Windows 11"
     type   = windows
