@@ -23,6 +23,14 @@ void efi_fclose(efi_file_t *file);
 UINTN efi_fread(efi_file_t *file, void *buf, UINTN size);
 int efi_file_exists(CHAR16 *path);
 
+int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
+
+UINTN efi_volume_count(void);
+EFI_FILE_PROTOCOL* efi_open_volume(UINTN index);
+int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path);
+EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path);
+int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
+
 typedef struct {
     void *data;
     UINTN size;
