@@ -8,7 +8,7 @@ BUILD_DIR = build
 EFI_CFLAGS = -ffreestanding -fno-stack-protector -fno-strict-aliasing \
              -fno-asynchronous-unwind-tables -fno-unwind-tables \
              -fpic -fshort-wchar -fvisibility=hidden -DGNU_EFI_USE_MS_ABI \
-             -mno-red-zone -Wall -Wextra -O2 -I include
+             -mno-red-zone -Wall -Wextra -O2 -I include -MMD -MP
 
 ifeq ($(origin CC),default)
 CC := $(shell command -v x86_64-linux-gnu-gcc 2>/dev/null || command -v gcc 2>/dev/null || echo cc)
@@ -30,7 +30,7 @@ EFI_LDFLAGS = -nostdlib -znocombreloc -z notext -T $(LDS) -shared \
               $(CRT0) -lefi -lgnuefi
 
 SRCS = main.c efi_helpers.c gui.c config.c linux_boot.c windows_boot.c \
-       png_decoder.c font_jetbrains.c
+       png_decoder.c font_jetbrains.c sha256.c hash_verify.c
 OBJS = $(SRCS:.c=.o)
 
 FONT    ?= /usr/share/fonts/TTF/JetBrainsMono-Regular.ttf
@@ -66,8 +66,10 @@ $(TARGET): $(OBJS)
 	      -I $(GNU_EFI_INC)/$(ARCH) \
 	      -c $< -o $@
 
+-include $(OBJS:.o=.d)
+
 clean:
-	rm -f $(OBJS) $(TARGET) $(BUILD_DIR)/*
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET) $(BUILD_DIR)/*
 
 install: $(TARGET)
 	./install.sh
