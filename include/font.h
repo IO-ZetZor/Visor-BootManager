@@ -18,6 +18,8 @@ typedef struct {
     unsigned short        last;
     const glyph_t        *glyphs;
     const unsigned char  *pixels;
+    unsigned int          packed_size;
+    unsigned int          unpacked_size;
 } font_t;
 
 extern const font_t jetbrains_font;
