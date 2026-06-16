@@ -40,6 +40,9 @@ typedef struct {
 #define POWER_POS_TOPRIGHT     2
 #define POWER_POS_TOPLEFT      3
 
+#define FOCUS_ENTRIES  0
+#define FOCUS_POWER    1
+
 typedef struct boot_entry {
     struct boot_entry *next;
     CHAR16 *name;
@@ -51,8 +54,11 @@ typedef struct boot_entry {
     UINTN index;
     int type;
     icon_t *icon;
+    UINTN   icon_size;
     color_t color;
     int     has_color;
+    UINT8   sha256[32];
+    int     has_sha256;
 } boot_entry_t;
 
 typedef struct {
@@ -78,6 +84,32 @@ typedef struct {
     int running;
     int action;
 
+    int   focus;
+    int   prev_focus;
+    UINTN power_sel;
+
+    INTN  anim_cur[9];
+    INTN  anim_from[9];
+    INTN  anim_to[9];
+    INTN  anim_frame;
+    int   anim_active;
+    int   anim_init;
+    int   anim_power;
+    int   anim_cross;
+    int   anim_frames;
+
+    INTN  band_y[2], band_h[2];
+    int   band_n;
+    INTN  prev_ul_y;
+    INTN  prev_box_y0, prev_box_y1;
+
+    INTN  pwr_x[3], pwr_y[3], pwr_w[3], pwr_h[3];
+    INTN  pwr_y0, pwr_y1;
+
+    UINT32 *scene_cache;
+    UINT32 *blur_cache;
+    int     scene_valid;
+
     CHAR16 *title;
     int     show_title;
     color_t title_color;
@@ -98,9 +130,20 @@ typedef struct {
     color_t reboot_color;
     color_t firmware_color;
 
+    int     power_icons;
+    UINTN   power_icon_size;
+    icon_t *shutdown_icon;
+    icon_t *reboot_icon;
+    icon_t *firmware_icon;
+
     color_t bg_color;
     color_t fg_color;
     color_t highlight_color;
+
+    int     blur;
+    int     blur_title;
+    color_t blur_color;
+    int     anim_speed;
 
     icon_t *background;
     CHAR16 *background_path;
@@ -125,9 +168,11 @@ void gui_draw_text_small(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
 void gui_draw_text_large(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
                          color_t color);
 
-void gui_draw_menu(gui_state_t *state);
+void gui_draw_menu(gui_state_t *state, int partial);
 
 void gui_present(gui_state_t *state);
+
+void gui_present_band(gui_state_t *state, INTN y, INTN h);
 
 boot_entry_t* gui_run(gui_state_t *state);
 
