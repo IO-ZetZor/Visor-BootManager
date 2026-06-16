@@ -1,17 +1,4 @@
-/* Force every symbol to local binding.
- *
- * gnu-efi's crt0 self-relocator (_relocate) only applies R_X86_64_RELATIVE
- * relocations.  When any symbol stays global/preemptible in this -shared link,
- * the linker routes references through a PLT/GOT and emits R_X86_64_JUMP_SLOT /
- * R_X86_64_GLOB_DAT relocs that _relocate never fills in.  crt0 itself calls
- * _relocate through such a PLT stub, so the image jumps into an unrelocated
- * (zero) GOT slot and faults before any code runs.
- *
- * Marking all symbols local removes them from .dynsym, leaving no preemptible
- * symbols: the linker resolves every call directly (PC-relative) and only
- * R_X86_64_RELATIVE relocs remain -- exactly what _relocate can handle.  The
- * PE entry point is taken from ENTRY(_start) in the linker script, not from
- * the dynamic symbol table, so localizing _start is harmless.
+
  */
 VISOR_1.0 {
   local:
