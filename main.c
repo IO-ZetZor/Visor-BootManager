@@ -9,6 +9,8 @@
 
 EFI_HANDLE IH;
 
+/* natsukisubaruwashere */
+
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     InitializeLib(image_handle, system_table);
 
@@ -73,6 +75,29 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
                                                     : config.highlight_color;
     gui.firmware_color  = config.has_firmware_color ? config.firmware_color
                                                     : config.highlight_color;
+
+    gui.power_icons     = config.power_icons;
+    gui.power_icon_size = config.power_icon_size;
+    gui.blur            = config.blur;
+    gui.blur_title      = config.blur_title;
+    gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
+    gui.anim_speed      = config.anim_speed;
+    {
+        int sp = config.anim_speed;
+        if (sp < 1) sp = 8;
+        if (sp > 10) sp = 10;
+        gui.anim_frames = 26 - sp * 2;
+        if (gui.anim_frames < 5) gui.anim_frames = 5;
+    }
+    if (config.power_icons) {
+        if (config.shutdown_icon) gui.shutdown_icon = gui_load_icon(config.shutdown_icon);
+        if (config.reboot_icon)   gui.reboot_icon   = gui_load_icon(config.reboot_icon);
+        if (config.firmware_icon) gui.firmware_icon = gui_load_icon(config.firmware_icon);
+        if ((config.shutdown_icon && !gui.shutdown_icon) ||
+            (config.reboot_icon   && !gui.reboot_icon)   ||
+            (config.firmware_icon && !gui.firmware_icon))
+            efi_log(L"WARN: a power icon failed to load - falling back to text for it");
+    }
 
     if (config.font) {
         char name[32]; UINTN i = 0;
@@ -157,7 +182,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     efi_print(L"Boot failed, resetting...\r\n");
 
-    for (volatile UINTN i = 0; i < 300000000UL; i++) { __asm__ volatile("pause"); }
+    BS->Stall(3 * 1000 * 1000);
 
     RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
 
