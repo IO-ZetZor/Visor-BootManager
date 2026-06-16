@@ -52,6 +52,17 @@ static int hexval(CHAR16 c) {
     return -1;
 }
 
+static int parse_sha256(CHAR16 *s, UINT8 out[32]) {
+    if (*s == '#') s++;
+    for (int i = 0; i < 32; i++) {
+        int hi = hexval(s[i * 2]);
+        int lo = hexval(s[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (UINT8)((hi << 4) | lo);
+    }
+    return s[64] == '\0';
+}
+
 static int parse_color(CHAR16 *s, color_t *out) {
     if (*s == '#') s++;
     int v[6];
@@ -66,6 +77,7 @@ static int parse_color(CHAR16 *s, color_t *out) {
     return 1;
 }
 
+/* 'emilia-chan' */
 static UINTN parse_uint(CHAR16 *s) {
     UINTN n = 0;
     while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
@@ -90,12 +102,14 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINT
     CHAR16 *uuid = NULL;
     int type = 0;
     color_t color; int has_color = 0;
+    UINT8 sha256_buf[32]; int has_sha256 = 0;
+    UINTN entry_icon_size = 0;
 
     while (*idx < count) {
         CHAR16 *line = trim(lines[*idx]);
 
         if (line[0] == '}' || line[0] == '\0') {
-            (*idx)++;
+
             break;
         }
 
@@ -120,6 +134,11 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINT
             } else if (efi_strcmp(key, L"color") == 0) {
                 has_color = parse_color(value, &color);
                 if (!has_color) efi_log(L"WARN: invalid entry color= (use #RRGGBB)");
+            } else if (efi_strcmp(key, L"sha256") == 0) {
+                has_sha256 = parse_sha256(value, sha256_buf);
+                if (!has_sha256) efi_log(L"WARN: invalid sha256= (expect 64 hex chars)");
+            } else if (efi_strcmp(key, L"icon_size") == 0) {
+                entry_icon_size = parse_uint(value);
             } else if (efi_strcmp(key, L"type") == 0) {
                 type = (value[0] == 'w' || value[0] == 'W') ? 1 : 0;
             }
@@ -131,82 +150,166 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINT
         boot_entry_t *e = config_add_entry(config, name, icon_path, kernel_path,
                                            initrd_path, cmdline, uuid, type);
         if (e && has_color) { e->color = color; e->has_color = 1; }
+        if (e) e->icon_size = entry_icon_size;
+        if (e && has_sha256) {
+            for (int i = 0; i < 32; i++) e->sha256[i] = sha256_buf[i];
+            e->has_sha256 = 1;
+        }
     }
 
     return EFI_SUCCESS;
 }
 
+static CHAR16 lc16(CHAR16 c) { return (c >= 'A' && c <= 'Z') ? (CHAR16)(c + 32) : c; }
+
+static int contains_ci(CHAR16 *hay, const CHAR16 *needle) {
+    for (UINTN i = 0; hay[i]; i++) {
+        UINTN j = 0;
+        while (needle[j] && lc16(hay[i + j]) == lc16(needle[j])) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int ends_with_ci(CHAR16 *s, const CHAR16 *suf) {
+    UINTN ls = 0, lf = 0;
+    while (s[ls]) ls++;
+    while (suf[lf]) lf++;
+    if (lf > ls) return 0;
+    for (UINTN i = 0; i < lf; i++)
+        if (lc16(s[ls - lf + i]) != lc16(suf[i])) return 0;
+    return 1;
+}
+
+static CHAR16* icon_path_for(const CHAR16 *file) {
+    CHAR16 *out = efi_allocate_pool(MAX_PATH * sizeof(CHAR16));
+    if (!out) return NULL;
+    SPrint(out, MAX_PATH * sizeof(CHAR16), L"%s\\icons\\%s", CONFIG_DIR, file);
+    return out;
+}
+
+static CHAR16* distro_icon(CHAR16 *hint) {
+    static const struct { const CHAR16 *needle; const CHAR16 *file; } map[] = {
+        { L"endeavour",  L"endeavouros.png" },
+        { L"arch",       L"arch.png" },
+        { L"fedora",     L"fedora.png" },
+        { L"mint",       L"linuxmint.png" },
+        { L"manjaro",    L"manjaro.png" },
+        { L"suse",       L"opensuse.png" },
+        { L"pop",        L"pop.png" },
+        { L"ubuntu",     L"ubuntu.png" },
+        { NULL, NULL }
+    };
+    for (int i = 0; map[i].needle; i++)
+        if (contains_ci(hint, map[i].needle)) return icon_path_for(map[i].file);
+    return icon_path_for(L"linux.png");
+}
+
+static int is_loader_efi(CHAR16 *name) {
+    static const CHAR16 *skip[] = {
+        L"grub", L"refind", L"shim", L"systemd-boot", L"bootx64",
+        L"bootia32", L"mmx64", L"fbx64", L"mokmanager", L"bootmgr", NULL
+    };
+    for (int i = 0; skip[i]; i++)
+        if (contains_ci(name, skip[i])) return 1;
+    return 0;
+}
+
+static int scan_uki_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *dir) {
+    EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
+    if (!d) return 0;
+
+    int added = 0;
+    CHAR16 name[128];
+    int is_dir;
+    while (efi_read_dirent(d, name, 128, &is_dir)) {
+        if (is_dir) continue;
+        if (!ends_with_ci(name, L".efi")) continue;
+        if (is_loader_efi(name)) continue;
+
+        CHAR16 path[MAX_PATH];
+        SPrint(path, sizeof(path), L"%s\\%s", dir, name);
+
+        CHAR16 disp[128];
+        UINTN n = 0;
+        while (name[n] && n < 127) { disp[n] = name[n]; n++; }
+        disp[n] = '\0';
+        if (n > 4) disp[n - 4] = '\0';
+
+        config_add_entry(config, efi_strdup(disp), NULL, efi_strdup(path),
+                         NULL, NULL, NULL, 0);
+        added++;
+    }
+    d->Close(d);
+    return added;
+}
+
+static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *dir) {
+    EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
+    if (!d) return 0;
+
+    int added = 0;
+    CHAR16 name[128];
+    int is_dir;
+    while (efi_read_dirent(d, name, 128, &is_dir)) {
+        if (is_dir) continue;
+        if (lc16(name[0]) != 'v' || lc16(name[1]) != 'm' || lc16(name[2]) != 'l')
+            continue;
+        if (ends_with_ci(name, L".img")) continue;
+
+        CHAR16 path[MAX_PATH];
+        SPrint(path, sizeof(path), L"%s\\%s", dir, name);
+        config_add_entry(config, efi_strdup(name), NULL, efi_strdup(path),
+                         NULL, efi_strdup(L"root=PARTUUID= ro quiet"), NULL, 0);
+        added++;
+    }
+    d->Close(d);
+    return added;
+}
+
 static EFI_STATUS detect_entries(config_t *config) {
-    EFI_FILE_IO_INTERFACE *io;
-    EFI_FILE_PROTOCOL *root;
+    static CHAR16 *windows_paths[] = {
+        L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+        L"\\EFI\\BOOT\\bootmgfw.efi",
+        NULL
+    };
 
-    EFI_STATUS status = BS->HandleProtocol(
-        ST->ConsoleInHandle,
-        &gEfiSimpleFileSystemProtocolGuid,
-        (void**)&io
-    );
+    UINTN nvol = efi_volume_count();
+    if (nvol == 0) return EFI_NOT_FOUND;
 
-    if (EFI_ERROR(status)) {
-        UINTN count;
-        EFI_HANDLE *handles = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &count);
-        if (!handles) return EFI_NOT_FOUND;
+    int windows_found = 0;
+    int uki_found = 0;
 
-        for (UINTN i = 0; i < count; i++) {
-            status = BS->HandleProtocol(handles[i], &gEfiSimpleFileSystemProtocolGuid, (void**)&io);
-            if (!EFI_ERROR(status)) {
-                status = io->OpenVolume(io, &root);
-                if (!EFI_ERROR(status)) break;
+    for (UINTN v = 0; v < nvol; v++) {
+        EFI_FILE_PROTOCOL *root = efi_open_volume(v);
+        if (!root) continue;
+
+        if (!windows_found) {
+            for (int i = 0; windows_paths[i] != NULL; i++) {
+                if (efi_file_exists_root(root, windows_paths[i])) {
+                    config_add_entry(config, L"Windows Boot Manager", NULL,
+                                     efi_strdup(windows_paths[i]), NULL, NULL, NULL, 1);
+                    windows_found = 1;
+                    break;
+                }
             }
         }
-        efi_free_pool(handles);
-        if (EFI_ERROR(status)) return EFI_NOT_FOUND;
-    } else {
-        status = io->OpenVolume(io, &root);
-        if (EFI_ERROR(status)) return status;
+
+        uki_found += scan_uki_dir(config, root, L"\\EFI\\Linux");
+
+        root->Close(root);
     }
 
-    struct {
-        CHAR16 *path;
-        CHAR16 *name;
-    } linux_paths[] = {
-        {L"\\EFI\\systemd\\systemd-bootx64.efi", L"Systemd Boot"},
-        {L"\\vmlinuz", L"Linux"},
-        {L"\\boot\\vmlinuz", L"Linux (boot)"},
-        {L"\\boot\\vmlinuz-linux", L"Arch Linux"},
-        {L"\\boot\\vmlinuz-linux-lts", L"Arch Linux LTS"},
-        {L"\\EFI\\Microsoft\\Linux\\arch-linux.efi", L"Arch Linux"},
-        {NULL, NULL}
-    };
-
-    struct {
-        CHAR16 *path;
-        CHAR16 *name;
-    } windows_paths[] = {
-        {L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi", L"Windows Boot Manager"},
-        {L"\\EFI\\BOOT\\bootmgfw.efi", L"Windows"},
-        {NULL, NULL}
-    };
-
-    for (int i = 0; windows_paths[i].path != NULL; i++) {
-        efi_file_t *f = efi_fopen(windows_paths[i].path);
-        if (f) {
-            efi_fclose(f);
-            config_add_entry(config, windows_paths[i].name, NULL,
-                           windows_paths[i].path, NULL, NULL, NULL, 1);
+    if (!uki_found) {
+        for (UINTN v = 0; v < nvol; v++) {
+            EFI_FILE_PROTOCOL *root = efi_open_volume(v);
+            if (!root) continue;
+            scan_kernel_dir(config, root, L"\\boot");
+            scan_kernel_dir(config, root, L"\\");
+            root->Close(root);
         }
     }
 
-    for (int i = 0; linux_paths[i].path != NULL; i++) {
-        efi_file_t *f = efi_fopen(linux_paths[i].path);
-        if (f) {
-            efi_fclose(f);
-            config_add_entry(config, linux_paths[i].name, NULL,
-                           linux_paths[i].path, NULL,
-                           L"root=PARTUUID=$(duref) ro quiet", NULL, 0);
-        }
-    }
-
-    root->Close(root);
     return EFI_SUCCESS;
 }
 
@@ -347,6 +450,28 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
             efi_log(L"WARN: invalid firmware_color (use #RRGGBB)");
     } else if (efi_strcmp(key, L"background") == 0) {
         config->background = dup_path(value);
+    } else if (efi_strcmp(key, L"power_icons") == 0) {
+        config->power_icons = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"power_icon_size") == 0) {
+        config->power_icon_size = parse_uint(value);
+    } else if (efi_strcmp(key, L"shutdown_icon") == 0) {
+        config->shutdown_icon = dup_path(value);
+    } else if (efi_strcmp(key, L"reboot_icon") == 0) {
+        config->reboot_icon = dup_path(value);
+    } else if (efi_strcmp(key, L"firmware_icon") == 0) {
+        config->firmware_icon = dup_path(value);
+    } else if (efi_strcmp(key, L"blur") == 0) {
+        if (*value == 'c' || *value == 'C') config->blur = 2;
+        else config->blur = (*value == '1' || *value == 't' || *value == 'y' || *value == 'f') ? 1 : 0;
+    } else if (efi_strcmp(key, L"anim_speed") == 0) {
+        config->anim_speed = (int)parse_uint(value);
+    } else if (efi_strcmp(key, L"blur_title") == 0) {
+        config->blur_title = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"blur_color") == 0) {
+        if (parse_color(value, &config->blur_color))
+            config->has_blur_color = 1;
+        else
+            efi_log(L"WARN: invalid blur_color (use #RRGGBB)");
     }
 }
 
@@ -414,6 +539,16 @@ EFI_STATUS config_parse(config_t *config) {
     config->has_shutdown_color = 0;
     config->has_reboot_color = 0;
     config->has_firmware_color = 0;
+    config->blur = 0;
+    config->blur_title = 0;
+    config->blur_color = COLOR_WHITE;
+    config->has_blur_color = 0;
+    config->anim_speed = 0;
+    config->power_icons = 0;
+    config->power_icon_size = 0;
+    config->shutdown_icon = NULL;
+    config->reboot_icon = NULL;
+    config->firmware_icon = NULL;
     config->entries = NULL;
     config->entry_count = 0;
 
@@ -495,8 +630,10 @@ boot_entry_t* config_add_entry(config_t *config,
     entry->type = type;
     entry->index = config->entry_count;
     entry->icon = NULL;
+    entry->icon_size = 0;
     entry->color = config->name_color;
     entry->has_color = 0;
+    entry->has_sha256 = 0;
     entry->next = NULL;
 
     efi_log(L"config: adding entry");
