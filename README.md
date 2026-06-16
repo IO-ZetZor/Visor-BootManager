@@ -76,29 +76,14 @@ sudo ./install.sh
 | `--esp <path>`     | Use this ESP mount point instead of auto-detecting.           |
 | `--no-build`       | Install the already-built `visor_x64.efi`.                    |
 | `--boot-entry`     | Register a `Visor` UEFI boot entry via `efibootmgr`.          |
-| `--fallback`       | Also install as `\EFI\BOOT\BOOTX64.EFI` (removable default).  |
 | `--force-config`   | Overwrite an existing `boot.conf` with the bundled example.   |
 
-Example — install, register a firmware boot entry, and set up the fallback path:
-
-```bash
-sudo ./install.sh --boot-entry --fallback
 ```
 
 After installing, **edit `<ESP>/EFI/visor/boot.conf`** to point at your real
 kernels and set your root partition.
 
-### Secure Boot
-
-Visor is unsigned, so with Secure Boot enabled you must sign it with your own
-keys. The easiest way is [`sbctl`](https://github.com/Foxboron/sbctl):
-
-```bash
-sudo sbctl sign -s <ESP>/EFI/visor/visor_x64.efi
 ```
-
-(Re-run that after every rebuild, since signing covers the exact binary.)
-
 ### Manual installation
 
 ```bash
@@ -140,6 +125,10 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `title_color`     | Title text color, `#RRGGBB`.                                                                               |
 | `name_color`      | Default entry-name color, `#RRGGBB`.                                                                       |
 | `highlight_color` | Selection accent/underline color, `#RRGGBB`.                                                               |
+| `blur`            | Blurred-glass highlight that follows the selection (entries **and** power actions), replacing the flat card. `0`/absent = flat card · `1` = frosted (blur + tint) · `clear` = clear blur (no tint). Edges are feathered. |
+| `blur_title`      | `1` = static blurred panel behind the title. Independent of `blur`.                                       |
+| `blur_color`      | Tint colour for frosted mode, `#RRGGBB`. Absent = white. Ignored when `blur=clear`.                       |
+| `anim_speed`      | Selection animation speed, `1` (slow) .. `10` (fast). Default `8`. Entry↔power cross-fades; within a row/column slides. |
 | `title_size`      | Title height in pixels. `0`/absent = `screen_height / 12`.                                                 |
 | `name_size`       | Entry-name height in pixels. `0`/absent = `16`.                                                            |
 | `icon_size`       | Icon edge length in pixels (square). `0`/absent = `64`.                                                    |
@@ -152,6 +141,11 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `shutdown_color`  | Color of the **S**hutdown hotkey letter, `#RRGGBB`. Absent = `highlight_color`.                            |
 | `reboot_color`    | Color of the **R**eboot hotkey letter, `#RRGGBB`. Absent = `highlight_color`.                              |
 | `firmware_color`  | Color of the **F**irmware hotkey letter, `#RRGGBB`. Absent = `highlight_color`.                            |
+| `power_icons`     | `1` = draw the power actions as icons instead of text (still triggered by S/R/F). Needs the `*_icon` keys.  |
+| `power_icon_size` | Power-icon edge length in pixels. `0`/absent = `40`.                                                       |
+| `shutdown_icon`   | PNG for the Shutdown action (used when `power_icons=1`). Falls back to text if missing.                     |
+| `reboot_icon`     | PNG for the Reboot action (used when `power_icons=1`). Falls back to text if missing.                       |
+| `firmware_icon`   | PNG for the Firmware action (used when `power_icons=1`). Falls back to text if missing.                     |
 | `background`      | Full-screen background image (PNG, RGB or RGBA). Falls back to `backgrounds/default.png` if missing/corrupt.|
 
 ### Boot entries (Examples)
@@ -177,14 +171,16 @@ windows {
 
 | Entry key | Meaning                                                             |
 |-----------|---------------------------------------------------------------------|
-| `name`    | Display name under the icon.                                        |
-| `type`    | `linux` or `windows`.                                               |
-| `icon`    | PNG icon (square, e.g. 128×128, RGBA recommended).                  |
+| `name`      | Display name under the icon.                                      |
+| `type`      | `linux` or `windows`.                                             |
+| `icon`      | PNG icon (square, e.g. 128×128, RGBA recommended).                |
+| `icon_size` | Per-entry icon edge length in pixels; overrides global `icon_size`|
 | `kernel`  | EFI stub kernel / UKI (`linux`) or `bootmgfw.efi` (`windows`).      |
 | `initrd`  | initrd image — Linux only, optional (omit for a UKI).               |
 | `cmdline` | Kernel command line — Linux only, optional (omit for a UKI).        |
 | `color`   | Per-entry name color, `#RRGGBB` (overrides `name_color`).           |
 | `uuid`    | Partition UUID hint for Windows chainloading, optional.             |
+| `sha256`  | Pin the image's SHA-256 (64 hex). Boot is refused on mismatch.      |
 
 ### Changing the font size
 
@@ -247,15 +243,19 @@ background=\EFI\visor\backgrounds\default.png
 
 ## Controls
 
-| Key                          | Action                          |
-|------------------------------|---------------------------------|
-| `Left` / `Right` (or `Up` / `Down`) | Move selection (wraps)   |
-| `Enter`                      | Boot the selected entry         |
-| `1`–`9`                      | Boot entry N directly           |
-| `Esc`                        | Boot the default entry          |
-| `S`                          | Shut down                       |
-| `R`                          | Reboot                          |
-| `F`                          | Enter firmware setup            |
+| Key            | Action                                                               |
+|----------------|----------------------------------------------------------------------|
+| `Left`/`Right` | Move between boot entries (wraps)                                    |
+| `Down`         | Enter the power column (Shutdown), then move down it                 |
+| `Up`           | Move up the power column; from the top, return to the boot entries   |
+| `Enter`        | Boot the focused entry, or run the focused power action              |
+| `1`–`9`        | Boot entry N directly                                                |
+| `Esc`          | Boot the default entry                                               |
+| `S`            | Shut down (works from anywhere)                                      |
+| `R`            | Reboot (works from anywhere)                                         |
+| `F`            | Enter firmware setup (works from anywhere)                           |
+
+
 
 ---
 
