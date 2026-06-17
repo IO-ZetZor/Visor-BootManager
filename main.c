@@ -37,6 +37,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     }
     efi_log(L"main: GUI ready");
 
+    efi_log(L"main: loading filesystem drivers from \\EFI\\visor\\drivers");
+    efi_load_fs_drivers();
+
     efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
     config_t config;
     status = config_parse(&config);
