@@ -120,8 +120,7 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `default`         | Index of the default entry (0-based).                                                                      |
 | `quiet`           | `1` = black screen during hand-off · `0` = show progress text.
 
-| `entries_per_page`| Entries shown per page. Extra entries get a `<`/`>` chevron; Left/Right paging cross-fades pages at `anim_speed`. Default `3`. |
-
+| `entries_per_page`| Entries shown per page. Default `3`. 
 
 | `title`           | Menu title. Empty/absent = `Visor` · `none` = no title · else verbatim.                                    |
 | `font`            | Text font. Currently `jetbrains`. Empty = default.                                                         |
