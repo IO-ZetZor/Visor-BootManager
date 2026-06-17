@@ -166,13 +166,13 @@ background=\EFI\visor\backgrounds\default.png
 #    kernel  = \vmlinuz-linux
 #    initrd  = \initramfs-linux.img
 #    cmdline = "root=PARTUUID=CHANGE-ME-TO-YOUR-ROOT-PARTUUID......"
-}
+#}
 
 # Windows example - chainloads the Windows Boot Manager. "kernel" is the path
 # to bootmgfw.efi; Visor loads it via its device path so the BCD is found.
-windows {
+#windows {
 #    name   = "Windows 11"
 #    type   = windows
 #    icon   = \EFI\visor\icons\windows.png
 #   kernel = \EFI\Microsoft\Boot\bootmgfw.efi
-}
+#}
