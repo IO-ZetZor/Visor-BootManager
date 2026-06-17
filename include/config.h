@@ -49,6 +49,7 @@ typedef struct {
     color_t blur_color;
     int     has_blur_color;
     int     anim_speed;
+    UINTN   entries_per_page;
     boot_entry_t *entries;
     UINTN entry_count;
 } config_t;
