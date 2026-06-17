@@ -51,6 +51,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     gui.entries         = config.entries;
     gui.entry_count     = config.entry_count;
+    gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
     gui.timeout         = config.timeout;
     gui.bg_color        = config.bg_color;
     gui.fg_color        = config.fg_color;
