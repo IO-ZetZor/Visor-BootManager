@@ -285,7 +285,7 @@ Obtain a driver yourself — the open-source `efifs` set provides `btrfs_x64.efi
 
 ```sh
 mkdir -p <ESP>/EFI/visor/drivers
-cp <your>/btrfs_x64.efi<ESP>/EFI/visor/drivers/
+cp <your>/btrfs_x64.efi <ESP>/EFI/visor/drivers/
 ```
 
 `boot.log` reports `drivers: started N, connecting controllers` when this works.
