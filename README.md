@@ -118,10 +118,8 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 |-------------------|------------------------------------------------------------------------------------------------------------|
 | `timeout`         | `N` = auto-boot the default after N seconds · `-1` = wait forever · `0` = boot default instantly (no menu) |
 | `default`         | Index of the default entry (0-based).                                                                      |
-| `quiet`           | `1` = black screen during hand-off · `0` = show progress text.
-
-| `entries_per_page`| Entries shown per page. Default `3`. 
-
+| `quiet`           | `1` = black screen during hand-off · `0` = show progress text.                                             |
+| `entries_per_page`| Entries shown per page. Default `3`.                                                                       |
 | `title`           | Menu title. Empty/absent = `Visor` · `none` = no title · else verbatim.                                    |
 | `font`            | Text font. Currently `jetbrains`. Empty = default.                                                         |
 | `theme`           | Load `themes/<name>.conf`; its UI values override those in `boot.conf`. See [Themes](#themes).             |
