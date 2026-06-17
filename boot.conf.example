@@ -28,7 +28,7 @@ quiet=0
 #   (absent / empty) -> the default title "Visor"
 #   none             -> no title at all
 #   anything else    -> shown verbatim
-#title=Visor
+#title=My Rig
 
 # Text font. Currently only "jetbrains" is bundled. Empty = default.
 #font=jetbrains
@@ -47,6 +47,31 @@ quiet=0
 # Accent color of the selection highlight / underline.
 #highlight_color=#7AA2F7
 
+# --- Blur highlight ---------------------------------------------------------
+# Replace the flat selection card with a blurred-glass panel that follows the
+# selection (entries AND power actions), with softly feathered edges.
+#   blur        = 0       off (flat card)
+#               = 1       frosted glass (blur + light tint)
+#               = clear   clear glass (blur only, no tint)
+#   blur_title  = 1       blurred panel behind the title (static)
+#   blur_color  = #RRGGBB tint colour for frosted mode (default white)
+# The panel blurs the background image, so it looks best over a detailed
+# background. With no background it falls back to a translucent tint.
+#blur=clear
+#blur_title=1
+#blur_color=#FFFFFF
+
+# --- Animation --------------------------------------------------------------
+# Selection animation speed, 1 (slow) .. 10 (fast). Default 8. Switching
+# between an entry and a power action cross-fades; moving within a row/column
+# slides. Same speed for both.
+#anim_speed=8
+
+# Entries shown per page. When more entries exist than fit a page, a chevron
+# (< / >) appears and Left/Right paging cross-fades between pages at anim_speed.
+# Default 3.
+#entries_per_page=3
+
 # --- Font sizes (in pixels; 0 / absent = sensible default) ------------------
 # Title height. Default scales with the screen (~ screen_height / 12).
 #title_size=120
@@ -54,11 +79,14 @@ quiet=0
 #name_size=28
 
 # --- Icons (all in pixels; 0 / absent = sensible default) -------------------
-# Icon edge length (icons are square). Default 64.
+# Icon edge length (icons are square). Default 64. This is the GLOBAL default;
+# an individual entry can override it with its own "icon_size =" (see below).
 #icon_size=128
 # Horizontal gap between icons. Default 60.
 #icon_spacing=80
 # Vertical center of the icon row. Default = middle of the screen.
+# Icons of different sizes are centered on this line; their labels share one
+# baseline below the tallest icon.
 #icon_y=560
 
 # --- Selection underline (the accent bar under the selected entry) ----------
@@ -78,53 +106,73 @@ quiet=0
 #shutdown_color=#F7768E
 #reboot_color=#E0AF68
 #firmware_color=#9ECE6A
+#
+# Show the three actions as icons instead of text. They are still
+# triggered by the S / R / F keys. Set power_icons=1 and give a PNG for each.
+# Any action without a loaded icon falls back to its text label, so a partial
+# set is fine. power_icon_size is the icon edge length in px (default 40).
+#power_icons=1
+#power_icon_size=44
+#shutdown_icon=\EFI\visor\icons\power_shutdown.png
+#reboot_icon=\EFI\visor\icons\power_reboot.png
+#firmware_icon=\EFI\visor\icons\power_firmware.png
 
 # --- Background -------------------------------------------------------------
 # Full-screen background image (PNG, RGB or RGBA). Omit for a solid backdrop.
-# \EFI\visor\backgrounds\default.png, then to a solid color.
 background=\EFI\visor\backgrounds\default.png
 
 # ============================================================================
 #  Menu keys
-#    Left/Right (or Up/Down)   move the selection
-#    Enter                     boot the selected entry
+#    Left/Right                move between boot entries
+#    Down                      enter the power column (Shutdown), then move down
+#    Up                        move up the power column; from the top, back to entries
+#    Enter                     boot the focused entry / run the focused power action
 #    1-9                       boot entry N directly
-#    S / R / F                 Shutdown / Reboot / Firmware setup
+#    S / R / F                 Shutdown / Reboot / Firmware setup (from anywhere)
 #    Esc                       boot the default entry
 # ============================================================================
 
 # ----------------------------------------------------------------------------
 #  Boot entry format
 #    entry-type {                 (entry-type is "linux" or "windows")
-#        name    = "Display Name"
-#        type    = linux | windows
-#        icon    = \path\to\icon.png
-#        kernel  = \path\to\kernel-or-efi
-#        initrd  = \path\to\initrd          (linux only, optional)
-#        cmdline = "kernel command line"     (linux only, optional)
-#        color   = #RRGGBB                   (optional per-entry name color)
-#        uuid    = partition-uuid        
+#        name      = "Display Name"
+#        type      = linux | windows
+#        icon      = \path\to\icon.png
+#        icon_size = 128                       (optional - overrides global icon_size)
+#        kernel    = \path\to\kernel-or-efi
+#        initrd    = \path\to\initrd          (linux only, optional)
+#        cmdline   = "kernel command line"     (linux only, optional)
+#        color     = #RRGGBB                   (optional per-entry name color)
+#        uuid      = partition-uuid            (windows chainload hint, optional)
+#        sha256    = <64 hex chars>            (optional - pin the image hash)
 #    }
+#
+#  Auto-detection (used only when boot.conf is absent, or has no entries):
+#    Visor scans the ESP for kernels instead of guessing fixed paths -
+#      * \EFI\Linux\*.efi          Unified Kernel Images (each becomes an entry)
+#      * \boot\vmlinuz*, \vmlinuz* raw kernels (fallback if no UKIs found)
+#      * \EFI\Microsoft\Boot\bootmgfw.efi   Windows Boot Manager
+
 # ----------------------------------------------------------------------------
 
 # Linux example - EFI stub kernel or Unified Kernel Image (UKI).
 # For a UKI, point "kernel" at the .efi and omit initrd/cmdline.
 # For a plain stub kernel, supply initrd and cmdline as shown.
-linux {
-    name    = "Arch Linux"
-    type    = linux
-    icon    = \EFI\visor\icons\arch.png
-    color   = #1793D1
-    kernel  = \vmlinuz-linux
-    initrd  = \initramfs-linux.img
-    cmdline = "root=PARTUUID=CHANGE-ME-TO-YOUR-ROOT-PARTUUID......"
+#linux {
+#    name    = "Arch Linux"
+#    type    = linux
+#    icon    = \EFI\visor\icons\arch.png
+#    color   = #1793D1
+#    kernel  = \vmlinuz-linux
+#    initrd  = \initramfs-linux.img
+#    cmdline = "root=PARTUUID=CHANGE-ME-TO-YOUR-ROOT-PARTUUID......"
 }
 
 # Windows example - chainloads the Windows Boot Manager. "kernel" is the path
-# to bootmgfw.efi;
+# to bootmgfw.efi; Visor loads it via its device path so the BCD is found.
 windows {
-    name   = "Windows 11"
-    type   = windows
-    icon   = \EFI\visor\icons\windows.png
-    kernel = \EFI\Microsoft\Boot\bootmgfw.efi
+#    name   = "Windows 11"
+#    type   = windows
+#    icon   = \EFI\visor\icons\windows.png
+#   kernel = \EFI\Microsoft\Boot\bootmgfw.efi
 }
