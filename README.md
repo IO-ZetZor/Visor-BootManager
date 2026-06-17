@@ -281,8 +281,7 @@ filesystem.
 drivers** Instead it loads whatever EFI driver *you* place in **`\EFI\visor\drivers\`** — every `*.efi`
 there is started at boot and connected to your disks.
 
-Obtain a driver yourself — the open-source `efifs` set (also packaged with
-rEFInd) provides `btrfs_x64.efi`, `ext4_x64.efi`, etc.:
+Obtain a driver yourself — the open-source `efifs` set provides `btrfs_x64.efi`, `ext4_x64.efi`, etc.:
 
 ```sh
 mkdir -p /boot/efi/EFI/visor/drivers
