@@ -175,6 +175,13 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->anim_frames = 12;
 
     state->selected = 0;
+    state->per_page = 3;
+    state->prev_page = 0;
+    state->prev_selected = 0;
+    state->page_anim = 0;
+    state->page_frame = 0;
+    state->page_old = 0;
+    state->page_old_sel = 0;
     state->entries = NULL;
     state->entry_count = 0;
     state->timeout = 0;
@@ -356,7 +363,7 @@ static UINT8 sample_cov(const unsigned char *cov, UINTN w, UINTN h,
 }
 
 static UINTN blend_glyph(gui_state_t *state, const glyph_t *g, UINT32 rgb,
-                         INTN dx, INTN dyTop, UINTN size_px, UINTN dh) {
+                         INTN dx, INTN dyTop, UINTN size_px, UINTN dh, INTN master) {
     if (g->w == 0 || g->h == 0) return g->advance * dh / size_px;
     if (!g_glyph_cov) return g->advance * dh / size_px;
     const unsigned char *cov = g_glyph_cov + g->pixel_offset;
@@ -372,6 +379,7 @@ static UINTN blend_glyph(gui_state_t *state, const glyph_t *g, UINT32 rgb,
         for (UINTN i = 0; i < dw; i++) {
             UINTN sx = (i * g->w * 256) / dw;
             UINT8 a = sample_cov(cov, g->w, g->h, sx, sy);
+            if (master < 255) a = (UINT8)((UINTN)a * (UINTN)master / 255);
             if (!a) continue;
             INTN px = dx + (INTN)i;
             if (px < 0 || px >= (INTN)state->screen_width) continue;
@@ -399,9 +407,10 @@ static UINTN text_width_px(CHAR16 *text, UINTN dh) {
     return w;
 }
 
-static void draw_text_px(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
-                         color_t color, UINTN dh) {
-    if (!text) return;
+static void draw_text_px_a(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
+                           color_t color, UINTN dh, INTN master) {
+    if (!text || master <= 0) return;
+    if (master > 255) master = 255;
     font_ensure_decoded();
     UINT32 rgb = color_to_u32(color) & 0x00FFFFFF;
     UINTN size = g_font->size;
@@ -413,8 +422,13 @@ static void draw_text_px(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
         const glyph_t *g = &g_font->glyphs[c - g_font->first];
         INTN gx = pen + (INTN)((INTN)g->left * (INTN)dh / (INTN)size);
         INTN gyTop = (INTN)baseline - (INTN)((INTN)g->top * (INTN)dh / (INTN)size);
-        pen += (INTN)blend_glyph(state, g, rgb, gx, gyTop, size, dh);
+        pen += (INTN)blend_glyph(state, g, rgb, gx, gyTop, size, dh, master);
     }
+}
+
+static void draw_text_px(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
+                         color_t color, UINTN dh) {
+    draw_text_px_a(state, text, x, y, color, dh, 255);
 }
 
 static UINTN text_width(CHAR16 *text, UINTN scale) {
@@ -774,6 +788,108 @@ static void draw_frost(gui_state_t *state, INTN x, INTN y, INTN w, INTN h, INTN 
     }
 }
 
+static boot_entry_t* entry_at(gui_state_t *state, UINTN idx) {
+    boot_entry_t *e = state->entries;
+    for (UINTN i = 0; i < idx && e; i++) e = e->next;
+    return e;
+}
+
+static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
+                      UINTN is, UINTN isp, UINTN max_ei, UINTN icon_cy,
+                      UINTN name_px, UINTN ul_th, UINTN ul_len_cfg, INTN pad,
+                      INTN master) {
+    if (master <= 0 || n == 0) return;
+    if (master > 255) master = 255;
+
+    UINTN row_top = (icon_cy > max_ei / 2) ? icon_cy - max_ei / 2 : 0;
+    UINTN ul_y    = row_top + max_ei + 10;
+    UINTN name_y  = ul_y + ul_th + 8;
+
+    UINTN total_w = 0, sel_ei = is;
+    INTN  sel_left = 0;
+    {
+        boot_entry_t *t = entry_at(state, start);
+        UINTN x = 0;
+        for (UINTN i = 0; i < n && t; i++) {
+            UINTN ei = t->icon_size ? t->icon_size : is;
+            total_w += ei + (i + 1 < n ? isp : 0);
+            x += (i ? isp : 0);
+            if (i == sel_local) { sel_left = (INTN)x; sel_ei = ei; }
+            x += ei;
+            t = t->next;
+        }
+    }
+    UINTN start_x = (state->screen_width > total_w) ? (state->screen_width - total_w) / 2 : 0;
+    sel_left += (INTN)start_x;
+
+    INTN  ecard_top = (INTN)icon_cy - (INTN)sel_ei / 2 - pad;
+    INTN  ecard_bot = (INTN)name_y + (INTN)name_px + pad / 2;
+    UINTN ul_len = ul_len_cfg ? ul_len_cfg : (sel_ei + 2 * pad - 20);
+    INTN  ulx = sel_left + (INTN)sel_ei / 2 - (INTN)ul_len / 2;
+    UINTN ul_rad = ul_th / 2; if (ul_rad > 2) ul_rad = 2;
+
+    if (sel_local < n) {
+        if (state->blur) {
+            draw_frost(state, sel_left - pad, ecard_top,
+                       (INTN)sel_ei + 2 * pad, ecard_bot - ecard_top, master);
+        } else {
+            fill_round_rect(state, sel_left - pad, ecard_top,
+                            (INTN)sel_ei + 2 * pad, ecard_bot - ecard_top,
+                            14, COLOR_WHITE, (UINT8)(38 * master / 255));
+        }
+        fill_round_rect(state, ulx, (INTN)ul_y, (INTN)ul_len, (INTN)ul_th,
+                        (INTN)ul_rad, state->underline_color,
+                        (UINT8)(230 * master / 255));
+    }
+
+    boot_entry_t *e = entry_at(state, start);
+    UINTN x = start_x;
+    for (UINTN i = 0; i < n && e; i++) {
+        UINTN ei = e->icon_size ? e->icon_size : is;
+        UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
+        if (e->icon) {
+            draw_image_sized_a(state, e->icon, x, iy, ei, master);
+        } else {
+            color_t ph = e->type == 0 ? COLOR_GREEN : COLOR_RED;
+            fill_round_rect(state, (INTN)x, (INTN)iy, (INTN)ei, (INTN)ei,
+                            12, ph, (UINT8)master);
+        }
+        color_t name_col;
+        if (e->has_color) name_col = e->color;
+        else if (i == sel_local) name_col = state->name_color;
+        else name_col = (color_t){ state->name_color.r * 7 / 10,
+                                   state->name_color.g * 7 / 10,
+                                   state->name_color.b * 7 / 10 };
+        UINTN nw = text_width_px(e->name, name_px);
+        INTN  nx = (INTN)x + (INTN)ei / 2 - (INTN)nw / 2;
+        draw_text_px_a(state, e->name, (UINTN)nx, name_y, name_col, name_px, master);
+        x += ei + isp;
+        e = e->next;
+    }
+}
+
+static void draw_chevrons(gui_state_t *state, UINTN page, UINTN per_page,
+                          UINTN start_x, UINTN total_w, UINTN isp,
+                          UINTN max_ei, UINTN icon_cy, INTN master) {
+    UINTN csz = max_ei / 2; if (csz < 18) csz = 18;
+    INTN  cy  = (INTN)icon_cy - (INTN)csz / 2;
+    INTN  gap = (INTN)(isp ? isp : 24);
+    color_t cc = { state->name_color.r * 7 / 10,
+                   state->name_color.g * 7 / 10,
+                   state->name_color.b * 7 / 10 };
+    if (page > 0) {
+        CHAR16 lt[] = L"<";
+        UINTN cw = text_width_px(lt, csz);
+        INTN lx = (INTN)start_x - gap - (INTN)cw;
+        if (lx < 0) lx = 0;
+        draw_text_px_a(state, lt, (UINTN)lx, (UINTN)cy, cc, csz, master);
+    }
+    if ((page + 1) * per_page < state->entry_count) {
+        CHAR16 gt[] = L">";
+        draw_text_px_a(state, gt, start_x + total_w + (UINTN)gap, (UINTN)cy, cc, csz, master);
+    }
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -827,17 +943,33 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     UINTN is      = state->icon_size    ? state->icon_size    : ICON_SIZE;
     UINTN isp     = state->icon_spacing ? state->icon_spacing : ICON_SPACING + 40;
 
-    UINTN total_w = 0, max_ei = is, sel_ei = is;
+    UINTN per_page = state->per_page ? state->per_page : 3;
+    UINTN page = state->selected / per_page;
+    UINTN page_start = page * per_page;
+    UINTN page_n = state->entry_count - page_start;
+    if (page_n > per_page) page_n = per_page;
+    UINTN sel_local = state->selected - page_start;
+
+    UINTN max_ei = is;
+    {
+        boot_entry_t *e = state->entries;
+        for (UINTN i = 0; i < state->entry_count && e; i++) {
+            UINTN ei = e->icon_size ? e->icon_size : is;
+            if (ei > max_ei) max_ei = ei;
+            e = e->next;
+        }
+    }
+
+    UINTN total_w = 0, sel_ei = is;
     INTN  sel_left = 0;
     {
         UINTN x = 0;
-        boot_entry_t *e = state->entries;
-        for (UINTN i = 0; i < state->entry_count; i++) {
+        boot_entry_t *e = entry_at(state, page_start);
+        for (UINTN i = 0; i < page_n && e; i++) {
             UINTN ei = e->icon_size ? e->icon_size : is;
-            if (ei > max_ei) max_ei = ei;
-            total_w += ei + (i + 1 < state->entry_count ? isp : 0);
+            total_w += ei + (i + 1 < page_n ? isp : 0);
             x += (i ? isp : 0);
-            if (i == state->selected) { sel_left = (INTN)x; sel_ei = ei; }
+            if (i == sel_local) { sel_left = (INTN)x; sel_ei = ei; }
             x += ei;
             e = e->next;
         }
@@ -885,6 +1017,52 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     }
 
     int N = state->anim_frames; if (N < 2) N = 2;
+
+    int first = !state->anim_init;
+    if (!first && page != state->prev_page && !state->page_anim) {
+        state->page_anim = 1;
+        state->page_frame = 0;
+        state->page_old = state->prev_page;
+        state->page_old_sel = state->prev_selected;
+    }
+
+    if (state->page_anim) {
+        state->page_frame++;
+        INTN fin = state->page_frame * 255 / N; if (fin > 255) fin = 255;
+        INTN fout = 255 - fin;
+
+        state->band_n = 1;
+        state->band_y[0] = (INTN)row_top - pad - 2;
+        state->band_h[0] = (INTN)(name_y + name_px + pad) + 2 - state->band_y[0];
+
+        UINTN old_start = state->page_old * per_page;
+        UINTN old_n = state->entry_count - old_start;
+        if (old_n > per_page) old_n = per_page;
+        UINTN old_sel_local = (state->page_old_sel >= old_start)
+                              ? state->page_old_sel - old_start : old_n;
+
+        draw_page(state, old_start, old_n, old_sel_local, is, isp, max_ei, icon_cy,
+                  name_px, ul_th, state->underline_length, pad, fout);
+        draw_page(state, page_start, page_n, sel_local, is, isp, max_ei, icon_cy,
+                  name_px, ul_th, state->underline_length, pad, fin);
+
+        draw_chevrons(state, page, per_page, start_x, total_w, isp, max_ei, icon_cy, fin);
+
+        if (state->page_frame >= N) {
+            state->page_anim = 0;
+            for (int k = 0; k < 9; k++)
+                state->anim_cur[k] = state->anim_from[k] = state->anim_to[k] = tgt[k];
+            state->anim_active = 0;
+            state->anim_cross = 0;
+            state->prev_ul_y   = state->anim_cur[A_ULY];
+            state->prev_box_y0 = state->anim_cur[A_BOXY] - 6;
+            state->prev_box_y1 = state->anim_cur[A_BOXY] + state->anim_cur[A_BOXH] + 6;
+            state->prev_page = page;
+            state->prev_selected = state->selected;
+        }
+        state->prev_focus = state->focus;
+        return;
+    }
 
     if (!state->anim_init) {
         for (int k = 0; k < 9; k++) state->anim_cur[k] = state->anim_to[k] = tgt[k];
@@ -1005,9 +1183,9 @@ void gui_draw_menu(gui_state_t *state, int partial) {
                         state->underline_color, 230);
     }
 
-    boot_entry_t *entry = state->entries;
+    boot_entry_t *entry = entry_at(state, page_start);
     UINTN x = start_x;
-    for (UINTN i = 0; i < state->entry_count; i++) {
+    for (UINTN i = 0; i < page_n && entry; i++) {
         UINTN ei = entry->icon_size ? entry->icon_size : is;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
 
@@ -1022,7 +1200,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         color_t name_col;
         if (entry->has_color) {
             name_col = entry->color;
-        } else if (i == state->selected && state->focus == FOCUS_ENTRIES) {
+        } else if (page_start + i == state->selected && state->focus == FOCUS_ENTRIES) {
             name_col = state->name_color;
         } else {
             name_col = (color_t){ state->name_color.r * 7 / 10,
@@ -1036,6 +1214,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         x += ei + isp;
         entry = entry->next;
     }
+
+    draw_chevrons(state, page, per_page, start_x, total_w, isp, max_ei, icon_cy, 255);
 
     if (pfocus >= 0) {
         if (state->power_icons && (pfocus == 0 ? state->shutdown_icon :
@@ -1057,6 +1237,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     }
 
     state->prev_focus = state->focus;
+    state->prev_page = page;
+    state->prev_selected = state->selected;
 
     if (partial) return;
 
@@ -1098,7 +1280,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
             else
                 for (int b = 0; b < state->band_n; b++)
                     gui_present_band(state, state->band_y[b], state->band_h[b]);
-            need_redraw = state->anim_active;
+            need_redraw = state->anim_active || state->page_anim;
             full_redraw = 0;
         }
 
@@ -1196,7 +1378,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
-        efi_sleep(state->anim_active ? 6 : 30);
+        efi_sleep((state->anim_active || state->page_anim) ? 6 : 30);
     }
 
     if (state->action != VISOR_ACTION_BOOT) return NULL;
