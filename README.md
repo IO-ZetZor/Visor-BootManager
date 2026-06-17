@@ -278,11 +278,8 @@ prefer it unless you specifically want raw `vmlinuz`+`initrd` off a Linux
 filesystem.
 
 **Optional: bring-your-own filesystem driver.** Visor **ships no filesystem
-drivers** (keeping it tiny and free of any driver's license). Instead it loads
-whatever EFI driver *you* place in **`\EFI\visor\drivers\`** — every `*.efi`
-there is started at boot and connected to your disks. Loading happens over the
-UEFI `SimpleFileSystem` protocol at runtime, an arm's-length boundary, so the
-driver's license never attaches to Visor.
+drivers** Instead it loads whatever EFI driver *you* place in **`\EFI\visor\drivers\`** — every `*.efi`
+there is started at boot and connected to your disks.
 
 Obtain a driver yourself — the open-source `efifs` set (also packaged with
 rEFInd) provides `btrfs_x64.efi`, `ext4_x64.efi`, etc.:
