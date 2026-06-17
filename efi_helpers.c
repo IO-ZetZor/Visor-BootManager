@@ -5,6 +5,32 @@
 
 extern EFI_BOOT_SERVICES *BS;
 extern EFI_SYSTEM_TABLE *ST;
+extern EFI_HANDLE IH;
+
+static EFI_HANDLE boot_device_handle(void) {
+    static EFI_HANDLE cached = NULL;
+    static int resolved = 0;
+    if (resolved) return cached;
+    resolved = 1;
+    EFI_LOADED_IMAGE *li = NULL;
+    if (!EFI_ERROR(BS->HandleProtocol(IH, &gEfiLoadedImageProtocolGuid, (void**)&li)) && li)
+        cached = li->DeviceHandle;
+    return cached;
+}
+
+static EFI_FILE_PROTOCOL *open_root_on_handle(EFI_HANDLE h) {
+    if (!h) return NULL;
+    EFI_FILE_IO_INTERFACE *io = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(h, &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
+        return NULL;
+    EFI_FILE_PROTOCOL *root = NULL;
+    if (EFI_ERROR(io->OpenVolume(io, &root))) return NULL;
+    return root;
+}
+
+EFI_FILE_PROTOCOL* efi_boot_volume_root(void) {
+    return open_root_on_handle(boot_device_handle());
+}
 
 void* efi_allocate_pool(UINTN size) {
     void *ptr = NULL;
@@ -44,42 +70,44 @@ CHAR16* efi_strchr(CHAR16 *s, CHAR16 c) {
 }
 
 efi_file_t* efi_fopen(CHAR16 *path) {
+    efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
+    if (!file) return NULL;
+    file->root = NULL;
+    file->handle = NULL;
+
+    EFI_FILE_PROTOCOL *root = efi_boot_volume_root();
+    if (root) {
+        if (!EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
+            file->root = root;
+            return file;
+        }
+        root->Close(root);
+    }
+
     UINTN count = 0;
     EFI_HANDLE *handles = efi_locate_handle_buffer(
         &gEfiSimpleFileSystemProtocolGuid, &count);
-    if (!handles) return NULL;
-
-    EFI_FILE_IO_INTERFACE *io = NULL;
-    EFI_FILE_PROTOCOL *root = NULL;
-
-    for (UINTN i = 0; i < count; i++) {
-        EFI_STATUS s = BS->HandleProtocol(handles[i],
-            &gEfiSimpleFileSystemProtocolGuid, (void**)&io);
-        if (!EFI_ERROR(s)) {
-            s = io->OpenVolume(io, &root);
-            if (!EFI_ERROR(s)) break;
+    if (handles) {
+        for (UINTN i = 0; i < count; i++) {
+            EFI_FILE_IO_INTERFACE *io = NULL;
+            if (EFI_ERROR(BS->HandleProtocol(handles[i],
+                    &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
+                continue;
+            EFI_FILE_PROTOCOL *r = NULL;
+            if (EFI_ERROR(io->OpenVolume(io, &r)) || !r)
+                continue;
+            if (!EFI_ERROR(r->Open(r, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
+                file->root = r;
+                efi_free_pool(handles);
+                return file;
+            }
+            r->Close(r);
         }
-        io = NULL;
-        root = NULL;
-    }
-    efi_free_pool(handles);
-
-    if (!root) return NULL;
-
-    efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
-    if (!file) {
-        root->Close(root);
-        return NULL;
-    }
-    file->root = root;
-
-    if (EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
-        root->Close(root);
-        efi_free_pool(file);
-        return NULL;
+        efi_free_pool(handles);
     }
 
-    return file;
+    efi_free_pool(file);
+    return NULL;
 }
 
 void efi_fclose(efi_file_t *file) {
@@ -222,6 +250,63 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return buf;
 }
 
+static int has_efi_suffix(CHAR16 *name) {
+    UINTN n = 0;
+    while (name[n]) n++;
+    if (n < 4) return 0;
+    CHAR16 c[4];
+    for (int i = 0; i < 4; i++) {
+        CHAR16 ch = name[n - 4 + i];
+        c[i] = (ch >= 'A' && ch <= 'Z') ? (CHAR16)(ch + 32) : ch;
+    }
+    return c[0] == '.' && c[1] == 'e' && c[2] == 'f' && c[3] == 'i';
+}
+
+void efi_load_fs_drivers(void) {
+    EFI_FILE_PROTOCOL *root = efi_boot_volume_root();
+    if (!root) return;
+
+    EFI_FILE_PROTOCOL *dir = efi_open_dir(root, L"\\EFI\\visor\\drivers");
+    if (!dir) { root->Close(root); return; }
+
+    int started = 0;
+    CHAR16 name[128];
+    int is_dir;
+    while (efi_read_dirent(dir, name, 128, &is_dir)) {
+        if (is_dir || !has_efi_suffix(name)) continue;
+
+        CHAR16 path[256];
+        SPrint(path, sizeof(path), L"\\EFI\\visor\\drivers\\%s", name);
+
+        efi_file_buffer_t *buf = efi_load_file(path);
+        if (!buf) continue;
+        if (buf->data && buf->size) {
+            EFI_HANDLE drv = NULL;
+            if (!EFI_ERROR(BS->LoadImage(FALSE, IH, NULL, buf->data, buf->size, &drv)) && drv) {
+                if (!EFI_ERROR(BS->StartImage(drv, NULL, NULL))) started++;
+            }
+            efi_free_pool(buf->data);
+        }
+        efi_free_pool(buf);
+    }
+    dir->Close(dir);
+    root->Close(root);
+
+    if (!started) { efi_log(L"drivers: none started"); return; }
+
+    CHAR16 msg[64];
+    SPrint(msg, sizeof(msg), L"drivers: started %d, connecting controllers", started);
+    efi_log(msg);
+
+    UINTN nh = 0;
+    EFI_HANDLE *handles = NULL;
+    if (!EFI_ERROR(BS->LocateHandleBuffer(AllHandles, NULL, NULL, &nh, &handles)) && handles) {
+        for (UINTN i = 0; i < nh; i++)
+            BS->ConnectController(handles[i], NULL, NULL, TRUE);
+        efi_free_pool(handles);
+    }
+}
+
 int visor_quiet = 0;
 
 void efi_print(CHAR16 *msg, ...) {
@@ -236,6 +321,9 @@ void efi_print(CHAR16 *msg, ...) {
 #define LOG_KEEP   3
 
 static EFI_FILE_PROTOCOL *log_open_root(void) {
+    EFI_FILE_PROTOCOL *boot_root = efi_boot_volume_root();
+    if (boot_root) return boot_root;
+
     UINTN count = 0;
     EFI_HANDLE *handles = efi_locate_handle_buffer(
         &gEfiSimpleFileSystemProtocolGuid, &count);
