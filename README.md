@@ -271,13 +271,6 @@ Most distributions enable these by default. Unified Kernel Images (e.g. from
 `systemd-ukify` or `dracut --uefi`) already bundle the stub, initrd, and
 cmdline — point `kernel` at the `.efi` and omit `initrd`/`cmdline`.
 
-## Booting from non-FAT filesystems (btrfs, ext4, …)
-
-UEFI firmware only exposes **FAT** partitions to boot loaders, so out of the box
-Visor can only read files from a FAT volume (normally the ESP). A kernel/initrd
-on a `btrfs`/`ext4` `/boot` is invisible to the firmware — and, usefully, also
-invisible to Windows, which can't corrupt what it can't see.
-
 **Recommended: Unified Kernel Images (no driver).** A UKI on the FAT ESP at
 `\EFI\Linux\*.efi` bundles the kernel, initrd and cmdline into one EFI binary
 and boots with zero extra code. This is the simplest and most portable setup —
