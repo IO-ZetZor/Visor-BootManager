@@ -162,7 +162,7 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `default`         | Index of the default entry (0-based).                                                                      |
 | `show_names`      | `1` = show entry names under icons · `0` = icons only.                                                     |
 | `text_menu`       | `1` = use text-mode instead of a graphical menu. Fallback menu if firmware denies rendering                |
-| `resolution`      | Resolution at which the menu is rendered. `native` = default. `max` = highest resolution firmware offers. `WxH` = custom resolution, eg `resolution=1920x1080` |
+| `resolution`      | Resolution at which the menu is rendered. `native` = default. `max` = highest resolution firmware offers. `WxH` = custom resolution, eg `resolution=1920x1080`. |
 | `quiet`           | `1` = black screen during hand-off · `0` = show progress text.                                             |
 | `center_info`     | `1` = show selected entry details near the bottom. Path-only when `show_names=1`                           |
 | `entries_per_page`| Entries shown per page. Default `3`.                                                                       |
