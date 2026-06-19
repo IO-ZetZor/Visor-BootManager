@@ -28,6 +28,8 @@ typedef struct {
     UINTN width;
     UINTN height;
     UINT32 *pixels;
+    UINTN scaled_size;
+    UINT32 *scaled;
 } icon_t;
 
 #define VISOR_ACTION_BOOT      0
@@ -107,7 +109,7 @@ typedef struct {
     int   anim_cross;
     int   anim_frames;
 
-    INTN  band_y[2], band_h[2];
+    INTN  band_y[4], band_h[4];
     int   band_n;
     INTN  prev_ul_y;
     INTN  prev_box_y0, prev_box_y1;
@@ -121,6 +123,9 @@ typedef struct {
 
     CHAR16 *title;
     int     show_title;
+    int     show_names;
+    int     center_info;
+    UINTN   box_radius;
     color_t title_color;
     color_t name_color;
     UINTN   title_size;
@@ -159,6 +164,8 @@ typedef struct {
 } gui_state_t;
 
 EFI_STATUS gui_init(gui_state_t *state);
+
+EFI_STATUS gui_set_mode(gui_state_t *state, UINTN want_w, UINTN want_h, int want_max);
 
 icon_t* gui_load_image(CHAR16 *path);
 
