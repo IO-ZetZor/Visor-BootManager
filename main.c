@@ -6,6 +6,7 @@
 #include "efi_helpers.h"
 #include "linux_boot.h"
 #include "windows_boot.h"
+#include "text_menu.h"
 
 EFI_HANDLE IH;
 
@@ -28,14 +29,18 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     efi_print(L"Visor loading...\r\n");
 
     efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
-    gui_state_t gui;
+    gui_state_t gui = {0};
+    int text_mode = 0;
     EFI_STATUS status = gui_init(&gui);
     if (EFI_ERROR(status)) {
-        efi_log(L"ERROR: gui_init failed - no Graphics Output Protocol or out of memory");
-        efi_print(L"GUI initialization failed\r\n");
-        return status;
+        efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
+        efi_print(L"Graphics unavailable - using text menu\r\n");
+        text_mode = 1;
+        gui.selected = 0;
+        gui.timeout_active = 1;
+    } else {
+        efi_log(L"main: GUI ready");
     }
-    efi_log(L"main: GUI ready");
 
     efi_log(L"main: loading filesystem drivers from \\EFI\\visor\\drivers");
     efi_load_fs_drivers();
@@ -52,6 +57,25 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     if (config.entry_count == 0)
         efi_log(L"WARN: no boot entries found in config or auto-detect");
 
+    if (config.text_menu && !text_mode) {
+        efi_log(L"main: text_menu=1 in config - using text mode despite available graphics");
+        text_mode = 1;
+        if (gui.backbuffer)  { efi_free_pool(gui.backbuffer);  gui.backbuffer  = NULL; }
+        if (gui.scene_cache) { efi_free_pool(gui.scene_cache); gui.scene_cache = NULL; }
+        if (gui.blur_cache)  { efi_free_pool(gui.blur_cache);  gui.blur_cache  = NULL; }
+        gui.selected = 0;
+        gui.timeout_active = 1;
+    }
+
+    if (!text_mode && (config.res_max || (config.res_w && config.res_h))) {
+        CHAR16 d[80];
+        if (config.res_max) SPrint(d, sizeof(d), L"main: applying resolution=max");
+        else SPrint(d, sizeof(d), L"main: applying resolution %dx%d",
+                    (int)config.res_w, (int)config.res_h);
+        efi_log(d);
+        gui_set_mode(&gui, config.res_w, config.res_h, config.res_max);
+    }
+
     gui.entries         = config.entries;
     gui.entry_count     = config.entry_count;
     gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
@@ -61,6 +85,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.highlight_color = config.highlight_color;
     gui.title           = config.title;
     gui.show_title      = !config.no_title;
+    gui.show_names      = config.show_names;
+    gui.center_info     = config.center_info;
+    gui.box_radius      = config.box_radius;
     gui.title_color     = config.title_color;
     gui.name_color      = config.name_color;
     gui.title_size      = config.title_size;
@@ -93,7 +120,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         gui.anim_frames = 26 - sp * 2;
         if (gui.anim_frames < 5) gui.anim_frames = 5;
     }
-    if (config.power_icons) {
+    if (!text_mode && config.power_icons) {
         if (config.shutdown_icon) gui.shutdown_icon = gui_load_icon(config.shutdown_icon);
         if (config.reboot_icon)   gui.reboot_icon   = gui_load_icon(config.reboot_icon);
         if (config.firmware_icon) gui.firmware_icon = gui_load_icon(config.firmware_icon);
@@ -103,7 +130,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
             efi_log(L"WARN: a power icon failed to load - falling back to text for it");
     }
 
-    if (config.font) {
+    if (!text_mode && config.font) {
         char name[32]; UINTN i = 0;
         for (; config.font[i] && i < sizeof(name) - 1; i++) name[i] = (char)config.font[i];
         name[i] = '\0';
@@ -114,7 +141,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         gui.selected = config.default_entry;
     }
 
-    if (config.background) {
+    if (!text_mode && config.background) {
         efi_log(L"main: loading background image");
         gui_set_background(&gui, config.background);
         if (!gui.background)
@@ -123,11 +150,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
             efi_log(L"main: background loaded");
     }
 
-    efi_log(L"main: entering menu loop");
-    boot_entry_t *selected = gui_run(&gui);
+    efi_log(text_mode ? L"main: entering text menu loop" : L"main: entering menu loop");
+    boot_entry_t *selected = text_mode ? text_menu_run(&gui) : gui_run(&gui);
     int action = gui.action;
     efi_log(L"main: menu closed");
-    gui_shutdown(&gui);
+    if (!text_mode) gui_shutdown(&gui);
 
     if (action == VISOR_ACTION_SHUTDOWN) {
         efi_log(L"action: shutdown requested - ResetSystem(Shutdown)");
