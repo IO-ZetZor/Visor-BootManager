@@ -170,6 +170,7 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `theme`           | Load `themes/<name>.conf`; its UI values override those in `boot.conf`. See [Themes](#themes).             |
 | `title_color`     | Title text color, `#RRGGBB`.                                                                               |
 | `name_color`      | Default entry-name color, `#RRGGBB`.                                                                       |
+| `box_radius`      | Corner radius (in pixels) of the selection highlight / frost box. 0 = Default                              |
 | `highlight_color` | Selection accent/underline color, `#RRGGBB`.                                                               |
 | `blur`            | Blurred-glass highlight that follows the selection (entries **and** power actions), replacing the flat card. `0`/absent = flat card · `1` = frosted (blur + tint) · `clear` = clear blur (no tint). Edges are feathered. |
 | `blur_title`      | `1` = static blurred panel behind the title. Independent of `blur`.                                       |
