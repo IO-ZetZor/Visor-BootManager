@@ -116,7 +116,10 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 |-------------------|------------------------------------------------------------------------------------------------------------|
 | `timeout`         | `N` = auto-boot the default after N seconds · `-1` = wait forever · `0` = boot default instantly (no menu) |
 | `default`         | Index of the default entry (0-based).                                                                      |
+| `show_names`      | `1` = show entry names under icons · `0` = icons only.                                                     |
+| `text_menu`       | `1` = use text-mode instead of a graphical menu. Fallback menu if firmware denies rendering                |
 | `quiet`           | `1` = black screen during hand-off · `0` = show progress text.                                             |
+| `center_info`     | `1` = show selected entry details near the bottom. Path-only when `show_names=1`                           |
 | `entries_per_page`| Entries shown per page. Default `3`.                                                                       |
 | `title`           | Menu title. Empty/absent = `Visor` · `none` = no title · else verbatim.                                    |
 | `font`            | Text font. Currently `jetbrains`. Empty = default.                                                         |
