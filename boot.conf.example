@@ -20,9 +20,35 @@ timeout=5
 # Index of the default entry (0-based, in the order entries appear below).
 default=0
 
+# 1 = use the plain text-console menu instead of the graphical one, even when a
+# graphics adapter is available. Visor ALSO falls back to this text menu
+# automatically if no Graphics Output Protocol is found, so set this only if you
+# prefer the text UI. 0 = graphical menu (default). (alias: text_mode)
+#text_menu=0
+
+# Resolution the graphical menu renders at:
+#   WxH      e.g. 1920x1080 - switch to that exact GOP mode if available
+#   max      use the highest resolution the firmware offers
+#   native   (or absent) keep the firmware's current/native mode (default)
+# If the requested WxH is not in the firmware's mode list, the current mode is
+# kept. Has no effect in text mode.
+#resolution=native
+
 # 1 = suppress all boot-progress text (plain black screen during hand-off to
 # the OS instead of "Booting <name>..."). 0 = show progress text.
 quiet=0
+
+# Graphical menu - show the name label under each icon. 0 = icons only.
+#show_names=1
+
+# Graphical menu - show details for the selected entry near the bottom of the
+# screen. When show_names=1 this is path-only; when show_names=0 it shows the
+# name above the path. (alias: centre_info)
+#center_info=0
+
+# Corner radius (in pixels) of the selection highlight / frost box. 0 = built-in
+# default. Larger = rounder; small values = squarer corners. (alias: corner_radius)
+#box_radius=14
 
 # Menu title shown at the top.
 #   (absent / empty) -> the default title "Visor"
