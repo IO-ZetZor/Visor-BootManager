@@ -413,6 +413,8 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     if (!icon) { efi_free_pool(uncomp); return NULL; }
     icon->width    = width;
     icon->height   = height;
+    icon->scaled_size = 0;
+    icon->scaled   = NULL;
     icon->pixels   = efi_allocate_pool(width * height * sizeof(UINT32));
     if (!icon->pixels) { efi_free_pool(icon); efi_free_pool(uncomp); return NULL; }
 
