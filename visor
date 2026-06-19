@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_REPO="https://github.com/IO-ZetZor/Visor-BootManager.git"
+DEFAULT_SOURCE_DIR="${VISOR_SOURCE_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/visor/source}"
+
+say() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage:
+  visor <command> [options]
+
+Commands:
+  build [make-args...]          Build visor_x64.efi
+  install [install-args...]     Run install.sh
+  update [options]              Pull latest GitHub version, build, and install
+  sign [options]                Sign installed EFI binaries with sbctl
+  uninstall [options]           Remove installed Visor files
+  status [options]              Show install/source status
+  config validate [options]      Validate a config file
+  clean                         Remove build outputs
+  doctor                        Check build/install dependencies
+  help                          Show this help
+
+Update options:
+  --esp PATH         ESP mount point to pass to install.sh
+  --repo URL         Git repository URL
+  --branch NAME      Git branch to track
+  --source-dir PATH  Local checkout path (default: ~/.cache/visor/source)
+  --boot-entry       Ensure a Visor UEFI boot entry exists
+  --sign             Sign the updated EFI binary with sbctl
+  --force-config     Replace boot.conf with the repo example
+
+Sign options:
+  --esp PATH         ESP mount point
+  --source-dir PATH  Local checkout path
+  --no-drivers      Do not sign EFI files in \EFI\visor\drivers
+
+Uninstall options:
+  --esp PATH         ESP mount point
+  --cli-dir PATH     Directory to remove the host-side command from
+  --keep-entry       Keep the UEFI boot entry
+
+Status options:
+  --esp PATH         ESP mount point
+  --source-dir PATH  Local checkout path
+
+Config validate options:
+  --file PATH        Config file to validate
+  --esp PATH         ESP mount point
+EOF
+}
+
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+script_dir() {
+    local src="${BASH_SOURCE[0]}"
+    while [ -L "$src" ]; do
+        local dir
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        src="$(readlink "$src")"
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd -P "$(dirname "$src")" && pwd
+}
+
+project_dir() {
+    local here
+    here="$(script_dir)"
+    if [ -f "$here/Makefile" ] && [ -f "$here/install.sh" ]; then
+        printf '%s\n' "$here"
+    else
+        printf '%s\n' "$DEFAULT_SOURCE_DIR"
+    fi
+}
+
+source_dir_default() {
+    printf '%s\n' "${VISOR_SOURCE_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/visor/source}"
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
+
+run_install() {
+    local script="$1"
+    shift
+    if [ "$(id -u)" -eq 0 ]; then
+        bash "$script" "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        say "Installing with sudo"
+        sudo bash "$script" "$@"
+    else
+        bash "$script" "$@"
+    fi
+}
+
+detect_esp() {
+    if command -v bootctl >/dev/null 2>&1; then
+        local p
+        p="$(bootctl --print-esp-path 2>/dev/null || true)"
+        [ -n "$p" ] && { printf '%s\n' "$p"; return 0; }
+    fi
+
+    local m
+    for m in /boot/efi /efi /boot; do
+        if mountpoint -q "$m" 2>/dev/null && [ "$(findmnt -no FSTYPE "$m" 2>/dev/null)" = vfat ]; then
+            printf '%s\n' "$m"
+            return 0
+        fi
+    done
+
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -o MOUNTPOINT,PARTTYPENAME -rn 2>/dev/null | awk -F' ' '/EFI System/ && $1!="" {print $1; exit}'
+    fi
+}
+
+resolve_esp() {
+    local esp="${1:-}"
+    if [ -n "$esp" ]; then
+        printf '%s\n' "$esp"
+        return 0
+    fi
+    detect_esp
+}
+
+project_or_die() {
+    local dir="${1:-$(project_dir)}"
+    [ -f "$dir/Makefile" ] || die "Makefile not found in $dir"
+    [ -f "$dir/install.sh" ] || die "install.sh not found in $dir"
+    printf '%s\n' "$dir"
+}
+
+cmd_build() {
+    local dir
+    dir="$(project_or_die)"
+    say "Building Visor in $dir"
+    make --no-print-directory -C "$dir" "$@"
+}
+
+cmd_install() {
+    local dir
+    dir="$(project_or_die)"
+    say "Installing Visor from $dir"
+    run_install "$dir/install.sh" "$@"
+}
+
+cmd_clean() {
+    local dir
+    dir="$(project_or_die)"
+    say "Cleaning build outputs in $dir"
+    make --no-print-directory -C "$dir" clean
+}
+
+cmd_doctor() {
+    local ok=1
+    local c
+    for c in git make objcopy; do
+        if command -v "$c" >/dev/null 2>&1; then
+            printf 'ok  %s\n' "$c"
+        else
+            printf 'miss %s\n' "$c"
+            ok=0
+        fi
+    done
+
+    if [ -d /usr/include/efi ] || [ -d /usr/local/include/efi ]; then
+        printf 'ok  gnu-efi headers\n'
+    else
+        printf 'miss gnu-efi headers\n'
+        ok=0
+    fi
+
+    if [ -f /usr/lib/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib64/gnuefi/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib/gnuefi/crt0-efi-x86_64.o ]; then
+        printf 'ok  gnu-efi crt0\n'
+    else
+        printf 'miss gnu-efi crt0\n'
+        ok=0
+    fi
+
+    [ "$ok" -eq 1 ] || return 1
+}
+
+git_default_branch() {
+    local dir="$1"
+    local ref
+    ref="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    ref="${ref#origin/}"
+    [ -n "$ref" ] && printf '%s\n' "$ref"
+}
+
+ensure_source_checkout() {
+    local repo="$1"
+    local branch="$2"
+    local dir="$3"
+
+    need_cmd git
+    mkdir -p "$(dirname "$dir")"
+
+    if [ -d "$dir/.git" ]; then
+        say "Pulling latest Visor source in $dir"
+        git -C "$dir" remote set-url origin "$repo"
+        git -C "$dir" fetch --prune origin
+        if [ -n "$branch" ]; then
+            git -C "$dir" checkout "$branch" 2>/dev/null || git -C "$dir" checkout -B "$branch" "origin/$branch"
+            git -C "$dir" pull --ff-only origin "$branch"
+        else
+            branch="$(git_default_branch "$dir")"
+            if [ -n "$branch" ]; then
+                git -C "$dir" checkout "$branch" 2>/dev/null || git -C "$dir" checkout -B "$branch" "origin/$branch"
+                git -C "$dir" pull --ff-only origin "$branch"
+            else
+                git -C "$dir" pull --ff-only
+            fi
+        fi
+    else
+        say "Cloning Visor source into $dir"
+        local clone_args=(clone)
+        [ -n "$branch" ] && clone_args+=(--branch "$branch")
+        git "${clone_args[@]}" "$repo" "$dir"
+    fi
+}
+
+validate_config_file() {
+    local file="$1"
+    awk '
+    function fail(msg) {
+        print msg > "/dev/stderr"
+        exit 1
+    }
+    function trim(s) {
+        sub(/^[ \t]+/, "", s)
+        sub(/[ \t\r]+$/, "", s)
+        return s
+    }
+    BEGIN { in_entry=0; have_name=0; have_kernel=0 }
+    {
+        sub(/\r$/, "")
+        line = trim($0)
+        if (line == "" || substr(line,1,1) == "#") next
+        if (in_entry) {
+            if (line == "}") {
+                if (!have_name) fail(FILENAME ": entry missing name")
+                if (!have_kernel) fail(FILENAME ": entry missing kernel")
+                in_entry=0
+                have_name=0
+                have_kernel=0
+                next
+            }
+            if (line ~ /^[^=]+=[^=]*$/) {
+                split(line, kv, "=")
+                key = trim(kv[1])
+                if (key == "name") have_name=1
+                if (key == "kernel") have_kernel=1
+                next
+            }
+            fail(FILENAME ": invalid entry line: " line)
+        }
+        if (line == "}" || line == "{") next
+        if (line ~ /^(entry|linux|windows)([ \t]*\{[ \t]*)?$/) {
+            in_entry=1
+            have_name=0
+            have_kernel=0
+            next
+        }
+        if (line ~ /^[^=]+=[^=]*$/) next
+        fail(FILENAME ": invalid top-level line: " line)
+    }
+    END {
+        if (in_entry) fail(FILENAME ": unterminated entry block")
+    }' "$file"
+}
+
+cmd_config_validate() {
+    local file=""
+    local esp=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file) file="${2:-}"; shift 2 ;;
+            --esp) esp="${2:-}"; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown config option: $1" ;;
+        esac
+    done
+
+    if [ -z "$file" ]; then
+        if [ -n "$esp" ]; then
+            esp="$(resolve_esp "$esp")"
+            [ -n "$esp" ] || die "could not find the ESP"
+            file="$esp/EFI/visor/boot.conf"
+        elif [ -f ./boot.conf ]; then
+            file=./boot.conf
+        else
+            esp="$(resolve_esp "$esp")"
+            [ -n "$esp" ] || die "could not find the ESP"
+            file="$esp/EFI/visor/boot.conf"
+        fi
+    fi
+
+    [ -f "$file" ] || die "config file not found: $file"
+    validate_config_file "$file"
+    say "Config is valid: $file"
+}
+
+cmd_status() {
+    local source_dir="${VISOR_SOURCE_DIR:-$(source_dir_default)}"
+    local esp=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="${2:-}"; shift 2 ;;
+            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown status option: $1" ;;
+        esac
+    done
+
+    esp="$(resolve_esp "$esp" || true)"
+    printf 'CLI path: %s\n' "$(script_dir)/$(basename "$0")"
+    printf 'Source dir: %s\n' "$source_dir"
+    if [ -d "$source_dir/.git" ]; then
+        printf 'Source commit: %s\n' "$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || printf '?')"
+        if [ -n "$(git -C "$source_dir" status --short 2>/dev/null || true)" ]; then
+            printf 'Source dirty: yes\n'
+        else
+            printf 'Source dirty: no\n'
+        fi
+    else
+        printf 'Source commit: unavailable\n'
+    fi
+
+    if [ -n "$esp" ]; then
+        local root="$esp/EFI/visor"
+        printf 'ESP: %s\n' "$esp"
+        if [ -f "$root/visor_x64.efi" ]; then
+            printf 'Installed binary: %s\n' "$root/visor_x64.efi"
+            if command -v sha256sum >/dev/null 2>&1; then
+                printf 'Installed sha256: %s\n' "$(sha256sum "$root/visor_x64.efi" | awk '{print $1}')"
+            fi
+        else
+            printf 'Installed binary: missing\n'
+        fi
+        [ -f "$root/boot.conf" ] && printf 'Config: %s\n' "$root/boot.conf" || printf 'Config: missing\n'
+        [ -f "$root/boot.log" ] && printf 'Boot log: %s\n' "$root/boot.log" || printf 'Boot log: missing\n'
+        if command -v efibootmgr >/dev/null 2>&1; then
+            if efibootmgr 2>/dev/null | grep -qi 'Visor'; then
+                printf 'UEFI entry: present\n'
+            else
+                printf 'UEFI entry: missing\n'
+            fi
+        fi
+    else
+        printf 'ESP: unavailable\n'
+    fi
+}
+
+cmd_sign() {
+    local esp=""
+    local source_dir="${VISOR_SOURCE_DIR:-$(source_dir_default)}"
+    local sign_drivers=1
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="${2:-}"; shift 2 ;;
+            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            --no-drivers) sign_drivers=0; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown sign option: $1" ;;
+        esac
+    done
+
+    need_cmd sbctl
+
+    esp="$(resolve_esp "$esp" || true)"
+    if [ -n "$esp" ] && [ -f "$esp/EFI/visor/visor_x64.efi" ]; then
+        say "Signing $esp/EFI/visor/visor_x64.efi"
+        run_root sbctl sign -s "$esp/EFI/visor/visor_x64.efi"
+        if [ "$sign_drivers" -eq 1 ] && [ -d "$esp/EFI/visor/drivers" ]; then
+            for f in "$esp"/EFI/visor/drivers/*.efi "$esp"/EFI/visor/drivers/*.EFI; do
+                [ -e "$f" ] || continue
+                say "Signing $f"
+                run_root sbctl sign -s "$f"
+            done
+        fi
+        return 0
+    fi
+
+    if [ -f "$source_dir/visor_x64.efi" ]; then
+        say "Signing $source_dir/visor_x64.efi"
+        run_root sbctl sign -s "$source_dir/visor_x64.efi"
+        return 0
+    fi
+
+    die "could not find an EFI binary to sign"
+}
+
+remove_boot_entry() {
+    if ! command -v efibootmgr >/dev/null 2>&1; then
+        warn "efibootmgr not installed; skipping boot entry removal."
+        return 0
+    fi
+
+    local line num
+    line="$(efibootmgr -v 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^Boot[0-9A-F]{4}\*/ && /Visor/ {print; exit}')"
+    [ -n "$line" ] || return 0
+    num="$(printf '%s\n' "$line" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')"
+    [ -n "$num" ] || return 0
+    say "Removing UEFI boot entry Boot${num}"
+    run_root efibootmgr -b "$num" -B
+}
+
+cmd_uninstall() {
+    local esp=""
+    local cli_dir="${CLI_DIR:-/usr/local/bin}"
+    local keep_entry=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="${2:-}"; shift 2 ;;
+            --cli-dir) cli_dir="${2:-}"; shift 2 ;;
+            --keep-entry) keep_entry=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown uninstall option: $1" ;;
+        esac
+    done
+
+    esp="$(resolve_esp "$esp" || true)"
+    if [ -n "$esp" ] && [ -d "$esp/EFI/visor" ]; then
+        say "Removing $esp/EFI/visor"
+        run_root rm -rf "$esp/EFI/visor"
+    fi
+    if [ -n "$cli_dir" ] && [ -f "$cli_dir/visor" ]; then
+        say "Removing $cli_dir/visor"
+        run_root rm -f "$cli_dir/visor"
+    fi
+    if [ "$keep_entry" -eq 0 ]; then
+        remove_boot_entry
+    fi
+}
+
+ensure_source_for_update() {
+    local repo="$1"
+    local branch="$2"
+    local dir="$3"
+    ensure_source_checkout "$repo" "$branch" "$dir"
+}
+
+cmd_update() {
+    local repo="${VISOR_REPO:-$DEFAULT_REPO}"
+    local branch="${VISOR_BRANCH:-}"
+    local source_dir="${VISOR_SOURCE_DIR:-$DEFAULT_SOURCE_DIR}"
+    local esp=""
+    local boot_entry=0
+    local sign=0
+    local force_config=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="${2:-}"; shift 2 ;;
+            --repo) repo="${2:-}"; shift 2 ;;
+            --branch) branch="${2:-}"; shift 2 ;;
+            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            --boot-entry) boot_entry=1; shift ;;
+            --sign) sign=1; shift ;;
+            --force-config) force_config=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown update option: $1" ;;
+        esac
+    done
+
+    [ -n "$repo" ] || die "repo URL is empty"
+    [ -n "$source_dir" ] || die "source directory is empty"
+
+    ensure_source_for_update "$repo" "$branch" "$source_dir"
+
+    need_cmd make
+    say "Building latest Visor"
+    make --no-print-directory -C "$source_dir"
+
+    local install_args=(--no-build --no-boot-entry --no-sign)
+    [ -n "$esp" ] && install_args+=(--esp "$esp")
+    [ "$boot_entry" -eq 1 ] && install_args+=(--boot-entry)
+    [ "$sign" -eq 1 ] && install_args+=(--sign)
+    [ "$force_config" -eq 1 ] && install_args+=(--force-config)
+
+    say "Installing updated Visor"
+    run_install "$source_dir/install.sh" "${install_args[@]}"
+    say "Visor is up to date"
+}
+
+cmd_config() {
+    local sub="${1:-help}"
+    case "$sub" in
+        validate) shift; cmd_config_validate "$@" ;;
+        help|-h|--help|"") usage ;;
+        *) die "unknown config command: $sub" ;;
+    esac
+}
+
+main() {
+    local cmd="${1:-help}"
+    case "$cmd" in
+        build) shift; cmd_build "$@" ;;
+        install) shift; cmd_install "$@" ;;
+        update) shift; cmd_update "$@" ;;
+        sign) shift; cmd_sign "$@" ;;
+        uninstall) shift; cmd_uninstall "$@" ;;
+        status) shift; cmd_status "$@" ;;
+        config) shift; cmd_config "$@" ;;
+        clean) shift; cmd_clean "$@" ;;
+        doctor) shift; cmd_doctor "$@" ;;
+        help|-h|--help|"") usage ;;
+        *) die "unknown command: $cmd" ;;
+    esac
+}
+
+main "$@"
