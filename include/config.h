@@ -13,6 +13,14 @@ typedef struct {
     INTN  timeout;
     UINTN default_entry;
     int   quiet;
+    int   text_menu;
+    UINTN res_w;
+    UINTN res_h;
+    int   res_max;
+    CHAR16 *def_cmdline;
+    int   show_names;
+    int   center_info;
+    UINTN box_radius;
     CHAR16 *theme;
     CHAR16 *title;
     int   no_title;
