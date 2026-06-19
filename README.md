@@ -162,6 +162,7 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `default`         | Index of the default entry (0-based).                                                                      |
 | `show_names`      | `1` = show entry names under icons · `0` = icons only.                                                     |
 | `text_menu`       | `1` = use text-mode instead of a graphical menu. Fallback menu if firmware denies rendering                |
+| `resolution`      | Resolution at which the menu is rendered. `native` = default. `max` = highest resolution firmware offers. `WxH` = custom resolution, eg `resolution=1920x1080` |
 | `quiet`           | `1` = black screen during hand-off · `0` = show progress text.                                             |
 | `center_info`     | `1` = show selected entry details near the bottom. Path-only when `show_names=1`                           |
 | `entries_per_page`| Entries shown per page. Default `3`.                                                                       |
@@ -172,7 +173,7 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `name_color`      | Default entry-name color, `#RRGGBB`.                                                                       |
 | `box_radius`      | Corner radius (in pixels) of the selection highlight / frost box. 0 = Default                              |
 | `highlight_color` | Selection accent/underline color, `#RRGGBB`.                                                               |
-| `blur`            | Blurred-glass highlight that follows the selection (entries **and** power actions), replacing the flat card. `0`/absent = flat card · `1` = frosted (blur + tint) · `clear` = clear blur (no tint). Edges are feathered. |
+| `blur`            | Blurred-glass highlight that follows the selection (entries **and** power actions), replacing the flat card. `0`/absent = flat card · `1` = frosted (blur + tint) · `clear` = clear blur (no tint). |
 | `blur_title`      | `1` = static blurred panel behind the title. Independent of `blur`.                                       |
 | `blur_color`      | Tint colour for frosted mode, `#RRGGBB`. Absent = white. Ignored when `blur=clear`.                       |
 | `anim_speed`      | Selection animation speed, `1` (slow) .. `10` (fast). Default `8`. Entry↔power cross-fades; within a row/column slides. |
