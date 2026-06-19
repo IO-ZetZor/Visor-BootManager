@@ -69,18 +69,62 @@ of a cryptic compiler error.
 ```bash
 sudo ./install.sh
 ```
-**Options:**
+*Options:**
 
 | Flag               | Effect                                                        |
 |--------------------|---------------------------------------------------------------|
 | `--esp <path>`     | Use this ESP mount point instead of auto-detecting.           |
 | `--no-build`       | Install the already-built `visor_x64.efi`.                    |
 | `--boot-entry`     | Register a `Visor` UEFI boot entry via `efibootmgr`.          |
+| `--no-boot-entry`  | Do not ask about creating a UEFI boot entry.                  |
+| `--sign`           | Sign Visor with `sbctl` after installing.                     |
+| `--no-sign`        | Do not ask about Secure Boot signing.                         |
+| `--fs-driver <path>` | Install an EFI filesystem driver into `\EFI\visor\drivers\`. |
+| `--no-cli`         | Do not install the host-side `visor` command.                 |
+| `--cli-dir <path>` | Install the host-side command somewhere other than `/usr/local/bin`. |
 | `--force-config`   | Overwrite an existing `boot.conf` with the bundled example.   |
-
 ```
 After installing, **edit `<ESP>/EFI/visor/boot.conf`** to point at your real
 kernels and set your root partition.
+
+```
+
+### Visor CLI
+
+The installer also adds a host-side `visor` command:
+
+```bash
+visor build
+visor install --esp /boot/efi
+visor update
+visor sign --esp /boot/efi
+visor status
+visor config validate --esp /boot/efi
+visor uninstall --esp /boot/efi
+visor clean
+visor doctor
+```
+
+`visor install` passes its arguments through to `install.sh`. `visor sign`
+signs the installed EFI binary. `visor status` reports the current install
+state. `visor config validate` checks the syntax of a config file. `visor
+doctor` checks for common build dependencies.
+
+### Updating
+
+After installation, update to the latest committed version from GitHub with:
+
+```bash
+visor update
+```
+
+The updater clones `https://github.com/IO-ZetZor/Visor-BootManager` into a local
+source checkout on first run, then uses `git pull` on later runs. It rebuilds
+Visor and runs `install.sh --no-build` without replacing your existing
+`boot.conf`. Use `visor update --esp /your/esp/mount` if ESP auto-detection is
+wrong, and `visor update --sign` if you want the updated binary signed with
+`sbctl`.
+
 ```
 ### Manual installation
 
