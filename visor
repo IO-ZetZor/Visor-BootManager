@@ -22,7 +22,6 @@ Commands:
   status [options]              Show install/source status
   config validate [options]      Validate a config file
   clean                         Remove build outputs
-  doctor                        Check build/install dependencies
   help                          Show this help
 
 Update options:
