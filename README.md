@@ -267,11 +267,11 @@ UI-only.
 
 ```conf
 # boot.conf
-theme=nord
+theme=zero
 ```
 
 ```conf
-# themes/nord.conf  (overrides boot.conf's UI)
+# themes/zero.conf  (overrides boot.conf's UI)
 title=Visor
 title_color=#88C0D0
 name_color=#ECEFF4
