@@ -30,6 +30,40 @@ static UINTN strlen16(CHAR16 *s) {
     return len;
 }
 
+static int contains_token16(CHAR16 *s, const CHAR16 *needle) {
+    if (!s || !needle) return 0;
+    for (UINTN i = 0; s[i]; i++) {
+        UINTN j = 0;
+        while (needle[j] && s[i + j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static CHAR16* efi_stub_options(boot_entry_t *entry) {
+    if (!entry->initrd_path || contains_token16(entry->cmdline, L"initrd="))
+        return entry->cmdline;
+
+    UINTN initrd_key_len = strlen16(L"initrd=");
+    UINTN initrd_len = strlen16(entry->initrd_path);
+    UINTN cmd_len = entry->cmdline ? strlen16(entry->cmdline) : 0;
+    UINTN total = initrd_key_len + initrd_len + (cmd_len ? 1 + cmd_len : 0);
+    CHAR16 *opts = efi_allocate_pool((total + 1) * sizeof(CHAR16));
+    if (!opts) return entry->cmdline;
+
+    UINTN k = 0;
+    CHAR16 *key = L"initrd=";
+    for (UINTN i = 0; key[i]; i++) opts[k++] = key[i];
+    for (UINTN i = 0; entry->initrd_path[i]; i++) opts[k++] = entry->initrd_path[i];
+    if (cmd_len) {
+        opts[k++] = ' ';
+        for (UINTN i = 0; entry->cmdline[i]; i++) opts[k++] = entry->cmdline[i];
+    }
+    opts[k] = '\0';
+    efi_log(L"linux: synthesized EFI-stub initrd= option");
+    return opts;
+}
+
 static void* load_kernel_file(CHAR16 *path, UINTN *size_out) {
     efi_file_buffer_t *buf = efi_load_file(path);
     if (!buf) return NULL;
@@ -150,35 +184,33 @@ EFI_STATUS linux_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         return EFI_NOT_FOUND;
     }
 
-    UINT32 initrd_addr = 0, initrd_size = 0;
-    if (entry->initrd_path) {
-        efi_log(L"linux: loading initrd");
-        status = linux_load_initrd_impl(entry->initrd_path, &initrd_addr, &initrd_size);
-        if (EFI_ERROR(status)) {
-            efi_log(L"WARN: initrd load failed - continuing without it");
-            efi_print(L"Warning: Could not load initrd\r\n");
-        }
-    }
-
     UINT8 *kernel = (UINT8*)kernel_data;
 
     if (kernel[0] == 'M' && kernel[1] == 'Z') {
         EFI_HANDLE kernel_handle;
 
         efi_log(L"linux: PE/UKI image, LoadImage()");
-        status = BS->LoadImage(FALSE, IH, NULL, kernel_data, kernel_size, &kernel_handle);
+        EFI_DEVICE_PATH *kernel_dp = efi_file_device_path(entry->kernel_path, NULL);
+        if (kernel_dp) {
+            status = BS->LoadImage(FALSE, IH, kernel_dp, NULL, 0, &kernel_handle);
+            efi_free_pool(kernel_dp);
+        } else {
+            efi_log(L"WARN: could not build kernel device path - falling back to source buffer");
+            status = BS->LoadImage(FALSE, IH, NULL, kernel_data, kernel_size, &kernel_handle);
+        }
         if (EFI_ERROR(status)) {
             efi_log(L"ERROR: LoadImage failed (not a valid EFI image?)");
             efi_print(L"LoadImage failed\r\n");
             return status;
         }
 
-        if (entry->cmdline) {
+        CHAR16 *load_options = efi_stub_options(entry);
+        if (load_options) {
             EFI_LOADED_IMAGE *loaded;
             status = BS->HandleProtocol(kernel_handle, &gEfiLoadedImageProtocolGuid, (void**)&loaded);
             if (!EFI_ERROR(status)) {
-                loaded->LoadOptions     = entry->cmdline;
-                loaded->LoadOptionsSize = (UINT32)((strlen16(entry->cmdline) + 1) * sizeof(CHAR16));
+                loaded->LoadOptions     = load_options;
+                loaded->LoadOptionsSize = (UINT32)((strlen16(load_options) + 1) * sizeof(CHAR16));
             }
         }
 
@@ -187,6 +219,16 @@ EFI_STATUS linux_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
         efi_log(L"ERROR: kernel StartImage returned - boot failed");
         return status;
+    }
+
+    UINT32 initrd_addr = 0, initrd_size = 0;
+    if (entry->initrd_path) {
+        efi_log(L"linux: loading initrd");
+        status = linux_load_initrd_impl(entry->initrd_path, &initrd_addr, &initrd_size);
+        if (EFI_ERROR(status)) {
+            efi_log(L"WARN: initrd load failed - continuing without it");
+            efi_print(L"Warning: Could not load initrd\r\n");
+        }
     }
 
     status = linux_setup_boot_params(kernel_data, kernel_size,
