@@ -31,6 +31,9 @@ EFI_FILE_PROTOCOL* efi_open_volume(UINTN index);
 int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
+int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid);
+EFI_DEVICE_PATH* efi_make_file_path(EFI_HANDLE handle, CHAR16 *filename);
+EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid);
 
 typedef struct {
     void *data;
