@@ -196,10 +196,16 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 
 ### Boot entries (Examples)
 
+Visor auto-detects how to boot each one from the image
+itself: a PE image with no initrd/cmdline is chainloaded (e.g. Windows
+`bootmgfw.efi`, loaded by device path so its BCD is found); a PE UKI or EFI-stub
+kernel is started with its cmdline/initrd applied if given; a raw (non-PE) kernel
+uses the Linux EFI handover path. (The old `linux`/`windows` block names still
+parse as aliases for `entry`, so existing configs keep working.)
+
 ```conf
-linux {
+entry {
     name    = "Arch Linux"      # shown under the icon
-    type    = linux             # linux | windows
     icon    = \EFI\visor\icons\arch.png
     color   = #1793D1           # optional: overrides name_color for this entry
     kernel  = \vmlinuz-linux    # EFI stub kernel or UKI .efi
@@ -207,9 +213,8 @@ linux {
     cmdline = "root=PARTUUID=... rw quiet" # optional (omit for a UKI)
 }
 
-windows {
+entry {
     name   = "Windows 11"
-    type   = windows
     icon   = \EFI\visor\icons\windows.png
     kernel = \EFI\Microsoft\Boot\bootmgfw.efi
 }
