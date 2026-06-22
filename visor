@@ -22,7 +22,6 @@ Commands:
   status [options]              Show install/source status
   config validate [options]      Validate a config file
   clean                         Remove build outputs
-  doctor                        Check build/install dependencies
   help                          Show this help
 
 Update options:
@@ -161,37 +160,6 @@ cmd_clean() {
     dir="$(project_or_die)"
     say "Cleaning build outputs in $dir"
     make --no-print-directory -C "$dir" clean
-}
-
-cmd_doctor() {
-    local ok=1
-    local c
-    for c in git make objcopy; do
-        if command -v "$c" >/dev/null 2>&1; then
-            printf 'ok  %s\n' "$c"
-        else
-            printf 'miss %s\n' "$c"
-            ok=0
-        fi
-    done
-
-    if [ -d /usr/include/efi ] || [ -d /usr/local/include/efi ]; then
-        printf 'ok  gnu-efi headers\n'
-    else
-        printf 'miss gnu-efi headers\n'
-        ok=0
-    fi
-
-    if [ -f /usr/lib/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib64/gnuefi/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib/gnuefi/crt0-efi-x86_64.o ]; then
-        printf 'ok  gnu-efi crt0\n'
-    else
-        printf 'miss gnu-efi crt0\n'
-        ok=0
-    fi
-
-    [ "$ok" -eq 1 ] || return 1
 }
 
 git_default_branch() {
