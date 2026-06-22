@@ -2,7 +2,7 @@
 
 A minimal, fast, graphical UEFI boot manager written in C.
 
-Visor draws an icon-based boot menu which combines the efficiency and speed of grub with the beauty of refind, capable of booting **Linux** (EFI stub kernels / Unified Kernel Images) or chainloading **Windows** (Windows Boot Manager). It is intentionally small: a single ~170 KB .efi, no external dependencies, no scripting bs — just a config and ur imagination.
+Visor draws an icon-based boot menu which combines the efficiency and speed of grub with the beauty of refind, capable of booting **Linux** (EFI stub kernels / Unified Kernel Images) or chainloading other efi executables (including Windows). It is intentionally small: a single ~170 KB .efi, no external dependencies, no scripting bs — just a config and ur imagination.
 
 # Visor Menu
 
