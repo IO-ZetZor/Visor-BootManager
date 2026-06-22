@@ -20,6 +20,27 @@ static CHAR16* trim(CHAR16 *s) {
     return s;
 }
 
+static int is_space16(CHAR16 c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static void strip_inline_comment(CHAR16 *s) {
+    int in_quote = 0;
+    UINTN first = 0;
+    while (s[first] && is_space16(s[first])) first++;
+
+    for (UINTN i = 0; s[i]; i++) {
+        if (s[i] == '"') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (!in_quote && s[i] == '#' && i != first && (i == 0 || is_space16(s[i - 1]))) {
+            s[i] = '\0';
+            return;
+        }
+    }
+}
+
 static CHAR16* dup_path(CHAR16 *value) {
     if (!value) return NULL;
 
@@ -93,14 +114,23 @@ static int is_header(CHAR16 *line, const CHAR16 *kw) {
     return (*r == '\0');
 }
 
-static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINTN count) {
+static int contains_ci(CHAR16 *hay, const CHAR16 *needle);
+
+static int looks_windows(CHAR16 *kernel_path) {
+    if (!kernel_path) return 0;
+    return contains_ci(kernel_path, L"bootmgfw") ||
+           contains_ci(kernel_path, L"\\Microsoft\\");
+}
+
+static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
+                              UINTN count, int win_hint) {
     CHAR16 *name = NULL;
     CHAR16 *icon_path = NULL;
     CHAR16 *kernel_path = NULL;
     CHAR16 *initrd_path = NULL;
     CHAR16 *cmdline = NULL;
     CHAR16 *uuid = NULL;
-    int type = 0;
+    int type = win_hint ? 1 : 0;
     color_t color; int has_color = 0;
     UINT8 sha256_buf[32]; int has_sha256 = 0;
     UINTN entry_icon_size = 0;
@@ -117,6 +147,7 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINT
         if (eq) {
             *eq = '\0';
             CHAR16 *key = trim(line);
+            strip_inline_comment(eq + 1);
             CHAR16 *value = trim(eq + 1);
 
             if (efi_strcmp(key, L"name") == 0) {
@@ -139,12 +170,12 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx, UINT
                 if (!has_sha256) efi_log(L"WARN: invalid sha256= (expect 64 hex chars)");
             } else if (efi_strcmp(key, L"icon_size") == 0) {
                 entry_icon_size = parse_uint(value);
-            } else if (efi_strcmp(key, L"type") == 0) {
-                type = (value[0] == 'w' || value[0] == 'W') ? 1 : 0;
             }
         }
         (*idx)++;
     }
+
+    if (!type && looks_windows(kernel_path)) type = 1;
 
     if (name && kernel_path) {
         boot_entry_t *e = config_add_entry(config, name, icon_path, kernel_path,
@@ -309,6 +340,9 @@ static EFI_STATUS detect_entries(config_t *config) {
         L"\\EFI\\BOOT\\bootmgfw.efi",
         NULL
     };
+
+    config->show_names = 0;
+    config->center_info = 1;
 
     UINTN nvol = efi_volume_count();
     if (nvol == 0) return EFI_NOT_FOUND;
@@ -561,6 +595,7 @@ static void apply_theme(config_t *config, CHAR16 *name) {
             if (eq) {
                 *eq = '\0';
                 CHAR16 *key = trim(line);
+                strip_inline_comment(eq + 1);
                 CHAR16 *value = trim(eq + 1);
                 if (efi_strcmp(key, L"theme") != 0)
                     apply_global(config, key, value);
@@ -657,16 +692,18 @@ EFI_STATUS config_parse(config_t *config) {
         if (eq) {
             *eq = '\0';
             CHAR16 *key = trim(line);
+            strip_inline_comment(eq + 1);
             CHAR16 *value = trim(eq + 1);
             apply_global(config, key, value);
             continue;
         }
 
         if (line[0] == 'e' || line[0] == 'l' || line[0] == 'w') {
+            int win_hint = is_header(line, L"windows");
             if (is_header(line, L"entry") ||
                 is_header(line, L"linux") ||
-                is_header(line, L"windows")) {
-                parse_entry(config, lines, &i, line_count);
+                win_hint) {
+                parse_entry(config, lines, &i, line_count, win_hint);
             }
         }
     }
