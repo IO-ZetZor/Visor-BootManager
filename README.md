@@ -223,7 +223,6 @@ entry {
 | Entry key | Meaning                                                             |
 |-----------|---------------------------------------------------------------------|
 | `name`      | Display name under the icon.                                      |
-| `type`      | `linux` or `windows`.                                             |
 | `icon`      | PNG icon (square, e.g. 128×128, RGBA recommended).                |
 | `icon_size` | Per-entry icon edge length in pixels; overrides global `icon_size`|
 | `kernel`  | EFI stub kernel / UKI (`linux`) or `bootmgfw.efi` (`windows`).      |
