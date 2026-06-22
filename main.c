@@ -190,8 +190,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     }
 
     efi_log(selected->name);
-    efi_log(selected->type == 1 ? L"main: booting Windows entry"
-                                : L"main: booting Linux entry");
+    efi_log(L"main: booting entry (auto-detecting boot method)");
 
     visor_quiet = config.quiet;
     if (visor_quiet) {
@@ -203,11 +202,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     efi_print(selected->name);
     efi_print(L"\r\n");
 
-    if (selected->type == 1) {
-        status = windows_boot(selected, ST);
-    } else {
-        status = linux_boot(selected, ST);
-    }
+    status = visor_boot(selected, ST);
 
     efi_log(L"ERROR: boot returned (control should have transferred to the OS)");
 
