@@ -13,7 +13,7 @@ FS_DRIVER=""
 INSTALL_CLI=1
 CLI_DIR="${CLI_DIR:-/usr/local/bin}"
 
-VISOR_DIR_REL="EFI/visor"          # install dir, relative to the ESP root
+VISOR_DIR_REL="EFI/visor"          
 EFI_NAME="visor_x64.efi"
 CLI_NAME="visor"
 
@@ -50,7 +50,6 @@ ask() {
     case "$reply" in [yY]|[yY][eE][sS]) echo 1 ;; *) echo 0 ;; esac
 }
 
-# --- parse args -------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
         --esp)          ESP="${2:-}"; shift 2 ;;
@@ -76,15 +75,12 @@ if [ -n "$FS_DRIVER" ]; then
     esac
 fi
 
-# --- locate the ESP ---------------------------------------------------------
 detect_esp() {
-    # 1) systemd's bootctl knows the ESP if it is installed.
     if command -v bootctl >/dev/null 2>&1; then
         local p
         p="$(bootctl --print-esp-path 2>/dev/null || true)"
         [ -n "$p" ] && { echo "$p"; return; }
     fi
-    # 2) Common mount points backed by a vfat filesystem.
     local m
     for m in /boot/efi /efi /boot; do
         if mountpoint -q "$m" 2>/dev/null && \
@@ -92,7 +88,6 @@ detect_esp() {
             echo "$m"; return
         fi
     done
-    # 3) Any mounted vfat partition flagged as an ESP.
     if command -v lsblk >/dev/null 2>&1; then
         lsblk -o MOUNTPOINT,PARTTYPENAME -rn 2>/dev/null | \
             awk -F' ' '/EFI System/ && $1!="" {print $1; exit}'
@@ -109,19 +104,16 @@ say "Using ESP: $ESP"
 
 DEST="$ESP/$VISOR_DIR_REL"
 
-# --- build ------------------------------------------------------------------
 if [ "$DO_BUILD" -eq 1 ]; then
     say "Building $EFI_NAME ..."
     make --no-print-directory
 fi
 [ -f "$EFI_NAME" ] || die "$EFI_NAME not found - build first or drop --no-build."
 
-# --- write access check -----------------------------------------------------
 if [ ! -w "$ESP" ]; then
     die "No write permission on $ESP. Re-run with sudo."
 fi
 
-# --- install binary + assets ------------------------------------------------
 say "Installing into $DEST"
 mkdir -p "$DEST/icons" "$DEST/backgrounds"
 install -m 0644 "$EFI_NAME" "$DEST/$EFI_NAME"
@@ -141,7 +133,6 @@ if [ "$INSTALL_CLI" -eq 1 ] && [ -f "$CLI_NAME" ]; then
     fi
 fi
 
-# --- default config (do not clobber an existing one) ------------------------
 CONF="$DEST/boot.conf"
 if [ -f "$CONF" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
     say "Keeping existing config: $CONF (use --force-config to replace)"
@@ -151,7 +142,6 @@ else
     warn "Edit $CONF and set your kernel paths / root PARTUUID before rebooting."
 fi
 
-# --- optional filesystem driver (bring-your-own; none bundled) --------------
 DRIVER_DEST=""
 if [ -n "$FS_DRIVER" ]; then
     mkdir -p "$DEST/drivers"
@@ -160,7 +150,6 @@ if [ -n "$FS_DRIVER" ]; then
     say "Installed filesystem driver: $DRIVER_DEST"
 fi
 
-# --- optional UEFI boot entry -----------------------------------------------
 [ "$DO_BOOT_ENTRY" -eq -1 ] && DO_BOOT_ENTRY="$(ask 'Add a UEFI boot entry for Visor with efibootmgr?')"
 if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
     if ! command -v efibootmgr >/dev/null 2>&1; then
@@ -183,7 +172,6 @@ if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
     fi
 fi
 
-# --- optional Secure Boot signing (sbctl) -----------------------------------
 [ "$DO_SIGN" -eq -1 ] && DO_SIGN="$(ask 'Sign Visor for Secure Boot with sbctl?')"
 if [ "$DO_SIGN" -eq 1 ]; then
     if ! command -v sbctl >/dev/null 2>&1; then
