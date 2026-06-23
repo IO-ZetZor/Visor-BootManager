@@ -35,6 +35,16 @@ static UINTN strlen16(CHAR16 *s) {
 #define LINUX_EFI_INITRD_MEDIA_GUID \
     { 0x5568e427, 0x68fc, 0x4f3d, { 0xac, 0x74, 0xca, 0x55, 0x52, 0x31, 0xcc, 0x68 } }
 
+typedef struct visor_lf2_protocol visor_lf2_protocol_t;
+typedef EFI_STATUS (EFIAPI *visor_lf2_load_t)(visor_lf2_protocol_t *This,
+                                              EFI_DEVICE_PATH_PROTOCOL *FilePath,
+                                              BOOLEAN BootPolicy,
+                                              UINTN *BufferSize, VOID *Buffer);
+struct visor_lf2_protocol { visor_lf2_load_t LoadFile; };
+
+static EFI_GUID visor_load_file2_guid =
+    { 0x4006c0c1, 0xfcb3, 0x403e, { 0x99, 0x6d, 0x4a, 0x6c, 0x87, 0x24, 0xe0, 0x6d } };
+
 typedef struct {
     VENDOR_DEVICE_PATH vendor;
     EFI_DEVICE_PATH    end;
@@ -43,7 +53,7 @@ typedef struct {
 static void  *g_initrd_data = NULL;
 static UINTN  g_initrd_size = 0;
 
-static EFI_STATUS EFIAPI initrd_load_file(EFI_LOAD_FILE2_PROTOCOL *This,
+static EFI_STATUS EFIAPI initrd_load_file(visor_lf2_protocol_t *This,
                                           EFI_DEVICE_PATH_PROTOCOL *FilePath,
                                           BOOLEAN BootPolicy, UINTN *BufferSize, VOID *Buffer) {
     (void)This; (void)FilePath;
@@ -59,7 +69,7 @@ static EFI_STATUS EFIAPI initrd_load_file(EFI_LOAD_FILE2_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
-static EFI_LOAD_FILE2_PROTOCOL initrd_lf2 = { initrd_load_file };
+static visor_lf2_protocol_t initrd_lf2 = { initrd_load_file };
 static initrd_dev_path_t initrd_dp = {
     .vendor = {
         .Header = { MEDIA_DEVICE_PATH, MEDIA_VENDOR_DP,
@@ -77,7 +87,7 @@ static EFI_HANDLE initrd_register(void *data, UINTN size) {
     EFI_HANDLE h = NULL;
     EFI_STATUS s = BS->InstallMultipleProtocolInterfaces(&h,
         &gEfiDevicePathProtocolGuid, &initrd_dp,
-        &gEfiLoadFile2ProtocolGuid, &initrd_lf2,
+        &visor_load_file2_guid, &initrd_lf2,
         NULL);
     if (EFI_ERROR(s)) { g_initrd_data = NULL; g_initrd_size = 0; return NULL; }
     return h;
@@ -87,7 +97,7 @@ static void initrd_unregister(EFI_HANDLE h) {
     if (h)
         BS->UninstallMultipleProtocolInterfaces(h,
             &gEfiDevicePathProtocolGuid, &initrd_dp,
-            &gEfiLoadFile2ProtocolGuid, &initrd_lf2,
+            &visor_load_file2_guid, &initrd_lf2,
             NULL);
     g_initrd_data = NULL;
     g_initrd_size = 0;
@@ -239,6 +249,16 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         return EFI_SECURITY_VIOLATION;
     }
 
+    int sb = efi_secure_boot_enabled();
+    int shim = efi_shim_verify(kernel_data, kernel_size);
+    if (shim == 0) {
+        efi_log(L"ERROR: SHIM_LOCK verification failed - refusing to boot image");
+        efi_print(L"Secure Boot: image verification failed\r\n");
+        efi_free_pool(kernel_data);
+        return EFI_SECURITY_VIOLATION;
+    }
+    if (shim == 1) efi_log(L"secure: image verified via SHIM_LOCK");
+
     UINT8 *kernel = (UINT8*)kernel_data;
 
     if (kernel[0] == 'M' && kernel[1] == 'Z') {
@@ -302,6 +322,13 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             efi_free_pool(initrd_buf);
         }
         return status;
+    }
+
+    if (sb && shim != 1) {
+        efi_log(L"ERROR: Secure Boot on but raw kernel is unverifiable (no SHIM_LOCK) - refusing");
+        efi_print(L"Secure Boot: refusing unverified kernel\r\n");
+        efi_free_pool(kernel_data);
+        return EFI_SECURITY_VIOLATION;
     }
 
     UINT32 initrd_addr = 0, initrd_size = 0;
