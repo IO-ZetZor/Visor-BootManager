@@ -457,6 +457,14 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->show_names = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"center_info") == 0 || efi_strcmp(key, L"centre_info") == 0) {
         config->center_info = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"remember_last") == 0 || efi_strcmp(key, L"remember") == 0) {
+        config->remember_last = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"recovery_entries") == 0 || efi_strcmp(key, L"recovery") == 0) {
+        config->recovery_entries = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"mouse") == 0 || efi_strcmp(key, L"pointer") == 0) {
+        config->mouse = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"editor") == 0) {
+        config->editor = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"box_radius") == 0 || efi_strcmp(key, L"corner_radius") == 0) {
         config->box_radius = parse_uint(value);
     } else if (efi_strcmp(key, L"resolution") == 0) {
@@ -464,7 +472,7 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         if (efi_strcmp(value, L"max") == 0 || efi_strcmp(value, L"highest") == 0) {
             config->res_max = 1;
         } else if (efi_strcmp(value, L"native") == 0 || value[0] == '\0') {
-            /* keep firmware default */
+
         } else {
             UINTN w = 0;
             while (*value >= '0' && *value <= '9') { w = w * 10 + (*value - '0'); value++; }
@@ -606,6 +614,98 @@ static void apply_theme(config_t *config, CHAR16 *name) {
     efi_free_pool(buf);
 }
 
+#define MAX_THEMES 32
+
+static CHAR16* resolve_rotating_theme(int cycle) {
+    EFI_FILE_PROTOCOL *root = efi_boot_volume_root();
+    if (!root) return NULL;
+    CHAR16 dir[MAX_PATH];
+    SPrint(dir, sizeof(dir), L"%s\\themes", CONFIG_DIR);
+    EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
+    root->Close(root);
+    if (!d) return NULL;
+
+    CHAR16 names[MAX_THEMES][64];
+    int n = 0;
+    CHAR16 name[128];
+    int is_dir;
+    while (n < MAX_THEMES && efi_read_dirent(d, name, 128, &is_dir)) {
+        if (is_dir || !ends_with_ci(name, L".conf")) continue;
+        UINTN k = 0;
+        while (name[k] && k < 63) { names[n][k] = name[k]; k++; }
+        names[n][k] = '\0';
+        if (k > 5) names[n][k - 5] = '\0';
+        n++;
+    }
+    d->Close(d);
+    if (n == 0) return NULL;
+
+    for (int a = 1; a < n; a++) {
+        CHAR16 tmp[64];
+        UINTN t = 0; while (names[a][t]) { tmp[t] = names[a][t]; t++; } tmp[t] = '\0';
+        int b = a - 1;
+        while (b >= 0 && efi_strcmp(names[b], tmp) > 0) {
+            UINTN c = 0; while (names[b][c]) { names[b + 1][c] = names[b][c]; c++; } names[b + 1][c] = '\0';
+            b--;
+        }
+        UINTN c = 0; while (tmp[c]) { names[b + 1][c] = tmp[c]; c++; } names[b + 1][c] = '\0';
+    }
+
+    UINT32 idx;
+    if (cycle) {
+        UINT32 saved = 0;
+        efi_get_var_u32(L"VisorThemeIndex", &saved);
+        idx = saved % (UINT32)n;
+        efi_set_var_u32(L"VisorThemeIndex", (idx + 1) % (UINT32)n);
+    } else {
+        idx = efi_rand() % (UINT32)n;
+    }
+    efi_log(L"config: rotated theme selected");
+    efi_log(names[idx]);
+    return efi_strdup(names[idx]);
+}
+
+static void add_recovery_entries(config_t *config) {
+    static const CHAR16 *suffix = L"systemd.unit=rescue.target nomodeset";
+
+    boot_entry_t *orig[MAX_THEMES];
+    int n = 0;
+    for (boot_entry_t *e = config->entries; e && n < MAX_THEMES; e = e->next)
+        orig[n++] = e;
+
+    for (int i = 0; i < n; i++) {
+        boot_entry_t *o = orig[i];
+        if (o->type == 1 || !o->kernel_path) continue;
+
+        UINTN nlen = 0; while (o->name[nlen]) nlen++;
+        CHAR16 *rname = efi_allocate_pool((nlen + 16) * sizeof(CHAR16));
+        SPrint(rname, (nlen + 16) * sizeof(CHAR16), L"%s (recovery)", o->name);
+
+        UINTN olen = 0; if (o->cmdline) while (o->cmdline[olen]) olen++;
+        UINTN slen = 0; while (suffix[slen]) slen++;
+        CHAR16 *rcmd = efi_allocate_pool((olen + slen + 2) * sizeof(CHAR16));
+        if (olen) SPrint(rcmd, (olen + slen + 2) * sizeof(CHAR16), L"%s %s", o->cmdline, suffix);
+        else      SPrint(rcmd, (olen + slen + 2) * sizeof(CHAR16), L"%s", suffix);
+
+        boot_entry_t *r = config_add_entry(config, rname,
+            o->icon_path ? efi_strdup(o->icon_path) : NULL,
+            efi_strdup(o->kernel_path),
+            o->initrd_path ? efi_strdup(o->initrd_path) : NULL,
+            rcmd,
+            o->uuid ? efi_strdup(o->uuid) : NULL,
+            o->type);
+        if (r) {
+            r->color = o->color;
+            r->has_color = o->has_color;
+            r->icon_size = o->icon_size;
+            if (o->has_sha256) {
+                for (int k = 0; k < 32; k++) r->sha256[k] = o->sha256[k];
+                r->has_sha256 = 1;
+            }
+        }
+    }
+}
+
 EFI_STATUS config_parse(config_t *config) {
 
     config->timeout = 5;
@@ -619,6 +719,10 @@ EFI_STATUS config_parse(config_t *config) {
     config->show_names = 1;
     config->center_info = 0;
     config->box_radius = 0;
+    config->remember_last = 0;
+    config->recovery_entries = 0;
+    config->mouse = 1;
+    config->editor = 1;
     config->theme = NULL;
     config->title = NULL;
     config->no_title = 0;
@@ -708,13 +812,24 @@ EFI_STATUS config_parse(config_t *config) {
         }
     }
 
-    if (config->theme) apply_theme(config, config->theme);
+    if (config->theme) {
+        if (efi_strcmp(config->theme, L"random") == 0 ||
+            efi_strcmp(config->theme, L"cycle") == 0) {
+            int cycle = (efi_strcmp(config->theme, L"cycle") == 0);
+            CHAR16 *chosen = resolve_rotating_theme(cycle);
+            efi_free_pool(config->theme);
+            config->theme = chosen;
+        }
+        if (config->theme) apply_theme(config, config->theme);
+    }
 
     efi_free_pool(buf);
 
     if (config->entry_count == entry_count_before_parse) {
         detect_entries(config);
     }
+
+    if (config->recovery_entries) add_recovery_entries(config);
 
     return EFI_SUCCESS;
 }
