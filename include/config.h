@@ -21,6 +21,10 @@ typedef struct {
     int   show_names;
     int   center_info;
     UINTN box_radius;
+    int   remember_last;
+    int   recovery_entries;
+    int   mouse;
+    int   editor;
     CHAR16 *theme;
     CHAR16 *title;
     int   no_title;
