@@ -141,6 +141,21 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         gui.selected = config.default_entry;
     }
 
+    gui.editor_enabled = config.editor;
+    gui.mouse_enabled  = config.mouse;
+
+    if (config.remember_last) {
+        CHAR16 *last = efi_get_var_str(L"VisorLastEntry");
+        if (last) {
+            UINTN i = 0;
+            for (boot_entry_t *e = gui.entries; e; e = e->next, i++) {
+                if (efi_strcmp(e->name, last) == 0) { gui.selected = i; break; }
+            }
+            efi_free_pool(last);
+            efi_log(L"main: remember_last - preselected previously booted entry");
+        }
+    }
+
     if (!text_mode && config.background) {
         efi_log(L"main: loading background image");
         gui_set_background(&gui, config.background);
@@ -191,6 +206,14 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     efi_log(selected->name);
     efi_log(L"main: booting entry (auto-detecting boot method)");
+
+    if (gui.override_cmdline) {
+        selected->cmdline = gui.override_cmdline;
+        efi_log(L"main: using cmdline edited at the menu (one-shot)");
+    }
+
+    if (config.remember_last)
+        efi_set_var_str(L"VisorLastEntry", selected->name);
 
     visor_quiet = config.quiet;
     if (visor_quiet) {
