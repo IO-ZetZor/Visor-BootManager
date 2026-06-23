@@ -13,7 +13,7 @@ FS_DRIVER=""
 INSTALL_CLI=1
 CLI_DIR="${CLI_DIR:-/usr/local/bin}"
 
-VISOR_DIR_REL="EFI/visor"          
+VISOR_DIR_REL="EFI/visor"
 EFI_NAME="visor_x64.efi"
 CLI_NAME="visor"
 
@@ -76,11 +76,13 @@ if [ -n "$FS_DRIVER" ]; then
 fi
 
 detect_esp() {
+
     if command -v bootctl >/dev/null 2>&1; then
         local p
         p="$(bootctl --print-esp-path 2>/dev/null || true)"
         [ -n "$p" ] && { echo "$p"; return; }
     fi
+
     local m
     for m in /boot/efi /efi /boot; do
         if mountpoint -q "$m" 2>/dev/null && \
@@ -88,6 +90,7 @@ detect_esp() {
             echo "$m"; return
         fi
     done
+
     if command -v lsblk >/dev/null 2>&1; then
         lsblk -o MOUNTPOINT,PARTTYPENAME -rn 2>/dev/null | \
             awk -F' ' '/EFI System/ && $1!="" {print $1; exit}'
@@ -106,9 +109,19 @@ DEST="$ESP/$VISOR_DIR_REL"
 
 if [ "$DO_BUILD" -eq 1 ]; then
     say "Building $EFI_NAME ..."
-    make --no-print-directory
+    rm -f "$EFI_NAME"
+    if ! make --no-print-directory; then
+        die "Build failed - not installing. Fix the errors above (see README 'Requirements')."
+    fi
+    [ -f "$EFI_NAME" ] || die "Build reported success but $EFI_NAME is missing - aborting."
 fi
 [ -f "$EFI_NAME" ] || die "$EFI_NAME not found - build first or drop --no-build."
+
+if command -v objdump >/dev/null 2>&1; then
+    if ! objdump -h "$EFI_NAME" 2>/dev/null | grep -q '\.text'; then
+        die "$EFI_NAME looks malformed (no .text section) - refusing to install."
+    fi
+fi
 
 if [ ! -w "$ESP" ]; then
     die "No write permission on $ESP. Re-run with sudo."
