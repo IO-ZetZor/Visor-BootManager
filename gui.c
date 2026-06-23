@@ -12,8 +12,6 @@ icon_t* png_load(UINT8 *data, UINTN size);
 
 static const font_t *g_font = &jetbrains_font;
 
-/* partraschebestgirlever */
-
 static const unsigned char *g_glyph_cov = 0;
 static const font_t        *g_cov_for   = 0;
 
@@ -242,6 +240,37 @@ EFI_STATUS gui_init(gui_state_t *state) {
 
     state->background = NULL;
     state->background_path = NULL;
+
+    state->editor_enabled = 1;
+    state->editing = 0;
+    state->edit_len = 0;
+    state->edit_cursor = 0;
+    state->override_cmdline = NULL;
+
+    state->mouse_enabled = 1;
+    state->spp = NULL;
+    state->app = NULL;
+    state->has_pointer = 0;
+    state->cursor_active = 0;
+    state->cursor_x = (INTN)state->screen_width / 2;
+    state->cursor_y = (INTN)state->screen_height / 2;
+    state->hit_n = 0;
+    {
+        EFI_GUID spg = EFI_SIMPLE_POINTER_PROTOCOL_GUID;
+        EFI_GUID apg = EFI_ABSOLUTE_POINTER_PROTOCOL_GUID;
+        EFI_SIMPLE_POINTER_PROTOCOL *sp = NULL;
+        EFI_ABSOLUTE_POINTER_PROTOCOL *ap = NULL;
+        if (!EFI_ERROR(BS->LocateProtocol(&spg, NULL, (void**)&sp)) && sp) {
+            sp->Reset(sp, FALSE);
+            state->spp = sp;
+            state->has_pointer = 1;
+        }
+        if (!EFI_ERROR(BS->LocateProtocol(&apg, NULL, (void**)&ap)) && ap) {
+            ap->Reset(ap, FALSE);
+            state->app = ap;
+            state->has_pointer = 1;
+        }
+    }
 
     state->backbuffer = efi_allocate_pool(
         state->screen_width * state->screen_height * sizeof(UINT32));
@@ -1367,9 +1396,19 @@ void gui_draw_menu(gui_state_t *state, int partial) {
 
     boot_entry_t *entry = entry_at(state, page_start);
     UINTN x = start_x;
+    state->hit_n = 0;
     for (UINTN i = 0; i < page_n && entry; i++) {
         UINTN ei = entry->icon_size ? entry->icon_size : is;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
+
+        if (state->hit_n < 32) {
+            int h = state->hit_n++;
+            state->hit_x[h] = (INTN)x;
+            state->hit_y[h] = (INTN)iy;
+            state->hit_w[h] = (INTN)ei;
+            state->hit_h[h] = (INTN)ei;
+            state->hit_idx[h] = page_start + i;
+        }
 
         if (entry->icon) {
             draw_image_sized(state, entry->icon, x, iy, ei);
@@ -1428,6 +1467,260 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     }
 }
 
+#define CUR_W 18
+#define CUR_H 24
+
+static void draw_cursor(gui_state_t *state) {
+    INTN cx = state->cursor_x, cy = state->cursor_y;
+    for (INTN j = 0; j <= 20; j++) {
+        INTN w = (j <= 14) ? j + 1 : (20 - j) * 3;
+        if (w < 1) w = 1;
+        fill_rect_alpha(state, cx - 1, cy + j, w + 2, 1, COLOR_BLACK, 220);
+    }
+    for (INTN j = 0; j <= 20; j++) {
+        INTN w = (j <= 14) ? j + 1 : (20 - j) * 3;
+        if (w < 1) w = 1;
+        fill_rect_alpha(state, cx, cy + j, w, 1, COLOR_WHITE, 255);
+    }
+}
+
+static void cursor_backing_save(gui_state_t *state, INTN ox, INTN oy) {
+    for (INTN j = 0; j < CUR_H; j++)
+        for (INTN i = 0; i < CUR_W; i++) {
+            UINT32 *p = get_pixel(state, (UINTN)(ox + i), (UINTN)(oy + j));
+            state->cursor_save[j * CUR_W + i] = p ? *p : 0;
+        }
+}
+
+static void cursor_backing_restore(gui_state_t *state, INTN ox, INTN oy) {
+    for (INTN j = 0; j < CUR_H; j++)
+        for (INTN i = 0; i < CUR_W; i++) {
+            UINT32 *p = get_pixel(state, (UINTN)(ox + i), (UINTN)(oy + j));
+            if (p) *p = state->cursor_save[j * CUR_W + i];
+        }
+}
+
+static void cursor_overlay(gui_state_t *state) {
+    cursor_backing_save(state, state->cursor_x - 1, state->cursor_y);
+    state->cur_prev_x = state->cursor_x;
+    state->cur_prev_y = state->cursor_y;
+    state->cursor_saved = 1;
+    draw_cursor(state);
+    gui_present_band(state, state->cursor_y, CUR_H);
+}
+
+static void cursor_move(gui_state_t *state) {
+    INTN old_y = state->cur_prev_y;
+    if (state->cursor_saved)
+        cursor_backing_restore(state, state->cur_prev_x - 1, state->cur_prev_y);
+    cursor_backing_save(state, state->cursor_x - 1, state->cursor_y);
+    state->cur_prev_x = state->cursor_x;
+    state->cur_prev_y = state->cursor_y;
+    state->cursor_saved = 1;
+    draw_cursor(state);
+    INTN ny = state->cursor_y;
+    INTN lo = old_y < ny ? old_y : ny;
+    INTN hi = (old_y > ny ? old_y : ny) + CUR_H;
+    if (hi - lo <= 2 * CUR_H)
+        gui_present_band(state, lo, hi - lo);
+    else {
+        gui_present_band(state, old_y, CUR_H);
+        gui_present_band(state, ny, CUR_H);
+    }
+}
+
+static void draw_editor_overlay(gui_state_t *state) {
+    UINTN W = state->screen_width, H = state->screen_height;
+    fill_rect_alpha(state, 0, 0, (INTN)W, (INTN)H, COLOR_BLACK, 150);
+
+    UINTN th = state->name_size ? state->name_size : 20;
+    if (th < 18) th = 18;
+    UINTN bw = W * 8 / 10, bx = (W - bw) / 2;
+    UINTN bh = th * 4, by = (H - bh) / 2;
+
+    if (state->blur)
+        draw_frost(state, (INTN)bx, (INTN)by, (INTN)bw, (INTN)bh, 255);
+    else
+        fill_round_rect(state, (INTN)bx, (INTN)by, (INTN)bw, (INTN)bh,
+                        state->box_radius ? (INTN)state->box_radius : 14,
+                        COLOR_BLACK, 215);
+
+    draw_text_px_a(state, L"Edit boot options   (Enter = boot, Esc = cancel)",
+                   bx + 20, by + 12, state->highlight_color, th * 3 / 4, 255);
+
+    UINTN tx = bx + 20, ty = by + 12 + th;
+    draw_text_px_a(state, state->edit_buf, tx, ty, COLOR_WHITE, th, 255);
+
+    CHAR16 tmp[512];
+    UINTN k = 0;
+    for (; k < state->edit_cursor && k < 511; k++) tmp[k] = state->edit_buf[k];
+    tmp[k] = 0;
+    UINTN caret = tx + text_width_px(tmp, th);
+    fill_rect_alpha(state, (INTN)caret, (INTN)ty, 2, (INTN)th, COLOR_WHITE, 255);
+}
+
+static void editor_enter(gui_state_t *state) {
+    boot_entry_t *e = entry_at(state, state->selected);
+    state->edit_len = 0;
+    if (e && e->cmdline)
+        while (e->cmdline[state->edit_len] && state->edit_len < 511) {
+            state->edit_buf[state->edit_len] = e->cmdline[state->edit_len];
+            state->edit_len++;
+        }
+    state->edit_buf[state->edit_len] = 0;
+    state->edit_cursor = state->edit_len;
+    state->editing = 1;
+}
+
+static int editor_key(gui_state_t *state, EFI_INPUT_KEY *key) {
+    if (key->UnicodeChar == 0x0D) {
+        state->edit_buf[state->edit_len] = 0;
+        state->override_cmdline = efi_strdup(state->edit_buf);
+        state->editing = 0;
+        return 1;
+    }
+    if (key->UnicodeChar == 0x1B || (key->UnicodeChar == 0x00 && key->ScanCode == 0x17)) {
+        state->editing = 0;
+        return -1;
+    }
+    if (key->UnicodeChar == 0x08) {
+        if (state->edit_cursor > 0) {
+            for (UINTN i = state->edit_cursor - 1; i + 1 < state->edit_len; i++)
+                state->edit_buf[i] = state->edit_buf[i + 1];
+            state->edit_len--;
+            state->edit_cursor--;
+            state->edit_buf[state->edit_len] = 0;
+        }
+        return 0;
+    }
+    if (key->UnicodeChar == 0x00) {
+        if (key->ScanCode == 0x04 && state->edit_cursor > 0) state->edit_cursor--;
+        else if (key->ScanCode == 0x03 && state->edit_cursor < state->edit_len) state->edit_cursor++;
+        return 0;
+    }
+    CHAR16 c = key->UnicodeChar;
+    if (c >= 0x20 && state->edit_len < 510) {
+        for (UINTN i = state->edit_len; i > state->edit_cursor; i--)
+            state->edit_buf[i] = state->edit_buf[i - 1];
+        state->edit_buf[state->edit_cursor] = c;
+        state->edit_len++;
+        state->edit_cursor++;
+        state->edit_buf[state->edit_len] = 0;
+    }
+    return 0;
+}
+
+static int point_in(INTN px, INTN py, INTN x, INTN y, INTN w, INTN h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+static int poll_pointer(gui_state_t *state, int *menu_redraw) {
+    if (!state->mouse_enabled || !state->has_pointer) return 0;
+    static int prev_btn = 0;
+    int moved = 0, btn = 0, scroll = 0;
+
+    if (state->app) {
+        EFI_ABSOLUTE_POINTER_PROTOCOL *ap = state->app;
+        EFI_ABSOLUTE_POINTER_STATE st;
+        while (!EFI_ERROR(ap->GetState(ap, &st)) && ap->Mode) {
+            UINT64 minx = ap->Mode->AbsoluteMinX, maxx = ap->Mode->AbsoluteMaxX;
+            UINT64 miny = ap->Mode->AbsoluteMinY, maxy = ap->Mode->AbsoluteMaxY;
+            if (maxx > minx)
+                state->cursor_x = (INTN)((st.CurrentX - minx) * (state->screen_width - 1) / (maxx - minx));
+            if (maxy > miny)
+                state->cursor_y = (INTN)((st.CurrentY - miny) * (state->screen_height - 1) / (maxy - miny));
+            moved = 1;
+            if (st.ActiveButtons & EFI_ABSP_TouchActive) btn = 1;
+        }
+    }
+    if (state->spp) {
+        EFI_SIMPLE_POINTER_PROTOCOL *sp = state->spp;
+        EFI_SIMPLE_POINTER_STATE st;
+        INTN dx = 0, dy = 0;
+        while (!EFI_ERROR(sp->GetState(sp, &st))) {
+            UINT64 rx = sp->Mode ? sp->Mode->ResolutionX : 0;
+            UINT64 ry = sp->Mode ? sp->Mode->ResolutionY : 0;
+            INTN mx = st.RelativeMovementX, my = st.RelativeMovementY;
+            if (rx > 1) mx = mx / (INTN)rx;
+            if (ry > 1) my = my / (INTN)ry;
+            dx += mx; dy += my;
+            if (st.RelativeMovementZ > 0) scroll = 1;
+            else if (st.RelativeMovementZ < 0) scroll = -1;
+            if (st.LeftButton) btn = 1;
+        }
+        if (dx || dy) {
+            state->cursor_x += dx * 4;
+            state->cursor_y += dy * 4;
+            moved = 1;
+        }
+    }
+
+    if (state->cursor_x < 0) state->cursor_x = 0;
+    if (state->cursor_y < 0) state->cursor_y = 0;
+    if (state->cursor_x >= (INTN)state->screen_width)  state->cursor_x = (INTN)state->screen_width - 1;
+    if (state->cursor_y >= (INTN)state->screen_height) state->cursor_y = (INTN)state->screen_height - 1;
+
+    if (scroll > 0 && state->selected + 1 < state->entry_count) {
+        state->selected++; state->focus = FOCUS_ENTRIES; *menu_redraw = 1;
+    } else if (scroll < 0 && state->selected > 0) {
+        state->selected--; state->focus = FOCUS_ENTRIES; *menu_redraw = 1;
+    }
+
+    if (moved) {
+        state->cursor_active = 1;
+        if (state->timeout_active) { state->timeout_active = 0; *menu_redraw = 1; }
+        int hovered = 0;
+        for (int i = 0; i < state->hit_n; i++) {
+            if (point_in(state->cursor_x, state->cursor_y,
+                         state->hit_x[i], state->hit_y[i], state->hit_w[i], state->hit_h[i])) {
+                if (state->hit_idx[i] != state->selected || state->focus != FOCUS_ENTRIES) {
+                    state->selected = state->hit_idx[i];
+                    state->focus = FOCUS_ENTRIES;
+                    *menu_redraw = 1;
+                }
+                hovered = 1;
+                break;
+            }
+        }
+        if (!hovered)
+            for (int i = 0; i < 3; i++) {
+                if (state->pwr_w[i] <= 0) continue;
+                if (point_in(state->cursor_x, state->cursor_y,
+                             state->pwr_x[i], state->pwr_y[i], state->pwr_w[i], state->pwr_h[i])) {
+                    if (state->focus != FOCUS_POWER || state->power_sel != (UINTN)i) {
+                        state->focus = FOCUS_POWER;
+                        state->power_sel = (UINTN)i;
+                        *menu_redraw = 1;
+                    }
+                    break;
+                }
+            }
+    }
+
+    int clicked = (btn && !prev_btn);
+    prev_btn = btn;
+    if (clicked) {
+        for (int i = 0; i < state->hit_n; i++) {
+            if (point_in(state->cursor_x, state->cursor_y,
+                         state->hit_x[i], state->hit_y[i], state->hit_w[i], state->hit_h[i])) {
+                state->selected = state->hit_idx[i];
+                state->focus = FOCUS_ENTRIES;
+                state->action = VISOR_ACTION_BOOT;
+                return 1;
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            if (state->pwr_w[i] <= 0) continue;
+            if (point_in(state->cursor_x, state->cursor_y,
+                         state->pwr_x[i], state->pwr_y[i], state->pwr_w[i], state->pwr_h[i])) {
+                state->action = VISOR_ACTION_SHUTDOWN + i;
+                return 1;
+            }
+        }
+    }
+    return moved ? 2 : 0;
+}
+
 boot_entry_t* gui_run(gui_state_t *state) {
     EFI_STATUS status;
     EFI_INPUT_KEY key;
@@ -1447,14 +1740,34 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
     while (state->running) {
         if (need_redraw) {
+            INTN ghost_y = -1;
+            if (state->cursor_saved) {
+                cursor_backing_restore(state, state->cur_prev_x - 1, state->cur_prev_y);
+                ghost_y = state->cur_prev_y;
+                state->cursor_saved = 0;
+            }
             gui_draw_menu(state, !full_redraw);
-            if (full_redraw)
+            if (state->editing) draw_editor_overlay(state);
+            if (full_redraw || state->editing) {
                 gui_present(state);
-            else
+            } else {
                 for (int b = 0; b < state->band_n; b++)
                     gui_present_band(state, state->band_y[b], state->band_h[b]);
+                if (ghost_y >= 0) gui_present_band(state, ghost_y, CUR_H);
+            }
             need_redraw = state->anim_active || state->page_anim;
             full_redraw = 0;
+            if (state->cursor_active && !state->editing)
+                cursor_overlay(state);
+        }
+
+        if (!state->editing) {
+            int menu_rd = 0;
+            int pr = poll_pointer(state, &menu_rd);
+            if (pr == 1) state->running = 0;
+            else if (menu_rd) need_redraw = 1;
+            else if (pr == 2 && state->cursor_active && !need_redraw)
+                cursor_move(state);
         }
 
         status = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
@@ -1462,10 +1775,22 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
             if (state->timeout_active) { state->timeout_active = 0; need_redraw = 1; full_redraw = 1; }
 
+            if (state->editing) {
+                editor_key(state, &key);
+                need_redraw = 1; full_redraw = 1;
+                continue;
+            }
+
             CHAR16 uc = key.UnicodeChar;
             if (uc >= 'a' && uc <= 'z') uc -= 32;
 
-            if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
+            if (uc == 'E') {
+                if (state->focus == FOCUS_ENTRIES && state->editor_enabled && state->entry_count > 0) {
+                    editor_enter(state);
+                    need_redraw = 1; full_redraw = 1;
+                }
+            }
+            else if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
             else if (uc == 'R') { state->action = VISOR_ACTION_REBOOT; state->running = 0; }
             else if (uc == 'F') { state->action = VISOR_ACTION_FIRMWARE; state->running = 0; }
             else if (key.UnicodeChar == 0x0D) {
@@ -1551,7 +1876,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
-        efi_sleep((state->anim_active || state->page_anim) ? 6 : 30);
+        efi_sleep((state->anim_active || state->page_anim) ? 6
+                  : (state->cursor_active ? 12 : 30));
     }
 
     if (state->action != VISOR_ACTION_BOOT) return NULL;
