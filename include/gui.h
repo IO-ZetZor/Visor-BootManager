@@ -161,6 +161,26 @@ typedef struct {
 
     icon_t *background;
     CHAR16 *background_path;
+
+    int     editor_enabled;
+    int     editing;
+    CHAR16  edit_buf[512];
+    UINTN   edit_len;
+    UINTN   edit_cursor;
+    CHAR16 *override_cmdline;
+
+    int     mouse_enabled;
+    void   *spp;
+    void   *app;
+    int     has_pointer;
+    int     cursor_active;
+    INTN    cursor_x, cursor_y;
+    INTN    cur_prev_x, cur_prev_y;
+    int     cursor_saved;
+    UINT32  cursor_save[18 * 24];
+    INTN    hit_x[32], hit_y[32], hit_w[32], hit_h[32];
+    UINTN   hit_idx[32];
+    int     hit_n;
 } gui_state_t;
 
 EFI_STATUS gui_init(gui_state_t *state);
