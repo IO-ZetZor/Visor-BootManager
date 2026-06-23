@@ -60,4 +60,14 @@ void efi_sleep(UINTN milliseconds);
 
 UINT64 efi_get_tick(void);
 
+int efi_secure_boot_enabled(void);
+int efi_shim_verify(void *buf, UINTN size);
+
+CHAR16* efi_get_var_str(CHAR16 *name);
+void efi_set_var_str(CHAR16 *name, CHAR16 *val);
+int efi_get_var_u32(CHAR16 *name, UINT32 *out);
+void efi_set_var_u32(CHAR16 *name, UINT32 val);
+
+UINT32 efi_rand(void);
+
 #endif
