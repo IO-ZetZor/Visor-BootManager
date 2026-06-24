@@ -78,7 +78,10 @@ installs it — all in one go:
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManager/main/get.sh)"
 ```
 
-(or with `wget`: `sh -c "$(wget -qO- https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManager/main/get.sh)"`)
+(or with `wget`)
+```sh
+sh -c "$(wget -qO- https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManager/main/get.sh)"
+```
 
 ### Manual install 
 
