@@ -400,3 +400,12 @@ fails — most problems are one descriptive line away.
 
 MASSIVELY INSPIRED BY rEFInd!!
 
+---
+
+### Donations (For Indian supporters)
+
+If you like what i'm doing, and want to support me on this project and others that WILL be coming soon, It'll be greatly appreciated :)
+
+UPI ID : 'zetzor.anand@fam'
+
+![QR](assets/donate-qr.png)
