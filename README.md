@@ -61,6 +61,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManage
 ```sh
 sh -c "$(wget -qO- https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManager/main/get.sh)"
 ```
+---
 
 ## Building
 
