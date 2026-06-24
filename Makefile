@@ -2,22 +2,29 @@ ARCH = x86_64
 TARGET = visor_x64.efi
 BUILD_DIR = build
 
-EFI_CFLAGS = -ffreestanding -fno-stack-protector -fno-strict-aliasing \
-             -fno-asynchronous-unwind-tables -fno-unwind-tables \
-             -fcf-protection=none -fno-PIE \
-             -fpic -fshort-wchar -fvisibility=hidden -DGNU_EFI_USE_MS_ABI \
-             -mno-red-zone -Wall -Wextra -O2 -I include -MMD -MP
-
 ifeq ($(origin CC),default)
 CC := $(shell command -v x86_64-linux-gnu-gcc 2>/dev/null || command -v gcc 2>/dev/null || echo cc)
 endif
 OBJCOPY ?= objcopy
 
-GNU_EFI_INC ?= $(firstword $(wildcard /usr/include/efi /usr/local/include/efi))
+CF_PROTECTION := $(shell echo 'int main(void){return 0;}' | $(CC) -fcf-protection=none -x c -c - -o /dev/null 2>/dev/null && echo -fcf-protection=none)
+
+EFI_CFLAGS = -ffreestanding -fno-stack-protector -fno-strict-aliasing \
+             -fno-asynchronous-unwind-tables -fno-unwind-tables \
+             $(CF_PROTECTION) -fno-PIE \
+             -fpic -fshort-wchar -fvisibility=hidden -DGNU_EFI_USE_MS_ABI \
+             -mno-red-zone -Wall -Wextra -O2 -I include -MMD -MP
+
+GNU_EFI_INC ?= $(firstword $(wildcard \
+                   /usr/include/efi \
+                   /usr/local/include/efi \
+                   /usr/include/gnuefi/efi))
 CRT0        ?= $(firstword $(wildcard \
                    /usr/lib/crt0-efi-x86_64.o \
                    /usr/lib64/gnuefi/crt0-efi-x86_64.o \
-                   /usr/lib/gnuefi/crt0-efi-x86_64.o))
+                   /usr/lib/gnuefi/crt0-efi-x86_64.o \
+                   /usr/lib/x86_64-linux-gnu/crt0-efi-x86_64.o \
+                   /usr/lib/x86_64-linux-gnu/gnuefi/crt0-efi-x86_64.o))
 GNU_EFI_LIB ?= $(dir $(CRT0))
 
 VERS = efi.vers
