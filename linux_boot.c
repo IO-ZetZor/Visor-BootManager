@@ -351,6 +351,12 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     setup_header_t *hdr = (setup_header_t*)(kernel + LINUX_SETUP_HEADER_OFFSET);
     UINT32 handover_offset = hdr->handover_offset;
 
+    if ((UINTN)LINUX_SETUP_SECTOR_SIZE + handover_offset >= kernel_size) {
+        efi_log(L"ERROR: kernel handover offset out of range - refusing to jump");
+        efi_print(L"Bad kernel (handover offset)\r\n");
+        return EFI_INVALID_PARAMETER;
+    }
+
     linux_efi_handover_t handover_info;
     handover_info.image_handle  = IH;
     handover_info.system_table  = st;
