@@ -49,6 +49,7 @@ CHAR16* efi_strdup(CHAR16 *src) {
     UINTN len = 0;
     while (src[len]) len++;
     CHAR16 *dst = efi_allocate_pool((len + 1) * sizeof(CHAR16));
+    if (!dst) return NULL;
     for (UINTN i = 0; i <= len; i++) {
         dst[i] = src[i];
     }
@@ -366,6 +367,12 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     file->handle->GetPosition(file->handle, &size);
     file->handle->SetPosition(file->handle, 0);
 
+    if (size == 0 || size > 256ULL * 1024 * 1024) {
+        efi_log(L"WARN: file size is zero or implausibly large - skipping");
+        efi_fclose(file);
+        return NULL;
+    }
+
     efi_file_buffer_t *buf = efi_allocate_pool(sizeof(efi_file_buffer_t));
     if (!buf) {
         efi_fclose(file);
@@ -404,6 +411,7 @@ void efi_load_fs_drivers(void) {
     EFI_FILE_PROTOCOL *dir = efi_open_dir(root, L"\\EFI\\visor\\drivers");
     if (!dir) { root->Close(root); return; }
 
+    int sb = efi_secure_boot_enabled();
     int started = 0;
     CHAR16 name[128];
     int is_dir;
@@ -416,9 +424,13 @@ void efi_load_fs_drivers(void) {
         efi_file_buffer_t *buf = efi_load_file(path);
         if (!buf) continue;
         if (buf->data && buf->size) {
-            EFI_HANDLE drv = NULL;
-            if (!EFI_ERROR(BS->LoadImage(FALSE, IH, NULL, buf->data, buf->size, &drv)) && drv) {
-                if (!EFI_ERROR(BS->StartImage(drv, NULL, NULL))) started++;
+            if (sb && efi_shim_verify(buf->data, buf->size) != 1) {
+                efi_log(L"WARN: driver failed Secure Boot verification - skipping");
+            } else {
+                EFI_HANDLE drv = NULL;
+                if (!EFI_ERROR(BS->LoadImage(FALSE, IH, NULL, buf->data, buf->size, &drv)) && drv) {
+                    if (!EFI_ERROR(BS->StartImage(drv, NULL, NULL))) started++;
+                }
             }
             efi_free_pool(buf->data);
         }
@@ -493,18 +505,30 @@ static EFI_FILE_PROTOCOL *log_open_root(void) {
     return root;
 }
 
+static EFI_FILE_PROTOCOL *g_log_root = NULL;
+static EFI_FILE_PROTOCOL *g_log_file = NULL;
+
+static EFI_FILE_PROTOCOL *log_file_open(void) {
+    if (g_log_file) return g_log_file;
+    g_log_root = log_open_root();
+    if (!g_log_root) return NULL;
+    EFI_FILE_PROTOCOL *f = NULL;
+    if (EFI_ERROR(g_log_root->Open(g_log_root, &f, LOG_PATH,
+            EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) || !f) {
+        g_log_root->Close(g_log_root);
+        g_log_root = NULL;
+        return NULL;
+    }
+    f->SetPosition(f, 0xFFFFFFFFFFFFFFFFULL);
+    g_log_file = f;
+    return f;
+}
+
 void efi_log(CHAR16 *msg) {
     if (!msg) return;
 
-    EFI_FILE_PROTOCOL *root = log_open_root();
-    if (!root) return;
-
-    EFI_FILE_PROTOCOL *f = NULL;
-    EFI_STATUS s = root->Open(root, &f, LOG_PATH,
-        EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
-    if (EFI_ERROR(s) || !f) { root->Close(root); return; }
-
-    f->SetPosition(f, 0xFFFFFFFFFFFFFFFFULL);
+    EFI_FILE_PROTOCOL *f = log_file_open();
+    if (!f) return;
 
     UINTN cs = log_elapsed_cs();
     CHAR16 pfx[20];
@@ -525,8 +549,6 @@ void efi_log(CHAR16 *msg) {
     UINTN wsize = n;
     f->Write(f, &wsize, line);
     f->Flush(f);
-    f->Close(f);
-    root->Close(root);
 }
 
 void efi_log_begin(void) {
@@ -660,8 +682,7 @@ static EFI_GUID visor_var_guid = { 0xb9d4f5a2, 0x7c3e, 0x4f1a,
     { 0x9a, 0x6b, 0x2d, 0x8e, 0x1f, 0x44, 0x77, 0x10 } };
 
 #define VISOR_VAR_ATTRS (EFI_VARIABLE_NON_VOLATILE | \
-                         EFI_VARIABLE_BOOTSERVICE_ACCESS | \
-                         EFI_VARIABLE_RUNTIME_ACCESS)
+                         EFI_VARIABLE_BOOTSERVICE_ACCESS)
 
 int efi_secure_boot_enabled(void) {
     UINT8 sb = 0;
