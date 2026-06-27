@@ -63,6 +63,7 @@ typedef struct {
     int     anim_speed;
     UINTN   entries_per_page;
     boot_entry_t *entries;
+    boot_entry_t *tail;
     UINTN entry_count;
 } config_t;
 
