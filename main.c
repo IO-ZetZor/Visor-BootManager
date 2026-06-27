@@ -189,10 +189,14 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         UINT32 attr;
         RT->GetVariable(L"OsIndications", &gEfiGlobalVariableGuid, &attr, &sz, &osind);
         osind |= 0x0000000000000001ULL;
-        RT->SetVariable(L"OsIndications", &gEfiGlobalVariableGuid,
+        EFI_STATUS sv = RT->SetVariable(L"OsIndications", &gEfiGlobalVariableGuid,
                         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
                         EFI_VARIABLE_RUNTIME_ACCESS,
                         sizeof(osind), &osind);
+        if (EFI_ERROR(sv)) {
+            efi_log(L"WARN: could not set OsIndications - firmware may not enter setup");
+            efi_print(L"Could not request firmware setup (continuing reboot)\r\n");
+        }
         RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
         return EFI_SUCCESS;
     }
