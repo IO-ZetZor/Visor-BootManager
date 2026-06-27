@@ -316,6 +316,7 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     UINT8  bit_depth  = 0, color_type = 0;
     UINT8 *idat_data  = NULL;
     UINTN  idat_size  = 0;
+    UINTN  idat_cap   = 0;
 
     while (offset + 12 <= size) {
         UINT32 chunk_len = ((UINT32)data[offset]     << 24) |
@@ -348,16 +349,22 @@ icon_t* png_load(UINT8 *data, UINTN size) {
             color_type = data[offset + 17];
         }
         else if (type[0] == 'I' && type[1] == 'D' && type[2] == 'A' && type[3] == 'T') {
-            UINT8 *new_idat = efi_allocate_pool(idat_size + chunk_len);
-            if (!new_idat) break;
-            if (idat_data && idat_size > 0) {
-                for (UINTN i = 0; i < idat_size; i++) new_idat[i] = idat_data[i];
+            if (idat_size + chunk_len > 64u * 1024 * 1024) {
+                efi_log(L"  ERROR: PNG IDAT exceeds 64 MB - refusing");
+                if (idat_data) efi_free_pool(idat_data);
+                return NULL;
             }
-            for (UINTN i = 0; i < chunk_len; i++) {
-                new_idat[idat_size + i] = data[offset + 8 + i];
+            if (idat_size + chunk_len > idat_cap) {
+                UINTN ncap = idat_cap ? idat_cap : 8192;
+                while (ncap < idat_size + chunk_len) ncap *= 2;
+                UINT8 *nb = efi_allocate_pool(ncap);
+                if (!nb) break;
+                if (idat_data && idat_size > 0) CopyMem(nb, idat_data, idat_size);
+                if (idat_data) efi_free_pool(idat_data);
+                idat_data = nb;
+                idat_cap  = ncap;
             }
-            if (idat_data) efi_free_pool(idat_data);
-            idat_data  = new_idat;
+            CopyMem(idat_data + idat_size, data + offset + 8, chunk_len);
             idat_size += chunk_len;
         }
         else if (type[0] == 'I' && type[1] == 'E' && type[2] == 'N' && type[3] == 'D') {
@@ -375,6 +382,12 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     if (width == 0 || height == 0 || !idat_data || idat_size < 2) {
         efi_log(L"  ERROR: PNG has no IHDR/IDAT or zero dimensions");
         if (idat_data) efi_free_pool(idat_data);
+        return NULL;
+    }
+
+    if (width > 8192 || height > 8192) {
+        efi_log(L"  ERROR: PNG dimensions exceed 8192x8192 - refusing");
+        efi_free_pool(idat_data);
         return NULL;
     }
 
@@ -432,6 +445,13 @@ icon_t* png_load(UINT8 *data, UINTN size) {
         UINT8  filter     = row[0];
         UINT8 *pixel_data = row + 1;
 
+        if (filter > 4) {
+            efi_log(L"  ERROR: PNG has an invalid scanline filter - corrupt");
+            efi_free_pool(icon->pixels);
+            efi_free_pool(icon);
+            efi_free_pool(uncomp);
+            return NULL;
+        }
         if (filter != 0) {
             apply_filter(filter, pixel_data, prev_row, bpp, width);
         }
