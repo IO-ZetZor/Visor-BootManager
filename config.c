@@ -76,6 +76,7 @@ static int hexval(CHAR16 c) {
 static int parse_sha256(CHAR16 *s, UINT8 out[32]) {
     if (*s == '#') s++;
     for (int i = 0; i < 32; i++) {
+        if (!s[i * 2] || !s[i * 2 + 1]) return 0;
         int hi = hexval(s[i * 2]);
         int lo = hexval(s[i * 2 + 1]);
         if (hi < 0 || lo < 0) return 0;
@@ -334,6 +335,15 @@ static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *di
     return added;
 }
 
+static EFI_FILE_PROTOCOL *root_from_handle(EFI_HANDLE h) {
+    EFI_FILE_IO_INTERFACE *io = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(h, &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
+        return NULL;
+    EFI_FILE_PROTOCOL *root = NULL;
+    if (EFI_ERROR(io->OpenVolume(io, &root))) return NULL;
+    return root;
+}
+
 static EFI_STATUS detect_entries(config_t *config) {
     static CHAR16 *windows_paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
@@ -344,14 +354,18 @@ static EFI_STATUS detect_entries(config_t *config) {
     config->show_names = 0;
     config->center_info = 1;
 
-    UINTN nvol = efi_volume_count();
-    if (nvol == 0) return EFI_NOT_FOUND;
+    UINTN nvol = 0;
+    EFI_HANDLE *vols = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nvol);
+    if (!vols || nvol == 0) {
+        if (vols) efi_free_pool(vols);
+        return EFI_NOT_FOUND;
+    }
 
     int windows_found = 0;
     int uki_found = 0;
 
     for (UINTN v = 0; v < nvol; v++) {
-        EFI_FILE_PROTOCOL *root = efi_open_volume(v);
+        EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
         if (!root) continue;
 
         if (!windows_found) {
@@ -372,7 +386,7 @@ static EFI_STATUS detect_entries(config_t *config) {
 
     if (!uki_found) {
         for (UINTN v = 0; v < nvol; v++) {
-            EFI_FILE_PROTOCOL *root = efi_open_volume(v);
+            EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
             scan_kernel_dir(config, root, L"\\boot");
             scan_kernel_dir(config, root, L"\\");
@@ -380,6 +394,7 @@ static EFI_STATUS detect_entries(config_t *config) {
         }
     }
 
+    efi_free_pool(vols);
     return EFI_SUCCESS;
 }
 
@@ -761,6 +776,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->reboot_icon = NULL;
     config->firmware_icon = NULL;
     config->entries = NULL;
+    config->tail = NULL;
     config->entry_count = 0;
 
     CHAR16 *buf = read_text_file(CONFIG_FILE);
@@ -872,10 +888,9 @@ boot_entry_t* config_add_entry(config_t *config,
     if (!config->entries) {
         config->entries = entry;
     } else {
-        boot_entry_t *last = config->entries;
-        while (last->next) last = last->next;
-        last->next = entry;
+        config->tail->next = entry;
     }
+    config->tail = entry;
 
     config->entry_count++;
     return entry;
@@ -896,7 +911,23 @@ void config_free(config_t *config) {
         entry = next;
     }
     config->entries = NULL;
+    config->tail = NULL;
     config->entry_count = 0;
 
+    if (config->background)    efi_free_pool(config->background);
+    if (config->theme)         efi_free_pool(config->theme);
+    if (config->title)         efi_free_pool(config->title);
+    if (config->font)          efi_free_pool(config->font);
+    if (config->def_cmdline)   efi_free_pool(config->def_cmdline);
+    if (config->shutdown_icon) efi_free_pool(config->shutdown_icon);
+    if (config->reboot_icon)   efi_free_pool(config->reboot_icon);
+    if (config->firmware_icon) efi_free_pool(config->firmware_icon);
     config->background = NULL;
+    config->theme = NULL;
+    config->title = NULL;
+    config->font = NULL;
+    config->def_cmdline = NULL;
+    config->shutdown_icon = NULL;
+    config->reboot_icon = NULL;
+    config->firmware_icon = NULL;
 }
