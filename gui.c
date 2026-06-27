@@ -41,8 +41,11 @@ static void font_ensure_decoded(void) {
 }
 
 void gui_set_font(const char *name) {
-
-    (void)name;
+    if (name && name[0]) {
+        int is_jb = (name[0] == 'j' || name[0] == 'J');
+        if (!is_jb)
+            efi_log(L"WARN: font= ignored - only the built-in 'jetbrains' font is available");
+    }
     g_font = &jetbrains_font;
 }
 
