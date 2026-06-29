@@ -156,19 +156,40 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         }
     }
 
-    if (!text_mode && config.background) {
-        efi_log(L"main: loading background image");
-        gui_set_background(&gui, config.background);
-        if (!gui.background)
-            efi_log(L"WARN: background failed to load/decode - using solid colour");
-        else
-            efi_log(L"main: background loaded");
+    boot_entry_t *selected = NULL;
+    int action = VISOR_ACTION_BOOT;
+    int autobooted = 0;
+
+    if (config.autoboot && gui.entry_count >= 1) {
+        EFI_INPUT_KEY abk;
+        if (EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &abk))) {
+            UINTN pick = (gui.entry_count == 1) ? 0
+                       : (gui.selected < gui.entry_count ? gui.selected : 0);
+            selected = gui.entries;
+            for (UINTN i = 0; i < pick && selected; i++) selected = selected->next;
+            autobooted = 1;
+            efi_log(L"main: autoboot - skipping menu, booting directly");
+        } else {
+            efi_log(L"main: autoboot armed but a key was pressed - showing menu");
+        }
     }
 
-    efi_log(text_mode ? L"main: entering text menu loop" : L"main: entering menu loop");
-    boot_entry_t *selected = text_mode ? text_menu_run(&gui) : gui_run(&gui);
-    int action = gui.action;
-    efi_log(L"main: menu closed");
+    if (!autobooted) {
+        if (!text_mode && config.background) {
+            efi_log(L"main: loading background image");
+            gui_set_background(&gui, config.background);
+            if (!gui.background)
+                efi_log(L"WARN: background failed to load/decode - using solid colour");
+            else
+                efi_log(L"main: background loaded");
+        }
+
+        efi_log(text_mode ? L"main: entering text menu loop" : L"main: entering menu loop");
+        selected = text_mode ? text_menu_run(&gui) : gui_run(&gui);
+        action = gui.action;
+        efi_log(L"main: menu closed");
+    }
+
     if (!text_mode) gui_shutdown(&gui);
 
     if (action == VISOR_ACTION_SHUTDOWN) {
@@ -215,6 +236,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         selected->cmdline = gui.override_cmdline;
         efi_log(L"main: using cmdline edited at the menu (one-shot)");
     }
+
+    bls_decrement(selected);
 
     if (config.remember_last)
         efi_set_var_str(L"VisorLastEntry", selected->name);
