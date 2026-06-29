@@ -244,6 +244,11 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->background = NULL;
     state->background_path = NULL;
 
+    state->version_mode = 0;
+    state->ver_fading = 0;
+    state->ver_frame = 0;
+    state->ver_dir = 0;
+
     state->editor_enabled = 1;
     state->editing = 0;
     state->edit_len = 0;
@@ -1084,6 +1089,59 @@ static void draw_center_info(gui_state_t *state, boot_entry_t *e,
         draw_text_px_a(state, tbuf, (UINTN)(cx - (INTN)pw / 2), path_y, dim, path_px, master);
 }
 
+static void apply_deploy(boot_entry_t *e) {
+    if (!e || e->deploy_count == 0) return;
+    UINTN s = e->deploy_sel;
+    if (s >= e->deploy_count) { s = 0; e->deploy_sel = 0; }
+    e->kernel_path = e->deployments[s].kernel;
+    e->initrd_path = e->deployments[s].initrd;
+    e->cmdline     = e->deployments[s].cmdline;
+}
+
+static const CHAR16* deploy_role_str(int role) {
+    if (role == DEPLOY_CURRENT)  return L"current";
+    if (role == DEPLOY_ROLLBACK) return L"rollback";
+    if (role == DEPLOY_PINNED)   return L"pinned";
+    return L"older";
+}
+
+static void draw_version_info(gui_state_t *state, boot_entry_t *e,
+                              UINTN top_y, UINTN name_px, INTN master) {
+    if (!e || e->deploy_count == 0 || master <= 0) return;
+    if (master > 255) master = 255;
+    UINTN sel = e->deploy_sel; if (sel >= e->deploy_count) sel = 0;
+    deployment_t *d = &e->deployments[sel];
+
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    color_t name_col = e->has_color ? e->color : state->name_color;
+    color_t line_col = { state->name_color.r * 7 / 10,
+                         state->name_color.g * 7 / 10,
+                         state->name_color.b * 7 / 10 };
+    if (d->role == DEPLOY_ROLLBACK) line_col = (color_t){ 0xE0, 0xAF, 0x68 };
+    else if (d->role == DEPLOY_PINNED) line_col = (color_t){ 0x7A, 0xA2, 0xF7 };
+
+    CHAR16 line[176];
+    SPrint(line, sizeof(line), L"<  %s   %s   %d/%d  >",
+           d->version ? d->version : L"?", deploy_role_str(d->role),
+           (int)(sel + 1), (int)e->deploy_count);
+
+    UINTN name_y = top_y;
+    UINTN line_y = top_y + name_px + 6;
+    UINTN nw = text_width_px(e->name, name_px);
+    UINTN lw = text_width_px(line, path_px);
+    UINTN block_w = nw > lw ? nw : lw;
+    UINTN block_h = name_px + 6 + path_px;
+    INTN  cx = (INTN)state->screen_width / 2;
+
+    if (state->blur) {
+        INTN fpad = 16;
+        draw_frost(state, cx - (INTN)block_w / 2 - fpad, (INTN)top_y - fpad,
+                   (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, master);
+    }
+    draw_text_px_a(state, e->name, (UINTN)(cx - (INTN)nw / 2), name_y, name_col, name_px, master);
+    draw_text_px_a(state, line, (UINTN)(cx - (INTN)lw / 2), line_y, line_col, path_px, master);
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -1183,12 +1241,15 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     UINTN ul_len  = state->underline_length ? state->underline_length
                                             : (sel_ei + 2 * pad - 20);
 
-    UINTN ci_block_h = center_info_block_h(state, name_px);
+    int ci_version = state->version_mode || state->ver_fading;
+    UINTN ci_block_h = ci_version ? (name_px + 6 + ((name_px * 4) / 5))
+                                  : center_info_block_h(state, name_px);
     UINTN ci_margin  = 48;
     UINTN ci_top = (state->screen_height > ci_block_h + ci_margin)
                    ? state->screen_height - ci_margin - ci_block_h : name_y;
     INTN  ci_band_lo = (INTN)ci_top - pad - 2;
     INTN  ci_band_hi = (INTN)(ci_top + ci_block_h) + pad + 2;
+    int ci_active = state->center_info || ci_version;
 
     INTN sel_top  = (INTN)icon_cy - (INTN)sel_ei / 2;
     INTN ecard_top = sel_top - pad;
@@ -1317,7 +1378,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     INTN ilo[6], ihi[6]; int ni = 0;
     ilo[ni] = (INTN)row_top - pad - 2;
     ihi[ni] = (INTN)(name_y + name_px + pad) + 2; ni++;
-    if (state->center_info) {
+    if (ci_active) {
         ilo[ni] = ci_band_lo; ihi[ni] = ci_band_hi; ni++;
     }
 
@@ -1446,8 +1507,20 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     if (pfocus >= 0)
         draw_power_actions(state, pfocus);
 
-    if (state->center_info && state->entry_count > 0)
-        draw_center_info(state, entry_at(state, state->selected), ci_top, name_px, 255);
+    if (ci_active && state->entry_count > 0) {
+        boot_entry_t *se = entry_at(state, state->selected);
+        if (ci_version && se && se->deploy_count > 0) {
+            INTN vm = 255;
+            if (state->ver_fading) {
+                int N = state->anim_frames; if (N < 2) N = 2;
+                INTN f = state->ver_frame * 255 / N; if (f > 255) f = 255;
+                vm = state->ver_dir > 0 ? f : 255 - f;
+            }
+            draw_version_info(state, se, ci_top, name_px, vm);
+        } else if (state->center_info) {
+            draw_center_info(state, se, ci_top, name_px, 255);
+        }
+    }
 
     state->prev_focus = state->focus;
     state->prev_page = page;
@@ -1663,6 +1736,17 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
     if (state->cursor_x >= (INTN)state->screen_width)  state->cursor_x = (INTN)state->screen_width - 1;
     if (state->cursor_y >= (INTN)state->screen_height) state->cursor_y = (INTN)state->screen_height - 1;
 
+    if (state->version_mode) {
+        boot_entry_t *se = entry_at(state, state->selected);
+        if (se && se->deploy_count > 1) {
+            if (scroll > 0 && se->deploy_sel + 1 < se->deploy_count) { se->deploy_sel++; apply_deploy(se); *menu_redraw = 1; }
+            else if (scroll < 0 && se->deploy_sel > 0) { se->deploy_sel--; apply_deploy(se); *menu_redraw = 1; }
+        }
+        if (moved) state->cursor_active = 1;
+        prev_btn = btn;
+        return moved ? 2 : 0;
+    }
+
     if (scroll > 0 && state->selected + 1 < state->entry_count) {
         state->selected++; state->focus = FOCUS_ENTRIES; *menu_redraw = 1;
     } else if (scroll < 0 && state->selected > 0) {
@@ -1784,10 +1868,47 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 continue;
             }
 
+            if (state->version_mode) {
+                boot_entry_t *se = entry_at(state, state->selected);
+                CHAR16 vu = key.UnicodeChar;
+                if (vu >= 'a' && vu <= 'z') vu -= 32;
+                if (key.UnicodeChar == 0x0D) {
+                    state->running = 0;
+                } else if (key.UnicodeChar == 0x1B ||
+                           (key.UnicodeChar == 0x00 && key.ScanCode == 0x17)) {
+                    if (se) { se->deploy_sel = se->deploy_default; apply_deploy(se); }
+                    if (state->center_info) {
+                        state->version_mode = 0; state->ver_fading = 0;
+                    } else {
+                        state->ver_dir = -1; state->ver_frame = 0; state->ver_fading = 1;
+                    }
+                    need_redraw = 1; full_redraw = 1;
+                } else if (key.UnicodeChar == 0x00 && key.ScanCode == 0x04) {
+                    if (se && se->deploy_sel > 0) { se->deploy_sel--; apply_deploy(se); need_redraw = 1; full_redraw = 1; }
+                } else if (key.UnicodeChar == 0x00 && key.ScanCode == 0x03) {
+                    if (se && se->deploy_sel + 1 < se->deploy_count) { se->deploy_sel++; apply_deploy(se); need_redraw = 1; full_redraw = 1; }
+                } else if (vu == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
+                else if (vu == 'R') { state->action = VISOR_ACTION_REBOOT; state->running = 0; }
+                else if (vu == 'F') { state->action = VISOR_ACTION_FIRMWARE; state->running = 0; }
+                continue;
+            }
+
             CHAR16 uc = key.UnicodeChar;
             if (uc >= 'a' && uc <= 'z') uc -= 32;
 
-            if (uc == 'E') {
+            if (uc == 'V') {
+                boot_entry_t *se = entry_at(state, state->selected);
+                if (state->focus == FOCUS_ENTRIES && se && se->deploy_count > 1) {
+                    state->version_mode = 1;
+                    se->deploy_sel = se->deploy_default;
+                    apply_deploy(se);
+                    if (!state->center_info) {
+                        state->ver_dir = 1; state->ver_frame = 0; state->ver_fading = 1;
+                    }
+                    need_redraw = 1; full_redraw = 1;
+                }
+            }
+            else if (uc == 'E') {
                 if (state->focus == FOCUS_ENTRIES && state->editor_enabled && state->entry_count > 0) {
                     editor_enter(state);
                     need_redraw = 1; full_redraw = 1;
@@ -1867,6 +1988,17 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
+        if (state->ver_fading) {
+            int N = state->anim_frames; if (N < 2) N = 2;
+            state->ver_frame++;
+            need_redraw = 1; full_redraw = 1;
+            if (state->ver_frame >= N) {
+                state->ver_fading = 0;
+                state->ver_frame = 0;
+                if (state->ver_dir < 0) state->version_mode = 0;
+            }
+        }
+
         if (state->timeout_active && state->timeout > 0) {
             UINT64 elapsed = efi_get_tick() - state->timeout_start;
             INTN remaining = state->timeout - (INTN)(elapsed / 1000);
@@ -1879,7 +2011,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
-        efi_sleep((state->anim_active || state->page_anim) ? 6
+        efi_sleep((state->anim_active || state->page_anim || state->ver_fading) ? 6
                   : (state->cursor_active ? 12 : 30));
     }
 
