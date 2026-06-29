@@ -392,6 +392,50 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return buf;
 }
 
+int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
+    UINTN n = 0;
+    EFI_HANDLE *h = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &n);
+    if (!h) return 0;
+    int ok = 0;
+    for (UINTN i = 0; i < n && !ok; i++) {
+        EFI_FILE_IO_INTERFACE *io = NULL;
+        if (EFI_ERROR(BS->HandleProtocol(h[i], &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io) continue;
+        EFI_FILE_PROTOCOL *root = NULL;
+        if (EFI_ERROR(io->OpenVolume(io, &root)) || !root) continue;
+        EFI_FILE_PROTOCOL *fh = NULL;
+        if (!EFI_ERROR(root->Open(root, &fh, oldp, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && fh) {
+            UINT64 sz = 0;
+            fh->SetPosition(fh, ~0ULL);
+            fh->GetPosition(fh, &sz);
+            fh->SetPosition(fh, 0);
+            if (sz > 0 && sz < 1024 * 1024) {
+                UINT8 *buf = efi_allocate_pool((UINTN)sz);
+                if (buf) {
+                    UINTN rd = (UINTN)sz;
+                    if (!EFI_ERROR(fh->Read(fh, &rd, buf))) {
+                        fh->Delete(fh);
+                        fh = NULL;
+                        EFI_FILE_PROTOCOL *nf = NULL;
+                        if (!EFI_ERROR(root->Open(root, &nf, newp,
+                                EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && nf) {
+                            UINTN w = rd;
+                            nf->Write(nf, &w, buf);
+                            nf->Flush(nf);
+                            nf->Close(nf);
+                            ok = 1;
+                        }
+                    }
+                    efi_free_pool(buf);
+                }
+            }
+            if (fh) fh->Close(fh);
+        }
+        root->Close(root);
+    }
+    efi_free_pool(h);
+    return ok;
+}
+
 static int has_efi_suffix(CHAR16 *name) {
     UINTN n = 0;
     while (name[n]) n++;
@@ -424,12 +468,13 @@ void efi_load_fs_drivers(void) {
         efi_file_buffer_t *buf = efi_load_file(path);
         if (!buf) continue;
         if (buf->data && buf->size) {
-            if (sb && efi_shim_verify(buf->data, buf->size) != 1) {
-                efi_log(L"WARN: driver failed Secure Boot verification - skipping");
+            if (sb && efi_shim_verify(buf->data, buf->size) == 0) {
+                efi_log(L"WARN: driver rejected by SHIM_LOCK - skipping");
             } else {
                 EFI_HANDLE drv = NULL;
                 if (!EFI_ERROR(BS->LoadImage(FALSE, IH, NULL, buf->data, buf->size, &drv)) && drv) {
                     if (!EFI_ERROR(BS->StartImage(drv, NULL, NULL))) started++;
+                    else BS->UnloadImage(drv);
                 }
             }
             efi_free_pool(buf->data);
@@ -549,6 +594,11 @@ void efi_log(CHAR16 *msg) {
     UINTN wsize = n;
     f->Write(f, &wsize, line);
     f->Flush(f);
+}
+
+void efi_log_close(void) {
+    if (g_log_file) { g_log_file->Close(g_log_file); g_log_file = NULL; }
+    if (g_log_root) { g_log_root->Close(g_log_root); g_log_root = NULL; }
 }
 
 void efi_log_begin(void) {
