@@ -25,6 +25,7 @@ typedef struct {
     int   recovery_entries;
     int   mouse;
     int   editor;
+    int   autoboot;
     CHAR16 *theme;
     CHAR16 *title;
     int   no_title;
@@ -81,5 +82,7 @@ boot_entry_t* config_add_entry(config_t *config,
                                 int type);
 
 EFI_STATUS config_auto_detect(config_t *config);
+
+void bls_decrement(boot_entry_t *e);
 
 #endif
