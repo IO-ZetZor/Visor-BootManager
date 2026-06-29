@@ -29,6 +29,12 @@ default=0
 # the OS instead of "Booting <name>..."). 0 = show progress text.
 quiet=0
 
+# Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
+# several exist, boot the remembered/default entry (the one default=/remember_last
+# would have preselected) - all without drawing a menu. Hold any key during power-on
+# to interrupt and show the menu anyway. 0 = always show the menu (default).
+#autoboot=0
+
 # 1 = use the plain text-console menu instead of the graphical one, even when a
 # graphics adapter is available. Visor ALSO falls back to this text menu
 # automatically if no Graphics Output Protocol is found, so set this only if you
