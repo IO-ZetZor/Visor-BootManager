@@ -42,6 +42,8 @@ typedef struct {
 
 efi_file_buffer_t* efi_load_file(CHAR16 *path);
 
+int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
+
 void efi_load_fs_drivers(void);
 
 extern int visor_quiet;
@@ -51,6 +53,8 @@ void efi_print(CHAR16 *msg, ...);
 void efi_log(CHAR16 *msg);
 
 void efi_log_begin(void);
+
+void efi_log_close(void);
 
 EFI_HANDLE efi_get_device_handle(EFI_DEVICE_PATH *dp);
 
