@@ -4,8 +4,6 @@
 #include <efi.h>
 #include <efilib.h>
 
-void efi_exit_boot_services(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table);
-
 void* efi_allocate_pool(UINTN size);
 void efi_free_pool(void *ptr);
 
@@ -22,12 +20,9 @@ EFI_FILE_PROTOCOL* efi_boot_volume_root(void);
 efi_file_t* efi_fopen(CHAR16 *path);
 void efi_fclose(efi_file_t *file);
 UINTN efi_fread(efi_file_t *file, void *buf, UINTN size);
-int efi_file_exists(CHAR16 *path);
 
 int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
 
-UINTN efi_volume_count(void);
-EFI_FILE_PROTOCOL* efi_open_volume(UINTN index);
 int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
@@ -47,16 +42,22 @@ int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
 void efi_load_fs_drivers(void);
 
 extern int visor_quiet;
+extern int visor_log_to_console;
+extern int visor_boot_services_active;
 
 void efi_print(CHAR16 *msg, ...);
 
 void efi_log(CHAR16 *msg);
 
+void efi_log_set_console(int enabled);
+
+void efi_log_set_file(int enabled);
+
+int efi_log_file_enabled(void);
+
 void efi_log_begin(void);
 
 void efi_log_close(void);
-
-EFI_HANDLE efi_get_device_handle(EFI_DEVICE_PATH *dp);
 
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count);
 
