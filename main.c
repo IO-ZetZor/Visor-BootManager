@@ -12,6 +12,12 @@ EFI_HANDLE IH;
 
 /* natsukisubaruwashere */
 
+static boot_entry_t* main_entry_at(gui_state_t *state, UINTN idx) {
+    boot_entry_t *e = state ? state->entries : NULL;
+    for (UINTN i = 0; i < idx && e; i++) e = e->next;
+    return e;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     InitializeLib(image_handle, system_table);
 
@@ -112,13 +118,15 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.blur            = config.blur;
     gui.blur_title      = config.blur_title;
     gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
+    gui.animation       = config.animation;
     gui.anim_speed      = config.anim_speed;
+    gui.fade_speed      = config.fade_speed;
     {
         int sp = config.anim_speed;
         if (sp < 1) sp = 8;
         if (sp > 10) sp = 10;
-        gui.anim_frames = 26 - sp * 2;
-        if (gui.anim_frames < 5) gui.anim_frames = 5;
+        gui.anim_frames = gui.animation ? 26 - sp * 2 : 1;
+        if (gui.animation && gui.anim_frames < 5) gui.anim_frames = 5;
     }
     if (!text_mode && config.power_icons) {
         if (config.shutdown_icon) gui.shutdown_icon = gui_load_icon(config.shutdown_icon);
@@ -159,8 +167,27 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     boot_entry_t *selected = NULL;
     int action = VISOR_ACTION_BOOT;
     int autobooted = 0;
+    int gui_closed = 0;
+    int force_menu = 0;
+    int retry_selected = 0;
+    boot_entry_t *bls_decremented = NULL;
+    CHAR16 *saved_cmdline = NULL;
+    CHAR16 *saved_kernel_path = NULL;
+    CHAR16 *saved_initrd_path = NULL;
+    CHAR16 *override_cmdline = NULL;
+    CHAR16 *override_kernel_path = NULL;
+    CHAR16 *override_initrd_path = NULL;
+    int cmdline_overridden = 0;
+    int kernel_overridden = 0;
+    int initrd_overridden = 0;
+    EFI_STATUS cleanup_status = EFI_SUCCESS;
 
-    if (config.autoboot && gui.entry_count >= 1) {
+select_entry:
+    selected = NULL;
+    action = VISOR_ACTION_BOOT;
+    autobooted = 0;
+
+    if (!force_menu && config.autoboot && gui.entry_count >= 1) {
         EFI_INPUT_KEY abk;
         if (EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &abk))) {
             UINTN pick = (gui.entry_count == 1) ? 0
@@ -174,8 +201,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         }
     }
 
-    if (!autobooted) {
-        if (!text_mode && config.background) {
+    if (!autobooted && !retry_selected) {
+        if (!text_mode && !gui_closed && config.background && !gui.background) {
             efi_log(L"main: loading background image");
             gui_set_background(&gui, config.background);
             if (!gui.background)
@@ -184,25 +211,37 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
                 efi_log(L"main: background loaded");
         }
 
-        efi_log(text_mode ? L"main: entering text menu loop" : L"main: entering menu loop");
-        selected = text_mode ? text_menu_run(&gui) : gui_run(&gui);
+        efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");
+        selected = (text_mode || gui_closed) ? text_menu_run(&gui) : gui_run(&gui);
         action = gui.action;
+        force_menu = 0;
         efi_log(L"main: menu closed");
     }
-
-    if (!text_mode) gui_shutdown(&gui);
+    retry_selected = 0;
 
     if (action == VISOR_ACTION_SHUTDOWN) {
+        if (!text_mode) {
+            gui_fade_out(&gui);
+            gui_shutdown(&gui);
+        }
         efi_log(L"action: shutdown requested - ResetSystem(Shutdown)");
         RT->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
         return EFI_SUCCESS;
     }
     if (action == VISOR_ACTION_REBOOT) {
+        if (!text_mode) {
+            gui_fade_out(&gui);
+            gui_shutdown(&gui);
+        }
         efi_log(L"action: reboot requested - ResetSystem(Cold)");
         RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
         return EFI_SUCCESS;
     }
     if (action == VISOR_ACTION_FIRMWARE) {
+        if (!text_mode) {
+            gui_fade_out(&gui);
+            gui_shutdown(&gui);
+        }
         efi_log(L"action: firmware setup requested - setting OsIndications + reboot");
 
         UINT64 osind = 0;
@@ -225,28 +264,135 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     if (!selected) {
         efi_log(L"main: no entry selected, returning to firmware");
         efi_print(L"No selection made\r\n");
+        if (!text_mode && !gui_closed) {
+            gui_fade_out(&gui);
+            gui_shutdown(&gui);
+        }
         config_free(&config);
         return EFI_SUCCESS;
     }
+
+boot_selected:
+    saved_cmdline = NULL;
+    saved_kernel_path = NULL;
+    saved_initrd_path = NULL;
+    override_cmdline = NULL;
+    override_kernel_path = NULL;
+    override_initrd_path = NULL;
+    cmdline_overridden = 0;
+    kernel_overridden = 0;
+    initrd_overridden = 0;
+    cleanup_status = EFI_SUCCESS;
 
     efi_log(selected->name);
     efi_log(L"main: booting entry (auto-detecting boot method)");
 
     if (gui.override_cmdline) {
+        saved_cmdline = selected->cmdline;
+        override_cmdline = gui.override_cmdline;
         selected->cmdline = gui.override_cmdline;
+        gui.override_cmdline = NULL;
+        cmdline_overridden = 1;
         efi_log(L"main: using cmdline edited at the menu (one-shot)");
     }
+    if (gui.override_kernel_path) {
+        saved_kernel_path = selected->kernel_path;
+        override_kernel_path = gui.override_kernel_path;
+        selected->kernel_path = gui.override_kernel_path;
+        gui.override_kernel_path = NULL;
+        kernel_overridden = 1;
+        efi_log(L"main: using recovery kernel path override (one-shot)");
+    }
+    if (gui.override_initrd_set) {
+        saved_initrd_path = selected->initrd_path;
+        override_initrd_path = gui.override_initrd_path;
+        selected->initrd_path = gui.override_initrd_path;
+        gui.override_initrd_path = NULL;
+        gui.override_initrd_set = 0;
+        initrd_overridden = 1;
+        efi_log(L"main: using recovery initrd path override (one-shot)");
+    }
 
-    bls_decrement(selected);
+    if (selected->encrypted || selected->initrd_encrypted || selected->luks) {
+        CHAR16 *pw = NULL;
+        CHAR16 *prompt = selected->luks
+            ? L"LUKS Password   (Enter = boot, Esc = cancel)"
+            : L"Password   (Enter = boot, Esc = cancel)";
+        if (selected->decrypt_password) {
+            volatile CHAR16 *p = (volatile CHAR16*)selected->decrypt_password;
+            while (*p) *p++ = 0;
+            efi_free_pool(selected->decrypt_password);
+            selected->decrypt_password = NULL;
+        }
+        if (!text_mode && !gui_closed) {
+            EFI_STATUS ps = gui_prompt_password(&gui, prompt, &pw);
+            if (EFI_ERROR(ps)) {
+                efi_log(L"main: encrypted/LUKS boot cancelled at password prompt");
+                efi_print(L"Encrypted boot cancelled\r\n");
+                goto boot_cleanup_return;
+            }
+        } else {
+            CHAR16 buf[512];
+            UINTN len = 0;
+            EFI_INPUT_KEY key;
+            for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+            efi_print(L"Password: ");
+            for (;;) {
+                EFI_STATUS ks = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
+                if (EFI_ERROR(ks)) { BS->Stall(30000); continue; }
+                if (key.UnicodeChar == 0x0D) break;
+                if (key.UnicodeChar == 0x1B) {
+                    for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+                    efi_print(L"\r\nEncrypted boot cancelled\r\n");
+                    visor_quiet = 0;
+                    efi_log_set_console(0);
+                    goto boot_cleanup_return;
+                }
+                if (key.UnicodeChar == 0x08) {
+                    if (len) len--;
+                    continue;
+                }
+                if (key.UnicodeChar >= 0x20 && len < 511)
+                    buf[len++] = key.UnicodeChar;
+            }
+            buf[len] = 0;
+            efi_print(L"\r\n");
+            pw = efi_strdup(buf);
+            for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+            if (!pw) {
+                efi_log(L"ERROR: out of memory copying encrypted boot password");
+                cleanup_status = EFI_OUT_OF_RESOURCES;
+                goto boot_cleanup_return;
+            }
+        }
+        selected->decrypt_password = pw;
+        efi_log(L"main: password captured for encrypted/LUKS boot entry");
+    }
 
-    if (config.remember_last)
-        efi_set_var_str(L"VisorLastEntry", selected->name);
+    if (!text_mode && !gui_closed) {
+        gui_fade_out(&gui);
+        gui_shutdown(&gui);
+        gui_closed = 1;
+        text_mode = 1;
+    }
 
     visor_quiet = config.quiet;
     if (visor_quiet) {
         efi_log(L"main: quiet mode - suppressing console output");
         ST->ConOut->ClearScreen(ST->ConOut);
     }
+    efi_log_set_console(!visor_quiet);
+    efi_log(L"main: boot log streaming to console is active");
+    efi_log(selected->name);
+    efi_log(L"main: final boot handoff sequence started");
+
+    if (bls_decremented != selected) {
+        bls_decrement(selected);
+        bls_decremented = selected;
+    }
+
+    if (config.remember_last)
+        efi_set_var_str(L"VisorLastEntry", selected->name);
 
     efi_print(L"Booting: ");
     efi_print(selected->name);
@@ -254,15 +400,97 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     status = visor_boot(selected, ST);
 
+    if (!visor_boot_services_active) {
+        RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+        while (1);
+    }
+
+    if (cmdline_overridden) {
+        selected->cmdline = saved_cmdline;
+        if (override_cmdline) efi_free_pool(override_cmdline);
+        saved_cmdline = NULL;
+        override_cmdline = NULL;
+        cmdline_overridden = 0;
+    }
+    if (kernel_overridden) {
+        selected->kernel_path = saved_kernel_path;
+        if (override_kernel_path) efi_free_pool(override_kernel_path);
+        saved_kernel_path = NULL;
+        override_kernel_path = NULL;
+        kernel_overridden = 0;
+    }
+    if (initrd_overridden) {
+        selected->initrd_path = saved_initrd_path;
+        if (override_initrd_path) efi_free_pool(override_initrd_path);
+        saved_initrd_path = NULL;
+        override_initrd_path = NULL;
+        initrd_overridden = 0;
+    }
+
     efi_log(L"ERROR: boot returned (control should have transferred to the OS)");
+    efi_log_set_console(0);
 
-    efi_print(L"Boot failed, resetting...\r\n");
+    efi_print(L"Boot failed - entering recovery\r\n");
 
-    BS->Stall(3 * 1000 * 1000);
+    action = text_recovery_run(&gui, selected, status, config.quiet);
 
+    if (action == VISOR_ACTION_RETRY) {
+        efi_log(L"recovery: retry requested");
+        boot_entry_t *retry_entry = main_entry_at(&gui, gui.selected);
+        if (retry_entry) selected = retry_entry;
+        retry_selected = 1;
+        goto boot_selected;
+    }
+    if (action == VISOR_ACTION_MENU) {
+        efi_log(L"recovery: returning to boot menu");
+        force_menu = 1;
+        retry_selected = 0;
+        goto select_entry;
+    }
+    if (action == VISOR_ACTION_SHUTDOWN) {
+        efi_log(L"recovery: shutdown requested");
+        config_free(&config);
+        RT->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+        return EFI_SUCCESS;
+    }
+    if (action == VISOR_ACTION_FIRMWARE) {
+        efi_log(L"recovery: firmware setup requested");
+        UINT64 osind = 0;
+        UINTN  sz = sizeof(osind);
+        UINT32 attr;
+        RT->GetVariable(L"OsIndications", &gEfiGlobalVariableGuid, &attr, &sz, &osind);
+        osind |= 0x0000000000000001ULL;
+        RT->SetVariable(L"OsIndications", &gEfiGlobalVariableGuid,
+                        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                        EFI_VARIABLE_RUNTIME_ACCESS,
+                        sizeof(osind), &osind);
+    }
+
+    efi_log(L"recovery: reboot requested");
+    config_free(&config);
     RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
 
     return status;
+
+boot_cleanup_return:
+    if (cmdline_overridden) {
+        selected->cmdline = saved_cmdline;
+        if (override_cmdline) efi_free_pool(override_cmdline);
+    }
+    if (kernel_overridden) {
+        selected->kernel_path = saved_kernel_path;
+        if (override_kernel_path) efi_free_pool(override_kernel_path);
+    }
+    if (initrd_overridden) {
+        selected->initrd_path = saved_initrd_path;
+        if (override_initrd_path) efi_free_pool(override_initrd_path);
+    }
+    if (!text_mode && !gui_closed) {
+        gui_fade_out(&gui);
+        gui_shutdown(&gui);
+    }
+    config_free(&config);
+    return cleanup_status;
 }
 
 void _exit(int status) {
