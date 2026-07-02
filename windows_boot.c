@@ -6,10 +6,6 @@
 
 extern EFI_BOOT_SERVICES *BS;
 
-EFI_DEVICE_PATH* windows_make_file_path(EFI_HANDLE handle, CHAR16 *filename) {
-    return efi_make_file_path(handle, filename);
-}
-
 EFI_STATUS windows_find_bootmgr(CHAR16 *partition_uuid, EFI_DEVICE_PATH **bootmgr_path) {
     CHAR16 *paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
