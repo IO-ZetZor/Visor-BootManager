@@ -1,8 +1,16 @@
-#ifndef TEXT_MENU_H
-#define TEXT_MENU_H
+#ifndef WINDOWS_BOOT_H
+#define WINDOWS_BOOT_H
 
+#include <efi.h>
 #include "gui.h"
 
-boot_entry_t* text_menu_run(gui_state_t *state);
+typedef struct {
+    EFI_DEVICE_PATH *device_path;
+    EFI_DEVICE_PATH *file_path;
+    CHAR16 *description;
+} windows_boot_entry_t;
+
+EFI_STATUS windows_find_bootmgr(CHAR16 *partition_uuid,
+                                EFI_DEVICE_PATH **bootmgr_path);
 
 #endif
