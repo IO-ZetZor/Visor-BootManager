@@ -36,6 +36,8 @@ typedef struct {
 #define VISOR_ACTION_SHUTDOWN  1
 #define VISOR_ACTION_REBOOT    2
 #define VISOR_ACTION_FIRMWARE  3
+#define VISOR_ACTION_RETRY     4
+#define VISOR_ACTION_MENU      5
 
 #define POWER_POS_BOTTOMRIGHT  0
 #define POWER_POS_BOTTOMLEFT   1
@@ -77,6 +79,13 @@ typedef struct boot_entry {
     int     has_color;
     UINT8   sha256[32];
     int     has_sha256;
+    int     encrypted;
+    int     initrd_encrypted;
+    int     luks;
+    CHAR16 *luks_key_path;
+    CHAR16 *luks_cmdline;
+    CHAR16 *luks_preset;
+    CHAR16 *decrypt_password;
 
     deployment_t *deployments;
     UINTN   deploy_count;
@@ -178,7 +187,9 @@ typedef struct {
     int     blur;
     int     blur_title;
     color_t blur_color;
+    int     animation;
     int     anim_speed;
+    int     fade_speed;
 
     icon_t *background;
     CHAR16 *background_path;
@@ -190,10 +201,15 @@ typedef struct {
 
     int     editor_enabled;
     int     editing;
+    int     edit_secret;
+    CHAR16 *edit_title;
     CHAR16  edit_buf[512];
     UINTN   edit_len;
     UINTN   edit_cursor;
     CHAR16 *override_cmdline;
+    CHAR16 *override_kernel_path;
+    CHAR16 *override_initrd_path;
+    int     override_initrd_set;
 
     int     mouse_enabled;
     void   *spp;
@@ -217,26 +233,17 @@ icon_t* gui_load_image(CHAR16 *path);
 
 icon_t* gui_load_icon(CHAR16 *path);
 
-void gui_fill_rect(gui_state_t *state, UINTN x, UINTN y,
-                   UINTN w, UINTN h, color_t color);
-
-void gui_draw_image(gui_state_t *state, icon_t *img, UINTN x, UINTN y);
-
-void gui_draw_background(gui_state_t *state);
-
-void gui_draw_text_small(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
-                         color_t color);
-
-void gui_draw_text_large(gui_state_t *state, CHAR16 *text, UINTN x, UINTN y,
-                         color_t color);
-
 void gui_draw_menu(gui_state_t *state, int partial);
 
 void gui_present(gui_state_t *state);
 
 void gui_present_band(gui_state_t *state, INTN y, INTN h);
 
+void gui_fade_out(gui_state_t *state);
+
 boot_entry_t* gui_run(gui_state_t *state);
+
+EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out);
 
 void gui_shutdown(gui_state_t *state);
 
