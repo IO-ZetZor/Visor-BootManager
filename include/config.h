@@ -61,7 +61,9 @@ typedef struct {
     int     blur_title;
     color_t blur_color;
     int     has_blur_color;
+    int     animation;
     int     anim_speed;
+    int     fade_speed;
     UINTN   entries_per_page;
     boot_entry_t *entries;
     boot_entry_t *tail;
@@ -71,17 +73,6 @@ typedef struct {
 EFI_STATUS config_parse(config_t *config);
 
 void config_free(config_t *config);
-
-boot_entry_t* config_add_entry(config_t *config,
-                                CHAR16 *name,
-                                CHAR16 *icon_path,
-                                CHAR16 *kernel_path,
-                                CHAR16 *initrd_path,
-                                CHAR16 *cmdline,
-                                CHAR16 *uuid,
-                                int type);
-
-EFI_STATUS config_auto_detect(config_t *config);
 
 void bls_decrement(boot_entry_t *e);
 
