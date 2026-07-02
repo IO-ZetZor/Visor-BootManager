@@ -67,8 +67,4 @@ typedef struct {
 
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st);
 
-EFI_STATUS linux_load_initrd(boot_entry_t *entry,
-                             UINT32 *addr,
-                             UINT32 *size);
-
 #endif
