@@ -99,6 +99,30 @@ static int parse_color(CHAR16 *s, color_t *out) {
     return 1;
 }
 
+static void wipe16(CHAR16 *s) {
+    if (!s) return;
+    volatile CHAR16 *p = (volatile CHAR16*)s;
+    while (*p) *p++ = 0;
+}
+
+static void free_char16(CHAR16 **p) {
+    if (!p || !*p) return;
+    efi_free_pool(*p);
+    *p = NULL;
+}
+
+static void free_deployments(deployment_t *deps, UINTN count) {
+    if (!deps) return;
+    for (UINTN i = 0; i < count; i++) {
+        if (deps[i].version)  efi_free_pool(deps[i].version);
+        if (deps[i].kernel)   efi_free_pool(deps[i].kernel);
+        if (deps[i].initrd)   efi_free_pool(deps[i].initrd);
+        if (deps[i].cmdline)  efi_free_pool(deps[i].cmdline);
+        if (deps[i].bls_path) efi_free_pool(deps[i].bls_path);
+    }
+    efi_free_pool(deps);
+}
+
 /* 'emilia-chan' */
 static UINTN parse_uint(CHAR16 *s) {
     UINTN n = 0;
@@ -116,11 +140,64 @@ static int is_header(CHAR16 *line, const CHAR16 *kw) {
 }
 
 static int contains_ci(CHAR16 *hay, const CHAR16 *needle);
+static boot_entry_t* config_add_entry(config_t *config,
+                                      CHAR16 *name,
+                                      CHAR16 *icon_path,
+                                      CHAR16 *kernel_path,
+                                      CHAR16 *initrd_path,
+                                      CHAR16 *cmdline,
+                                      CHAR16 *uuid,
+                                      int type,
+                                      int encrypted,
+                                      int initrd_encrypted);
 
 static int looks_windows(CHAR16 *kernel_path) {
     if (!kernel_path) return 0;
     return contains_ci(kernel_path, L"bootmgfw") ||
            contains_ci(kernel_path, L"\\Microsoft\\");
+}
+
+static int str_eq_ci(CHAR16 *a, const CHAR16 *b) {
+    if (!a || !b) return 0;
+    UINTN i = 0;
+    while (a[i] && b[i]) {
+        CHAR16 ca = a[i], cb = b[i];
+        if (ca >= L'A' && ca <= L'Z') ca += 32;
+        if (cb >= L'A' && cb <= L'Z') cb += 32;
+        if (ca != cb) return 0;
+        i++;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
+
+static CHAR16* luks_default_key_path(CHAR16 *key_path) {
+    return (key_path && key_path[0]) ? key_path : L"/crypto_keyfile.bin";
+}
+
+static CHAR16* luks_make_key_cmdline(const CHAR16 *prefix, CHAR16 *key_path) {
+    CHAR16 *path = luks_default_key_path(key_path);
+    UINTN plen = 0, klen = 0;
+    while (prefix[plen]) plen++;
+    while (path[klen]) klen++;
+
+    CHAR16 *out = efi_allocate_pool((plen + klen + 1) * sizeof(CHAR16));
+    if (!out) return NULL;
+
+    UINTN k = 0;
+    for (UINTN i = 0; i < plen; i++) out[k++] = prefix[i];
+    for (UINTN i = 0; i < klen; i++) out[k++] = path[i];
+    out[k] = 0;
+    return out;
+}
+
+static CHAR16* luks_cmdline_from_preset(CHAR16 *preset, CHAR16 *key_path) {
+    if (!preset || !preset[0]) return NULL;
+    if (str_eq_ci(preset, L"mkinitcpio") || str_eq_ci(preset, L"arch"))
+        return luks_make_key_cmdline(L"cryptkey=rootfs:", key_path);
+    if (str_eq_ci(preset, L"dracut") || str_eq_ci(preset, L"systemd"))
+        return luks_make_key_cmdline(L"rd.luks.key=", key_path);
+    efi_log(L"WARN: unknown luks_preset; set luks_cmdline manually");
+    return NULL;
 }
 
 static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
@@ -135,6 +212,12 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
     color_t color; int has_color = 0;
     UINT8 sha256_buf[32]; int has_sha256 = 0;
     UINTN entry_icon_size = 0;
+    int encrypted = 0, kernel_encrypted_set = 0, initrd_encrypted_set = 0;
+    int kernel_encrypted = 0, initrd_encrypted = 0;
+    int luks = 0;
+    CHAR16 *luks_key_path = NULL;
+    CHAR16 *luks_cmdline = NULL;
+    CHAR16 *luks_preset = NULL;
 
     while (*idx < count) {
         CHAR16 *line = trim(lines[*idx]);
@@ -171,16 +254,52 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
                 if (!has_sha256) efi_log(L"WARN: invalid sha256= (expect 64 hex chars)");
             } else if (efi_strcmp(key, L"icon_size") == 0) {
                 entry_icon_size = parse_uint(value);
+            } else if (efi_strcmp(key, L"encrypted") == 0) {
+                encrypted = (*value == '1' || *value == 't' || *value == 'y');
+            } else if (efi_strcmp(key, L"kernel_encrypted") == 0) {
+                kernel_encrypted = (*value == '1' || *value == 't' || *value == 'y');
+                kernel_encrypted_set = 1;
+            } else if (efi_strcmp(key, L"initrd_encrypted") == 0) {
+                initrd_encrypted = (*value == '1' || *value == 't' || *value == 'y');
+                initrd_encrypted_set = 1;
+            } else if (efi_strcmp(key, L"luks") == 0 ||
+                       efi_strcmp(key, L"luks_password") == 0) {
+                luks = (*value == '1' || *value == 't' || *value == 'y');
+            } else if (efi_strcmp(key, L"luks_key_path") == 0) {
+                luks_key_path = efi_strdup(value);
+            } else if (efi_strcmp(key, L"luks_cmdline") == 0 ||
+                       efi_strcmp(key, L"luks_options") == 0 ||
+                       efi_strcmp(key, L"luks_options_append") == 0) {
+                luks_cmdline = efi_strdup(value);
+            } else if (efi_strcmp(key, L"luks_preset") == 0 ||
+                       efi_strcmp(key, L"luks_initramfs") == 0) {
+                luks_preset = efi_strdup(value);
             }
         }
         (*idx)++;
     }
 
     if (!type && looks_windows(kernel_path)) type = 1;
+    if (!kernel_encrypted_set) kernel_encrypted = encrypted;
+    if (!initrd_encrypted_set) initrd_encrypted = encrypted;
+    if (luks && !luks_cmdline && luks_preset)
+        luks_cmdline = luks_cmdline_from_preset(luks_preset, luks_key_path);
 
+    int entry_added = 0;
     if (name && kernel_path) {
         boot_entry_t *e = config_add_entry(config, name, icon_path, kernel_path,
-                                           initrd_path, cmdline, uuid, type);
+                                           initrd_path, cmdline, uuid, type,
+                                           kernel_encrypted, initrd_encrypted);
+        if (e) {
+            entry_added = 1;
+            e->luks = luks;
+            e->luks_key_path = luks_key_path;
+            e->luks_cmdline = luks_cmdline;
+            e->luks_preset = luks_preset;
+            luks_key_path = NULL;
+            luks_cmdline = NULL;
+            luks_preset = NULL;
+        }
         if (e && has_color) { e->color = color; e->has_color = 1; }
         if (e) e->icon_size = entry_icon_size;
         if (e && has_sha256) {
@@ -188,6 +307,17 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
             e->has_sha256 = 1;
         }
     }
+    if (!entry_added) {
+        free_char16(&name);
+        free_char16(&icon_path);
+        free_char16(&kernel_path);
+        free_char16(&initrd_path);
+        free_char16(&cmdline);
+        free_char16(&uuid);
+    }
+    if (luks_key_path) efi_free_pool(luks_key_path);
+    if (luks_cmdline) efi_free_pool(luks_cmdline);
+    if (luks_preset) efi_free_pool(luks_preset);
 
     return EFI_SUCCESS;
 }
@@ -232,6 +362,7 @@ static CHAR16* distro_icon(CHAR16 *hint) {
         { L"ubuntu",     L"ubuntu.png" },
         { NULL, NULL }
     };
+    if (!hint) return icon_path_for(L"linux.png");
     for (int i = 0; map[i].needle; i++)
         if (contains_ci(hint, map[i].needle)) return icon_path_for(map[i].file);
     return icon_path_for(L"linux.png");
@@ -268,9 +399,21 @@ static int scan_uki_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *dir) 
         disp[n] = '\0';
         if (n > 4) disp[n - 4] = '\0';
 
-        config_add_entry(config, efi_strdup(disp), distro_icon(disp), efi_strdup(path),
-                         NULL, NULL, NULL, 0);
-        added++;
+        CHAR16 *entry_name = efi_strdup(disp);
+        CHAR16 *entry_icon = distro_icon(disp);
+        CHAR16 *entry_path = efi_strdup(path);
+        if (!entry_name || !entry_path) {
+            free_char16(&entry_name);
+            free_char16(&entry_icon);
+            free_char16(&entry_path);
+        } else if (config_add_entry(config, entry_name, entry_icon, entry_path,
+                             NULL, NULL, NULL, 0, 0, 0)) {
+            added++;
+        } else {
+            free_char16(&entry_name);
+            free_char16(&entry_icon);
+            free_char16(&entry_path);
+        }
     }
     d->Close(d);
     return added;
@@ -327,9 +470,23 @@ static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *di
         efi_log(path);
         if (initrd) efi_log(initrd);
 
-        config_add_entry(config, efi_strdup(name), icon_path_for(L"unknown.png"),
-                         efi_strdup(path), initrd, NULL, NULL, 0);
-        added++;
+        CHAR16 *entry_name = efi_strdup(name);
+        CHAR16 *entry_icon = icon_path_for(L"unknown.png");
+        CHAR16 *entry_path = efi_strdup(path);
+        if (!entry_name || !entry_path) {
+            free_char16(&entry_name);
+            free_char16(&entry_icon);
+            free_char16(&entry_path);
+            free_char16(&initrd);
+        } else if (config_add_entry(config, entry_name, entry_icon,
+                             entry_path, initrd, NULL, NULL, 0, 0, 0)) {
+            added++;
+        } else {
+            free_char16(&entry_name);
+            free_char16(&entry_icon);
+            free_char16(&entry_path);
+            free_char16(&initrd);
+        }
     }
     d->Close(d);
     return added;
@@ -364,7 +521,7 @@ static CHAR16* read_text_from_root(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
     UINTN rd = (UINTN)sz;
     EFI_STATUS s = fh->Read(fh, &rd, raw);
     fh->Close(fh);
-    if (EFI_ERROR(s)) { efi_free_pool(raw); return NULL; }
+    if (EFI_ERROR(s) || rd != (UINTN)sz) { efi_free_pool(raw); return NULL; }
     CHAR16 *out = efi_allocate_pool((rd + 1) * sizeof(CHAR16));
     if (!out) { efi_free_pool(raw); return NULL; }
     for (UINTN i = 0; i < rd; i++) out[i] = (CHAR16)raw[i];
@@ -535,6 +692,7 @@ static int bls_detect(config_t *config) {
 
         deployment_t *deps = efi_allocate_pool((UINTN)n * sizeof(deployment_t));
         if (!deps) continue;
+        int deps_ok = 1;
         for (int k = 0; k < n; k++) {
             bls_rec_t *r = &recs[idx[k]];
             deps[k].version    = r->version ? efi_strdup(r->version) : efi_strdup(L"unknown");
@@ -545,15 +703,24 @@ static int bls_detect(config_t *config) {
             deps[k].role       = (k == 0) ? DEPLOY_CURRENT : (k == 1 ? DEPLOY_ROLLBACK : DEPLOY_OLDER);
             deps[k].tries_left = r->tries_left;
             deps[k].tries_done = r->tries_done;
+            if (!deps[k].version || !deps[k].kernel ||
+                (r->options && !deps[k].cmdline) ||
+                (r->conf && !deps[k].bls_path))
+                deps_ok = 0;
+        }
+        if (!deps_ok) {
+            free_deployments(deps, (UINTN)n);
+            continue;
         }
 
         UINTN def = 0;
         if (n > 1 && deps[0].tries_left == 0) def = 1;
 
         CHAR16 *dispname = base_title_dup(recs[idx[0]].title);
-        boot_entry_t *e = config_add_entry(config, dispname, distro_icon(dispname),
+        CHAR16 *dispicon = distro_icon(dispname);
+        boot_entry_t *e = config_add_entry(config, dispname, dispicon,
                                            deps[def].kernel, deps[def].initrd,
-                                           deps[def].cmdline, NULL, 0);
+                                           deps[def].cmdline, NULL, 0, 0, 0);
         if (e) {
             e->deployments    = deps;
             e->deploy_count   = (UINTN)n;
@@ -561,7 +728,9 @@ static int bls_detect(config_t *config) {
             e->deploy_sel     = def;
             groups++;
         } else {
-            efi_free_pool(deps);
+            free_char16(&dispname);
+            free_char16(&dispicon);
+            free_deployments(deps, (UINTN)n);
         }
     }
 
@@ -637,9 +806,21 @@ static EFI_STATUS detect_entries(config_t *config) {
         if (!windows_found) {
             for (int i = 0; windows_paths[i] != NULL; i++) {
                 if (efi_file_exists_root(root, windows_paths[i])) {
-                    config_add_entry(config, L"Windows Boot Manager", icon_path_for(L"windows.png"),
-                                     efi_strdup(windows_paths[i]), NULL, NULL, NULL, 1);
-                    windows_found = 1;
+                    CHAR16 *entry_name = efi_strdup(L"Windows Boot Manager");
+                    CHAR16 *entry_icon = icon_path_for(L"windows.png");
+                    CHAR16 *entry_path = efi_strdup(windows_paths[i]);
+                    if (!entry_name || !entry_path) {
+                        free_char16(&entry_name);
+                        free_char16(&entry_icon);
+                        free_char16(&entry_path);
+                    } else if (config_add_entry(config, entry_name, entry_icon,
+                                         entry_path, NULL, NULL, NULL, 1, 0, 0)) {
+                        windows_found = 1;
+                    } else {
+                        free_char16(&entry_name);
+                        free_char16(&entry_icon);
+                        free_char16(&entry_path);
+                    }
                     break;
                 }
             }
@@ -664,28 +845,41 @@ static EFI_STATUS detect_entries(config_t *config) {
     return EFI_SUCCESS;
 }
 
+#define CONFIG_TEXT_MAX (1024ULL * 1024ULL)
+
 static CHAR16* read_text_file(CHAR16 *path) {
     efi_file_t *file = efi_fopen(path);
     if (!file) return NULL;
 
-    UINT8 *raw = NULL;
-    UINTN  raw_len = 0;
-    UINTN  raw_cap = 4096;
-    raw = efi_allocate_pool(raw_cap);
-    if (!raw) { efi_fclose(file); return NULL; }
+    UINT64 size = 0;
+    file->handle->SetPosition(file->handle, ~0ULL);
+    file->handle->GetPosition(file->handle, &size);
+    file->handle->SetPosition(file->handle, 0);
 
-    for (;;) {
-        if (raw_len + 512 > raw_cap) {
-            raw_cap *= 2;
-            UINT8 *nb = efi_allocate_pool(raw_cap);
-            if (!nb) break;
-            for (UINTN i = 0; i < raw_len; i++) nb[i] = raw[i];
-            efi_free_pool(raw);
-            raw = nb;
+    if (size > CONFIG_TEXT_MAX) {
+        efi_log(L"WARN: config text file exceeds 1 MiB - ignoring");
+        efi_fclose(file);
+        return NULL;
+    }
+
+    UINT8 *raw = NULL;
+    UINTN raw_len = (UINTN)size;
+    if (raw_len) {
+        raw = efi_allocate_pool(raw_len);
+        if (!raw) { efi_fclose(file); return NULL; }
+
+        UINTN total = 0;
+        while (total < raw_len) {
+            UINTN n = efi_fread(file, raw + total, raw_len - total);
+            if (n == 0) break;
+            total += n;
         }
-        UINTN n = efi_fread(file, raw + raw_len, 512);
-        if (n == 0) break;
-        raw_len += n;
+        if (total != raw_len) {
+            efi_log(L"WARN: short config text read - ignoring file");
+            efi_free_pool(raw);
+            efi_fclose(file);
+            return NULL;
+        }
     }
     efi_fclose(file);
 
@@ -849,8 +1043,12 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     } else if (efi_strcmp(key, L"blur") == 0) {
         if (*value == 'c' || *value == 'C') config->blur = 2;
         else config->blur = (*value == '1' || *value == 't' || *value == 'y' || *value == 'f') ? 1 : 0;
+    } else if (efi_strcmp(key, L"animation") == 0) {
+        config->animation = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"anim_speed") == 0) {
         config->anim_speed = (int)parse_uint(value);
+    } else if (efi_strcmp(key, L"fade_speed") == 0) {
+        config->fade_speed = (int)parse_uint(value);
     } else if (efi_strcmp(key, L"entries_per_page") == 0) {
         config->entries_per_page = parse_uint(value);
     } else if (efi_strcmp(key, L"blur_title") == 0) {
@@ -962,22 +1160,38 @@ static void add_recovery_entries(config_t *config) {
 
         UINTN nlen = 0; while (o->name[nlen]) nlen++;
         CHAR16 *rname = efi_allocate_pool((nlen + 16) * sizeof(CHAR16));
+        if (!rname) continue;
         SPrint(rname, (nlen + 16) * sizeof(CHAR16), L"%s (recovery)", o->name);
 
         UINTN olen = 0; if (o->cmdline) while (o->cmdline[olen]) olen++;
         UINTN slen = 0; while (suffix[slen]) slen++;
         CHAR16 *rcmd = efi_allocate_pool((olen + slen + 2) * sizeof(CHAR16));
+        if (!rcmd) { efi_free_pool(rname); continue; }
         if (olen) SPrint(rcmd, (olen + slen + 2) * sizeof(CHAR16), L"%s %s", o->cmdline, suffix);
         else      SPrint(rcmd, (olen + slen + 2) * sizeof(CHAR16), L"%s", suffix);
 
-        boot_entry_t *r = config_add_entry(config, rname,
-            o->icon_path ? efi_strdup(o->icon_path) : NULL,
-            efi_strdup(o->kernel_path),
-            o->initrd_path ? efi_strdup(o->initrd_path) : NULL,
-            rcmd,
-            o->uuid ? efi_strdup(o->uuid) : NULL,
-            o->type);
+        CHAR16 *ricon = o->icon_path ? efi_strdup(o->icon_path) : NULL;
+        CHAR16 *rkernel = efi_strdup(o->kernel_path);
+        CHAR16 *rinitrd = o->initrd_path ? efi_strdup(o->initrd_path) : NULL;
+        CHAR16 *ruuid = o->uuid ? efi_strdup(o->uuid) : NULL;
+        if (!rkernel || (o->icon_path && !ricon) ||
+            (o->initrd_path && !rinitrd) || (o->uuid && !ruuid)) {
+            free_char16(&rname);
+            free_char16(&ricon);
+            free_char16(&rkernel);
+            free_char16(&rinitrd);
+            free_char16(&rcmd);
+            free_char16(&ruuid);
+            continue;
+        }
+
+        boot_entry_t *r = config_add_entry(config, rname, ricon, rkernel,
+            rinitrd, rcmd, ruuid, o->type, o->encrypted, o->initrd_encrypted);
         if (r) {
+            r->luks = o->luks;
+            r->luks_key_path = o->luks_key_path ? efi_strdup(o->luks_key_path) : NULL;
+            r->luks_cmdline = o->luks_cmdline ? efi_strdup(o->luks_cmdline) : NULL;
+            r->luks_preset = o->luks_preset ? efi_strdup(o->luks_preset) : NULL;
             r->color = o->color;
             r->has_color = o->has_color;
             r->icon_size = o->icon_size;
@@ -985,6 +1199,13 @@ static void add_recovery_entries(config_t *config) {
                 for (int k = 0; k < 32; k++) r->sha256[k] = o->sha256[k];
                 r->has_sha256 = 1;
             }
+        } else {
+            free_char16(&rname);
+            free_char16(&ricon);
+            free_char16(&rkernel);
+            free_char16(&rinitrd);
+            free_char16(&rcmd);
+            free_char16(&ruuid);
         }
     }
 }
@@ -1037,7 +1258,9 @@ EFI_STATUS config_parse(config_t *config) {
     config->blur_title = 0;
     config->blur_color = COLOR_WHITE;
     config->has_blur_color = 0;
+    config->animation = 1;
     config->anim_speed = 0;
+    config->fade_speed = 0;
     config->entries_per_page = 0;
     config->power_icons = 0;
     config->power_icon_size = 0;
@@ -1119,18 +1342,25 @@ EFI_STATUS config_parse(config_t *config) {
     return EFI_SUCCESS;
 }
 
-boot_entry_t* config_add_entry(config_t *config,
-                                CHAR16 *name,
-                                CHAR16 *icon_path,
-                                CHAR16 *kernel_path,
-                                CHAR16 *initrd_path,
-                                CHAR16 *cmdline,
-                                CHAR16 *uuid,
-                                int type) {
+static boot_entry_t* config_add_entry(config_t *config,
+                                      CHAR16 *name,
+                                      CHAR16 *icon_path,
+                                      CHAR16 *kernel_path,
+                                      CHAR16 *initrd_path,
+                                      CHAR16 *cmdline,
+                                      CHAR16 *uuid,
+                                      int type,
+                                      int encrypted,
+                                      int initrd_encrypted) {
     boot_entry_t *entry = efi_allocate_pool(sizeof(boot_entry_t));
     if (!entry) { efi_log(L"ERROR: out of memory adding boot entry"); return NULL; }
 
-    entry->name = name ? name : L"Unknown";
+    entry->name = name ? name : efi_strdup(L"Unknown");
+    if (!entry->name) {
+        efi_free_pool(entry);
+        efi_log(L"ERROR: out of memory naming boot entry");
+        return NULL;
+    }
     entry->icon_path = icon_path;
     entry->kernel_path = kernel_path;
     entry->initrd_path = initrd_path;
@@ -1144,6 +1374,13 @@ boot_entry_t* config_add_entry(config_t *config,
     entry->color = config->name_color;
     entry->has_color = 0;
     entry->has_sha256 = 0;
+    entry->encrypted = encrypted;
+    entry->initrd_encrypted = initrd_encrypted;
+    entry->luks = 0;
+    entry->luks_key_path = NULL;
+    entry->luks_cmdline = NULL;
+    entry->luks_preset = NULL;
+    entry->decrypt_password = NULL;
     entry->next = NULL;
     entry->deployments = NULL;
     entry->deploy_count = 0;
@@ -1191,6 +1428,13 @@ void config_free(config_t *config) {
             if (entry->cmdline) efi_free_pool(entry->cmdline);
         }
         if (entry->uuid) efi_free_pool(entry->uuid);
+        if (entry->luks_key_path) efi_free_pool(entry->luks_key_path);
+        if (entry->luks_cmdline) efi_free_pool(entry->luks_cmdline);
+        if (entry->luks_preset) efi_free_pool(entry->luks_preset);
+        if (entry->decrypt_password) {
+            wipe16(entry->decrypt_password);
+            efi_free_pool(entry->decrypt_password);
+        }
 
         efi_free_pool(entry);
         entry = next;
