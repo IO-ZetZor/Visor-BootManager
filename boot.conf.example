@@ -29,12 +29,6 @@ default=0
 # the OS instead of "Booting <name>..."). 0 = show progress text.
 quiet=0
 
-# Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
-# several exist, boot the remembered/default entry (the one default=/remember_last
-# would have preselected) - all without drawing a menu. Hold any key during power-on
-# to interrupt and show the menu anyway. 0 = always show the menu (default).
-#autoboot=0
-
 # 1 = use the plain text-console menu instead of the graphical one, even when a
 # graphics adapter is available. Visor ALSO falls back to this text menu
 # automatically if no Graphics Output Protocol is found, so set this only if you
@@ -65,6 +59,12 @@ quiet=0
 # Corner radius (in pixels) of the selection highlight / frost box. 0 = built-in
 # default. Larger = rounder; small values = squarer corners. (alias: corner_radius)
 #box_radius=14
+
+# Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
+# several exist, boot the remembered/default entry (the one default=/remember_last
+# would have preselected) - all without drawing a menu. Hold any key during power-on
+# to interrupt and show the menu anyway. 0 = always show the menu (default).
+#autoboot=0
 
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
@@ -125,13 +125,22 @@ quiet=0
 #blur_color=#FFFFFF
 
 # --- Animation --------------------------------------------------------------
+# Master switch for all GUI animations and fades. 1 = on (default), 0 = instant
+# UI state changes with no intro/outro fade, cross-fade, or selection slide.
+#animation=1
+
 # Selection animation speed, 1 (slow) .. 10 (fast). Default 8. Switching
 # between an entry and a power action cross-fades; moving within a row/column
-# slides. Same speed for both.
+# slides. Same speed for both. Ignored when animation=0.
 #anim_speed=8
 
+# Full-screen fade speed for menu fade-in and boot/power fade-out, 1 (slow) ..
+# 10 (fast). Default 10. Ignored when animation=0.
+#fade_speed=10
+
 # Entries shown per page. When more entries exist than fit a page, a chevron
-# (< / >) appears and Left/Right paging cross-fades between pages at anim_speed.
+# (< / >) appears and Left/Right paging cross-fades between pages at anim_speed
+# when animation=1.
 # Default 3.
 #entries_per_page=3
 
@@ -209,6 +218,18 @@ background=\EFI\visor\backgrounds\default.png
 #        uuid      = partition-uuid            (optional - pin which partition the
 #                                               kernel/bootmgr lives on, by PARTUUID)
 #        sha256    = <64 hex chars>            (optional - pin the image hash)
+#        encrypted = 1                         (optional - kernel and initrd are
+#                                               Visor encrypted containers)
+#        kernel_encrypted = 1                  (optional - override only kernel)
+#        initrd_encrypted = 1                  (optional - override only initrd)
+#        luks      = 1                         (optional - ask for a LUKS password
+#                                               and inject it as an initrd keyfile)
+#        luks_key_path = /crypto_keyfile.bin   (optional - path inside initramfs)
+#        luks_preset = mkinitcpio              (optional - auto-generate keyfile
+#                                               option; mkinitcpio/arch, dracut,
+#                                               systemd)
+#        luks_cmdline = "..."                  (optional - manual keyfile option;
+#                                               overrides luks_preset)
 #    }
 #
 #  There is no longer a separate "linux"/"windows" block or a "type=" key:
@@ -241,7 +262,50 @@ background=\EFI\visor\backgrounds\default.png
 #    kernel  = \vmlinuz-linux
 #    initrd  = \initramfs-linux.img
 #    cmdline = "root=PARTUUID=CHANGE-ME-TO-YOUR-ROOT-PARTUUID......"
-}
+#}
+
+# Encrypted boot artifact example. Create the files with:
+#   python3 tools/visor_encrypt.py vmlinuz-linux vmlinuz-linux.venc
+#   python3 tools/visor_encrypt.py initramfs-linux.img initramfs-linux.img.venc
+# Visor prompts for the password after you select the entry, decrypts the files
+# in memory, then boots the decrypted kernel/UKI/initrd.
+#entry {
+#    name      = "Encrypted Arch"
+#    icon      = \EFI\visor\icons\arch.png
+#    kernel    = \vmlinuz-linux.venc
+#    initrd    = \initramfs-linux.img.venc
+#    encrypted = 1
+#    cmdline   = "root=PARTUUID=CHANGE-ME rw quiet"
+#}
+
+# LUKS root example. Visor does not decrypt the disk itself; it asks for the
+# password, appends it as a temporary keyfile into the initramfs path, and your
+# initramfs/cryptsetup setup unlocks the LUKS device. The keyfile is present in
+# the initrd memory handed to Linux.
+#entry {
+#    name      = "Arch LUKS"
+#    icon      = \EFI\visor\icons\arch.png
+#    kernel    = \vmlinuz-linux
+#    initrd    = \initramfs-linux.img
+#    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+#    luks      = 1
+#    luks_key_path = /crypto_keyfile.bin
+#    luks_preset = mkinitcpio
+#    # For custom initramfs setups, use luks_cmdline instead.
+#}
+
+# UKI + LUKS example. The UKI is left unchanged; Visor provides a supplemental
+# keyfile-only initrd through the Linux EFI initrd protocol. Your UKI's embedded
+# initramfs must support the generated or manual keyfile option.
+#entry {
+#    name      = "Arch UKI LUKS"
+#    icon      = \EFI\visor\icons\arch.png
+#    kernel    = \EFI\Linux\arch-linux.efi
+#    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+#    luks      = 1
+#    luks_key_path = /crypto_keyfile.bin
+#    luks_preset = mkinitcpio
+#}
 
 # Windows example - chainloads the Windows Boot Manager. "kernel" is the path
 # to bootmgfw.efi; Visor detects the PE image and loads it via its device path
@@ -249,5 +313,5 @@ background=\EFI\visor\backgrounds\default.png
 #entry {
 #    name   = "Windows 11"
 #    icon   = \EFI\visor\icons\windows.png
-#   kernel = \EFI\Microsoft\Boot\bootmgfw.efi
-}
+#    kernel = \EFI\Microsoft\Boot\bootmgfw.efi
+#}
