@@ -13,7 +13,4 @@ typedef struct {
 EFI_STATUS windows_find_bootmgr(CHAR16 *partition_uuid,
                                 EFI_DEVICE_PATH **bootmgr_path);
 
-EFI_DEVICE_PATH* windows_make_file_path(EFI_HANDLE handle,
-                                        CHAR16 *filename);
-
 #endif
