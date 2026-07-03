@@ -185,7 +185,7 @@ void gui_present_band(gui_state_t *state, INTN y, INTN h) {
 
 static UINTN fade_frame_count(gui_state_t *state) {
     int sp = state ? state->fade_speed : 0;
-    if (sp < 1) sp = 10;
+    if (sp < 1) return 0;
     if (sp > 10) sp = 10;
 
     return (UINTN)(12 - sp);
@@ -246,7 +246,8 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
                                    int fade_in) {
     if (!state || !state->backbuffer || !snapshot) return;
     UINTN px = state->screen_width * state->screen_height;
-    if (!gui_animation_on(state)) {
+    UINTN frames = fade_frame_count(state);
+    if (!gui_animation_on(state) || frames == 0) {
         if (fade_in)
             fade_write_snapshot(state, snapshot, px);
         else
@@ -255,7 +256,6 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
         return;
     }
 
-    UINTN frames = fade_frame_count(state);
     UINTN first = 1;
     UINTN delay = (state->fade_speed >= 9) ? 0 : (UINTN)(10 - state->fade_speed);
 
@@ -271,7 +271,7 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
 static void gui_fade_in_current(gui_state_t *state) {
     if (!state || !state->backbuffer) return;
     UINTN px = state->screen_width * state->screen_height;
-    if (!gui_animation_on(state)) {
+    if (!gui_animation_on(state) || fade_frame_count(state) == 0) {
         gui_present(state);
         return;
     }
@@ -285,7 +285,7 @@ static void gui_fade_in_current(gui_state_t *state) {
 void gui_fade_out(gui_state_t *state) {
     if (!state || !state->backbuffer) return;
     UINTN px = state->screen_width * state->screen_height;
-    if (!gui_animation_on(state)) {
+    if (!gui_animation_on(state) || fade_frame_count(state) == 0) {
         fade_write_black(state, px);
         gui_present(state);
         return;
