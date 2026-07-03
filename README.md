@@ -199,6 +199,8 @@ back-slashes, e.g. `\EFI\visor\icons\arch.png`. Colors are `#RRGGBB`.
 | `blur`            | Blurred-glass highlight that follows the selection (entries **and** power actions), replacing the flat card. `0`/absent = flat card · `1` = frosted (blur + tint) · `clear` = clear blur (no tint). |
 | `blur_title`      | `1` = static blurred panel behind the title. Independent of `blur`.                                       |
 | `blur_color`      | Tint colour for frosted mode, `#RRGGBB`. Absent = white. Ignored when `blur=clear`.                       |
+| `fade_speed`      | Full-screen menu fade-in/out speed, `1` (slow) .. `10` (fast). Default `10`. Ignored when `animation=0`. |
+| `animation`       | Master animation switch. `1` = fades/slides on (default) · `0` = all GUI animations/fades are instant.    |
 | `anim_speed`      | Selection animation speed, `1` (slow) .. `10` (fast). Default `8`. Entry↔power cross-fades; within a row/column slides. |
 | `title_size`      | Title height in pixels. `0`/absent = `screen_height / 12`.                                                 |
 | `name_size`       | Entry-name height in pixels. `0`/absent = `16`.                                                            |
@@ -256,6 +258,100 @@ entry {
 | `color`   | Per-entry name color, `#RRGGBB` (overrides `name_color`).           |
 | `uuid`    | Partition UUID hint for Windows chainloading, optional.             |
 | `sha256`  | Pin the image's SHA-256 (64 hex). Boot is refused on mismatch.      |
+| `encrypted` | `1` = `kernel` and `initrd` point at Visor encrypted containers.  |
+| `kernel_encrypted` | `1` = only the kernel/UKI path is encrypted.             |
+| `initrd_encrypted` | `1` = only the initrd path is encrypted.                 |
+| `luks`    | `1` = ask for a LUKS password and inject it into the initrd.        |
+| `luks_key_path` | Keyfile path to create inside the initramfs archive. Default: `/crypto_keyfile.bin`. |
+| `luks_preset` | Auto-generate the keyfile option for `mkinitcpio`/`arch`, `dracut`, or `systemd`. |
+| `luks_cmdline` | Manual kernel options that tell your initramfs to use that keyfile; overrides the preset. |
+
+### LUKS unlock handoff
+
+For LUKS-root systems, Visor can ask for the passphrase before Linux starts and
+append that passphrase as a temporary keyfile inside the in-memory initramfs. The
+actual LUKS unlock is still performed by your initramfs/cryptsetup stack. This
+keeps Visor small and avoids putting the password on the kernel command line.
+The temporary keyfile is still present in the initrd memory handed to Linux, so
+this is a convenience handoff, not a way to hide the passphrase from the booted
+kernel/initramfs.
+
+For EFI-stub kernels with `initrd=`, Visor appends the keyfile archive to that
+initrd. For UKIs, Visor leaves the UKI unchanged and provides a supplemental
+keyfile-only initrd through the Linux EFI initrd protocol; your UKI's embedded
+initramfs must support that keyfile option. Raw non-PE kernels still need a
+separate `initrd=`.
+
+For common initramfs stacks, set `luks_preset` and Visor fills in a matching
+starter keyfile option:
+
+| Preset | Generated option |
+|--------|------------------|
+| `mkinitcpio` / `arch` | `cryptkey=rootfs:<luks_key_path>` |
+| `dracut` / `systemd` | `rd.luks.key=<luks_key_path>` |
+
+If your distro needs UUID binding, a different key source, or different syntax,
+set `luks_cmdline` manually; it takes priority over the preset.
+
+```conf
+entry {
+    name      = "Arch LUKS"
+    icon      = \EFI\visor\icons\arch.png
+    kernel    = \vmlinuz-linux
+    initrd    = \initramfs-linux.img
+    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+    luks      = 1
+    luks_key_path = /crypto_keyfile.bin
+    luks_preset = mkinitcpio
+}
+```
+
+UKI example:
+
+```conf
+entry {
+    name      = "Arch UKI LUKS"
+    kernel    = \EFI\Linux\arch-linux.efi
+    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+    luks      = 1
+    luks_key_path = /crypto_keyfile.bin
+    luks_preset = mkinitcpio
+}
+```
+
+When you boot that entry, Visor shows the same overlay used by the boot-options
+editor. The prompt title and caret use the configured underline color; typed
+password text stays white.
+
+### Encrypted boot artifacts
+
+Visor can password-decrypt the boot files it loads: a kernel, UKI, or initrd can
+be stored as a Visor encrypted container and decrypted in memory after entry
+selection. The container is authenticated before decrypting, so modified files
+are refused. This is for boot artifacts, not full-disk/LUKS volume parsing.
+
+Create encrypted files on the host:
+
+```sh
+python3 tools/visor_encrypt.py vmlinuz-linux vmlinuz-linux.venc
+python3 tools/visor_encrypt.py initramfs-linux.img initramfs-linux.img.venc
+```
+
+Then point the entry at those files:
+
+```conf
+entry {
+    name      = "Encrypted Arch"
+    kernel    = \vmlinuz-linux.venc
+    initrd    = \initramfs-linux.img.venc
+    encrypted = 1
+    cmdline   = "root=PARTUUID=... rw quiet"
+}
+```
+
+When you boot that entry, Visor asks for the password with the same overlay used
+by the boot-options editor. The prompt title and caret use the configured
+underline color; typed password text stays white.
 
 ### Changing the font size
 
@@ -325,6 +421,7 @@ background=\EFI\visor\backgrounds\default.png
 | `Up`           | Move up the power column; from the top, return to the boot entries   |
 | `Enter`        | Boot the focused entry, or run the focused power action              |
 | `e`            | Edit the focused entry's kernel command line, then boot it (one-shot) |
+| `v`            | On an OS with multiple deployments (OSTree/BLS), browse its versions in the centre-info |
 | `1`–`9`        | Boot entry N directly                                                |
 | `Esc`          | Boot the default entry                                               |
 | `S`            | Shut down (works from anywhere)                                      |
@@ -332,6 +429,32 @@ background=\EFI\visor\backgrounds\default.png
 | `F`            | Enter firmware setup (works from anywhere)                           |
 | Mouse / touch  | Move to show a cursor; **single click** an icon to boot it, or a power icon to run it |
 
+---
+
+
+## Immutable distros & OSTree (atomic deployments)
+
+Visor understands the **Boot Loader Specification (BLS)** entries that OSTree
+systems — Fedora Silverblue/Kinoite, Fedora CoreOS, bootc images, and anything
+using `kernel-install` — write to `loader/entries/*.conf`. No configuration
+needed: if Visor finds them (on the ESP, or on a separate `/boot` reachable via
+an efifs driver), it builds the menu automatically.
+
+- **One icon per OS.** All of an OS's deployments (current + rollback + older)
+  collapse into a single icon. The newest boots by default.
+- **Browse versions with `v`.** Press `v` on the OS to turn the centre-info into
+  a version browser: **Left/Right** step through deployments (current ↔ rollback ↔
+  older, with the version, role, and position shown), **Enter** boots the one
+  shown, **Esc** backs out. The rollback is tinted amber so it's easy to spot.
+- **Automatic rollback safety net.** Visor honours **boot-counting**
+  (`…+tries.conf`), the same mechanism `greenboot` uses: it decrements the counter
+  before booting, and if a deployment's tries run out, it automatically defaults
+  to the previous (rollback) deployment. No agent needed in the OS — it piggybacks
+  on greenboot. (On a read-only `/boot` it simply skips the counter update.)
+
+If `/boot` is a separate ext4/btrfs partition, drop an efifs driver into
+`\EFI\visor\drivers\` so Visor can read the kernels there (see *Booting from
+non-FAT filesystems*).
 
 
 ---
@@ -402,11 +525,3 @@ fails — most problems are one descriptive line away.
 MASSIVELY INSPIRED BY rEFInd!!
 
 ---
-
-### Donations (For Indian supporters)
-
-If you like what i'm doing, and want to support me on this project and others that WILL be coming soon, It'll be greatly appreciated :)
-
-UPI ID : 'zetzor.anand@fam'
-
-![QR](assets/donate-qr.png)
