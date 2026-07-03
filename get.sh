@@ -19,7 +19,7 @@ install_deps() {
     elif have apt-get; then $SUDO apt-get update && $SUDO apt-get install -y gnu-efi build-essential binutils git
     elif have dnf;     then $SUDO dnf install -y gnu-efi gnu-efi-devel gcc binutils make git
     elif have zypper;  then $SUDO zypper install -y gnu-efi-devel gcc binutils make git
-    elif have xbps-install; then $SUDO xbps-install -Sy gnu-efi gcc binutils make git
+    elif have xbps-install; then $SUDO xbps-install -Sy gnu-efi-libs gcc binutils make git
     elif have eopkg;   then $SUDO eopkg install -y gnu-efi gcc binutils make git
     else
         warn "Unknown package manager - install these yourself: gnu-efi, gcc, binutils, make, git"
