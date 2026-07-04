@@ -1,4 +1,3 @@
-
 #include "gui.h"
 #include "font.h"
 #include "efi_helpers.h"
@@ -134,23 +133,48 @@ static void blit_rows(gui_state_t *state, INTN y, INTN h) {
         state->pixel_format != PixelBlueGreenRedReserved8BitPerColor)
         return;
 
-    int swap = (state->pixel_format == PixelRedGreenBlueReserved8BitPerColor);
     UINT8 *fb = (UINT8*)state->gop->Mode->FrameBufferBase;
-    for (INTN row = y; row < y + h; row++) {
-        UINT32 *dst = (UINT32*)(fb + (UINTN)row * state->pixels_per_scanline * sizeof(UINT32));
-        UINT32 *src = &state->backbuffer[(UINTN)row * state->screen_width];
-        if (swap)
-            for (UINTN x = 0; x < state->screen_width; x++) {
-                UINT32 p = src[x];
-                dst[x] = (p & 0xFF00FF00u) | ((p >> 16) & 0xFF) | ((p & 0xFF) << 16);
-            }
-        else
-            for (UINTN x = 0; x < state->screen_width; x++) dst[x] = src[x];
+    UINTN  ppsl = state->pixels_per_scanline;
+    UINTN  w = state->screen_width;
+
+    if (state->pixel_format == PixelBlueGreenRedReserved8BitPerColor) {
+
+        if (ppsl == w) {
+            CopyMem(fb + (UINTN)y * w * sizeof(UINT32),
+                    &state->backbuffer[(UINTN)y * w],
+                    (UINTN)h * w * sizeof(UINT32));
+        } else {
+            for (INTN row = y; row < y + h; row++)
+                CopyMem(fb + (UINTN)row * ppsl * sizeof(UINT32),
+                        &state->backbuffer[(UINTN)row * w],
+                        w * sizeof(UINT32));
+        }
+        return;
     }
+
+    for (INTN row = y; row < y + h; row++) {
+        UINT32 *dst = (UINT32*)(fb + (UINTN)row * ppsl * sizeof(UINT32));
+        UINT32 *src = &state->backbuffer[(UINTN)row * w];
+        for (UINTN x = 0; x < w; x++) {
+            UINT32 p = src[x];
+            dst[x] = (p & 0xFF00FF00u) | ((p >> 16) & 0xFF) | ((p & 0xFF) << 16);
+        }
+    }
+}
+
+static int gui_has_linear_fb(gui_state_t *state) {
+    return state->gop && state->gop->Mode->FrameBufferBase &&
+           (state->pixel_format == PixelBlueGreenRedReserved8BitPerColor ||
+            state->pixel_format == PixelRedGreenBlueReserved8BitPerColor);
 }
 
 void gui_present(gui_state_t *state) {
     if (!state->backbuffer) return;
+
+    if (state->fb_fast) {
+        blit_rows(state, 0, (INTN)state->screen_height);
+        return;
+    }
 
     EFI_STATUS s = uefi_call_wrapper(state->gop->Blt, 10,
         state->gop,
@@ -161,7 +185,8 @@ void gui_present(gui_state_t *state) {
         0);
     if (!EFI_ERROR(s)) return;
 
-    blit_rows(state, 0, (INTN)state->screen_height);
+    if (gui_has_linear_fb(state))
+        blit_rows(state, 0, (INTN)state->screen_height);
 }
 
 void gui_present_band(gui_state_t *state, INTN y, INTN h) {
@@ -170,6 +195,11 @@ void gui_present_band(gui_state_t *state, INTN y, INTN h) {
     if (h <= 0) return;
     if (y + h > (INTN)state->screen_height) h = (INTN)state->screen_height - y;
     if (h <= 0) return;
+
+    if (state->fb_fast) {
+        blit_rows(state, y, h);
+        return;
+    }
 
     EFI_STATUS s = uefi_call_wrapper(state->gop->Blt, 10,
         state->gop,
@@ -180,15 +210,44 @@ void gui_present_band(gui_state_t *state, INTN y, INTN h) {
         state->screen_width * sizeof(UINT32));
     if (!EFI_ERROR(s)) return;
 
-    blit_rows(state, y, h);
+    if (gui_has_linear_fb(state))
+        blit_rows(state, y, h);
 }
 
-static UINTN fade_frame_count(gui_state_t *state) {
+static int fade_speed_value(gui_state_t *state) {
     int sp = state ? state->fade_speed : 0;
-    if (sp < 1) return 0;
+    if (sp < 0) sp = 0;
     if (sp > 10) sp = 10;
 
-    return (UINTN)(12 - sp);
+    return sp;
+}
+
+#define FADE_MIN_DURATION_MS      150
+#define FADE_MAX_DURATION_MS      500
+
+#define FADE_MIN_FRAME_US         1500
+
+static UINTN fade_duration_ms(gui_state_t *state) {
+    int sp = fade_speed_value(state);
+    return FADE_MAX_DURATION_MS
+         - (UINTN)sp * (FADE_MAX_DURATION_MS - FADE_MIN_DURATION_MS) / 10;
+}
+
+static UINT64 fade_tsc_per_us = 0;
+
+static UINT64 fade_now_us(void) {
+    return __builtin_ia32_rdtsc() / fade_tsc_per_us;
+}
+
+static void fade_calibrate_clock(void) {
+    if (fade_tsc_per_us) return;
+
+    UINT64 t0 = __builtin_ia32_rdtsc();
+    BS->Stall(10000);
+    UINT64 elapsed = __builtin_ia32_rdtsc() - t0;
+
+    fade_tsc_per_us = elapsed / 10000;
+    if (fade_tsc_per_us == 0) fade_tsc_per_us = 1;
 }
 
 static int gui_animation_on(gui_state_t *state) {
@@ -205,11 +264,6 @@ static INTN ease_permille(INTN frame, INTN frames) {
 
 static UINTN ease_alpha(INTN frame, INTN frames) {
     return (UINTN)(ease_permille(frame, frames) * 255 / 1000);
-}
-
-static UINTN fade_alpha(UINTN frame, UINTN frames) {
-    if (frames == 0 || frame >= frames) return 255;
-    return (frame * 255 + frames / 2) / frames;
 }
 
 static void fade_write_black(gui_state_t *state, UINTN px) {
@@ -246,8 +300,7 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
                                    int fade_in) {
     if (!state || !state->backbuffer || !snapshot) return;
     UINTN px = state->screen_width * state->screen_height;
-    UINTN frames = fade_frame_count(state);
-    if (!gui_animation_on(state) || frames == 0) {
+    if (!gui_animation_on(state)) {
         if (fade_in)
             fade_write_snapshot(state, snapshot, px);
         else
@@ -256,22 +309,32 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
         return;
     }
 
-    UINTN first = 1;
-    UINTN delay = (state->fade_speed >= 9) ? 0 : (UINTN)(10 - state->fade_speed);
+    fade_calibrate_clock();
+    UINT64 duration_us = (UINT64)fade_duration_ms(state) * 1000;
+    UINT64 start = fade_now_us();
 
-    for (UINTN f = first; f <= frames; f++) {
-        UINTN a = fade_alpha(f, frames);
+    for (;;) {
+        UINT64 frame_start = fade_now_us();
+        UINT64 elapsed = frame_start - start;
+        int done = elapsed >= duration_us;
+
+        UINTN e = done ? 1000 : (UINTN)ease_permille((INTN)elapsed, (INTN)duration_us);
+        UINTN a = e * 255 / 1000;
         if (!fade_in) a = 255 - a;
+
         fade_write_scaled(state, snapshot, px, a);
         gui_present(state);
-        if (delay && f < frames) efi_sleep(delay);
+        if (done) break;
+
+        UINT64 spent = fade_now_us() - frame_start;
+        if (spent < FADE_MIN_FRAME_US) BS->Stall(FADE_MIN_FRAME_US - spent);
     }
 }
 
 static void gui_fade_in_current(gui_state_t *state) {
     if (!state || !state->backbuffer) return;
     UINTN px = state->screen_width * state->screen_height;
-    if (!gui_animation_on(state) || fade_frame_count(state) == 0) {
+    if (!gui_animation_on(state)) {
         gui_present(state);
         return;
     }
@@ -285,7 +348,7 @@ static void gui_fade_in_current(gui_state_t *state) {
 void gui_fade_out(gui_state_t *state) {
     if (!state || !state->backbuffer) return;
     UINTN px = state->screen_width * state->screen_height;
-    if (!gui_animation_on(state) || fade_frame_count(state) == 0) {
+    if (!gui_animation_on(state)) {
         fade_write_black(state, px);
         gui_present(state);
         return;
@@ -295,6 +358,190 @@ void gui_fade_out(gui_state_t *state) {
     for (UINTN i = 0; i < px; i++) snapshot[i] = state->backbuffer[i];
     gui_fade_from_snapshot(state, snapshot, 0);
     efi_free_pool(snapshot);
+}
+
+typedef struct visor_cpu_arch visor_cpu_arch_t;
+struct visor_cpu_arch {
+    void *FlushDataCache;
+    void *EnableInterrupt;
+    void *DisableInterrupt;
+    void *GetInterruptState;
+    void *Init;
+    void *RegisterInterruptHandler;
+    void *GetTimerValue;
+    EFI_STATUS (EFIAPI *SetMemoryAttributes)(visor_cpu_arch_t *This,
+        EFI_PHYSICAL_ADDRESS BaseAddress, UINT64 Length, UINT64 Attributes);
+};
+
+#define MSR_MTRRCAP        0x0FE
+#define MSR_MTRR_DEF_TYPE  0x2FF
+#define MSR_MTRR_PHYSBASE0 0x200
+#define MTRR_TYPE_WC       0x01
+
+static inline UINT64 x_rdmsr(UINT32 i){ UINT32 lo,hi; __asm__ volatile("rdmsr":"=a"(lo),"=d"(hi):"c"(i)); return ((UINT64)hi<<32)|lo; }
+static inline void   x_wrmsr(UINT32 i, UINT64 v){ __asm__ volatile("wrmsr"::"c"(i),"a"((UINT32)v),"d"((UINT32)(v>>32))); }
+static inline void   x_wbinvd(void){ __asm__ volatile("wbinvd":::"memory"); }
+static inline UINT64 x_rdcr0(void){ UINT64 v; __asm__ volatile("mov %%cr0,%0":"=r"(v)); return v; }
+static inline void   x_wrcr0(UINT64 v){ __asm__ volatile("mov %0,%%cr0"::"r"(v):"memory"); }
+static inline UINT64 x_rdcr3(void){ UINT64 v; __asm__ volatile("mov %%cr3,%0":"=r"(v)); return v; }
+static inline void   x_wrcr3(UINT64 v){ __asm__ volatile("mov %0,%%cr3"::"r"(v):"memory"); }
+static inline UINT64 x_rdcr4(void){ UINT64 v; __asm__ volatile("mov %%cr4,%0":"=r"(v)); return v; }
+static inline void   x_wrcr4(UINT64 v){ __asm__ volatile("mov %0,%%cr4"::"r"(v):"memory"); }
+static inline void   x_cpuid(UINT32 leaf, UINT32 *a, UINT32 *b, UINT32 *c, UINT32 *d){
+    __asm__ volatile("cpuid":"=a"(*a),"=b"(*b),"=c"(*c),"=d"(*d):"a"(leaf),"c"(0)); }
+
+static int mtrr_add_wc(UINT64 base, UINT64 size) {
+    UINT64 cap = x_rdmsr(MSR_MTRRCAP);
+    UINT32 vcnt = (UINT32)(cap & 0xFF);
+    if (!(cap & (1ull << 10)) || vcnt == 0) return 0;
+
+    UINT32 a, b, c, d, maxphys = 36;
+    x_cpuid(0x80000000, &a, &b, &c, &d);
+    if (a >= 0x80000008) { x_cpuid(0x80000008, &a, &b, &c, &d); maxphys = a & 0xFF; }
+    if (maxphys < 32 || maxphys > 52) maxphys = 40;
+    UINT64 pmask = (maxphys >= 64 ? ~0ull : ((1ull << maxphys) - 1)) & ~0xFFFull;
+
+    UINT64 sz = 0x1000;
+    while (sz < size) sz <<= 1;
+    if (base & (sz - 1)) return 0;
+
+    int slot = -1;
+    for (UINT32 i = 0; i < vcnt; i++) {
+        UINT64 pm = x_rdmsr(MSR_MTRR_PHYSBASE0 + 2*i + 1);
+        UINT64 pb = x_rdmsr(MSR_MTRR_PHYSBASE0 + 2*i);
+        if (!(pm & (1ull << 11))) { if (slot < 0) slot = (int)i; continue; }
+        if ((pb & 0xFF) == MTRR_TYPE_WC && (pb & pmask) == (base & pmask)) return 1;
+    }
+    if (slot < 0) return 0;
+
+    UINT64 nb = (base & pmask) | MTRR_TYPE_WC;
+    UINT64 nm = ((~(sz - 1)) & pmask) | (1ull << 11);
+
+    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    UINT64 cr0 = x_rdcr0();
+    x_wrcr0((cr0 & ~(1ull << 29)) | (1ull << 30));
+    x_wbinvd();
+    x_wrcr3(x_rdcr3());
+    UINT64 deftype = x_rdmsr(MSR_MTRR_DEF_TYPE);
+    x_wrmsr(MSR_MTRR_DEF_TYPE, deftype & ~(1ull << 11));
+
+    x_wrmsr(MSR_MTRR_PHYSBASE0 + 2*slot,     nb);
+    x_wrmsr(MSR_MTRR_PHYSBASE0 + 2*slot + 1, nm);
+
+    x_wrmsr(MSR_MTRR_DEF_TYPE, deftype | (1ull << 11));
+    x_wbinvd();
+    x_wrcr3(x_rdcr3());
+    x_wrcr0(cr0);
+    if (flags & 0x200) __asm__ volatile("sti");
+    return 1;
+}
+
+#define MSR_IA32_PAT 0x277
+#define PTE_P     (1ull << 0)
+#define PTE_PWT   (1ull << 3)
+#define PTE_PCD   (1ull << 4)
+#define PTE_PS    (1ull << 7)
+#define PTE_PAT4K (1ull << 7)
+#define PTE_PATLG (1ull << 12)
+#define PTE_ADDR  0x000FFFFFFFFFF000ull
+
+static void pat_set_slot1_wc(void) {
+    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    UINT64 cr4 = x_rdcr4();
+    if (cr4 & (1ull << 7)) x_wrcr4(cr4 & ~(1ull << 7));
+    UINT64 cr0 = x_rdcr0();
+    x_wrcr0((cr0 & ~(1ull << 29)) | (1ull << 30));
+    x_wbinvd();
+    x_wrcr3(x_rdcr3());
+    UINT64 pat = x_rdmsr(MSR_IA32_PAT);
+    pat = (pat & ~(0xFFull << 8)) | (0x01ull << 8);
+    x_wrmsr(MSR_IA32_PAT, pat);
+    x_wbinvd();
+    x_wrcr3(x_rdcr3());
+    x_wrcr0(cr0);
+    if (cr4 & (1ull << 7)) x_wrcr4(cr4);
+    if (flags & 0x200) __asm__ volatile("sti");
+}
+
+static UINT64 pte_set_wc(UINT64 va) {
+    UINT64 *pml4 = (UINT64*)(x_rdcr3() & PTE_ADDR);
+    UINT64 *e = &pml4[(va >> 39) & 0x1FF];
+    if (!(*e & PTE_P)) return 0;
+    UINT64 *pdpt = (UINT64*)(*e & PTE_ADDR);
+    e = &pdpt[(va >> 30) & 0x1FF];
+    if (!(*e & PTE_P)) return 0;
+    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 30; }
+    UINT64 *pd = (UINT64*)(*e & PTE_ADDR);
+    e = &pd[(va >> 21) & 0x1FF];
+    if (!(*e & PTE_P)) return 0;
+    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 21; }
+    UINT64 *pt = (UINT64*)(*e & PTE_ADDR);
+    e = &pt[(va >> 12) & 0x1FF];
+    if (!(*e & PTE_P)) return 0;
+    *e = (*e & ~(PTE_PCD | PTE_PAT4K)) | PTE_PWT;
+    return 1ull << 12;
+}
+
+static int fb_pt_set_wc(UINT64 base, UINT64 size) {
+    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    UINT64 cr0 = x_rdcr0();
+    x_wrcr0(cr0 & ~(1ull << 16));
+
+    int ok = 1;
+    UINT64 va = base & ~0xFFFull, end = base + size;
+    while (va < end) {
+        UINT64 pg = pte_set_wc(va);
+        if (!pg) { ok = 0; break; }
+        va = (va & ~(pg - 1)) + pg;
+    }
+
+    x_wrcr0(cr0);
+
+    UINT64 cr4 = x_rdcr4();
+    if (cr4 & (1ull << 7)) { x_wrcr4(cr4 & ~(1ull << 7)); x_wrcr4(cr4); }
+    else x_wrcr3(x_rdcr3());
+    if (flags & 0x200) __asm__ volatile("sti");
+    return ok;
+}
+
+#define FB_FAST_THRESHOLD_US 20000
+
+static void gui_fb_set_wc(gui_state_t *state) {
+    static EFI_GUID cpu_guid = { 0x26baccb1, 0x6f42, 0x11d4,
+        { 0xbc, 0xe7, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } };
+    state->fb_fast = 0;
+    if (!gui_has_linear_fb(state)) return;
+    UINT64 base = (UINT64)state->gop->Mode->FrameBufferBase;
+    UINT64 size = (UINT64)state->gop->Mode->FrameBufferSize;
+    if (!base || !size) return;
+
+    const CHAR16 *method = L"none";
+
+    visor_cpu_arch_t *cpu = NULL;
+    if (!EFI_ERROR(BS->LocateProtocol(&cpu_guid, NULL, (void**)&cpu)) && cpu && cpu->SetMemoryAttributes
+        && !EFI_ERROR(cpu->SetMemoryAttributes(cpu, base, size, EFI_MEMORY_WC)))
+        method = L"cpu-arch";
+
+    int have_mtrr = mtrr_add_wc(base, size);
+
+    static int pat_ready = 0;
+    if (!pat_ready) { pat_set_slot1_wc(); pat_ready = 1; }
+    int have_pat = fb_pt_set_wc(base, size);
+
+    if (have_pat)       method = have_mtrr ? L"pat+mtrr" : L"pat";
+    else if (have_mtrr) method = L"mtrr";
+    if (method[0] == L'n' && cpu) method = L"cpu-arch";
+
+    fade_calibrate_clock();
+    UINT64 t0 = fade_now_us();
+    blit_rows(state, 0, (INTN)state->screen_height);
+    UINT64 dt = fade_now_us() - t0;
+    state->fb_fast = (dt < FB_FAST_THRESHOLD_US) ? 1 : 0;
+
+    CHAR16 g[160];
+    SPrint(g, sizeof(g), L"gfx: fb WC method=%s present=%dus -> %s",
+           method, (int)dt, state->fb_fast ? L"DIRECT(fast)" : L"BLT(fallback)");
+    efi_log(g);
 }
 
 EFI_STATUS gui_init(gui_state_t *state) {
@@ -463,6 +710,8 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->scene_valid = 0;
 
     gui_fill_rect(state, 0, 0, state->screen_width, state->screen_height, state->bg_color);
+
+    gui_fb_set_wc(state);
     gui_present(state);
 
     return EFI_SUCCESS;
@@ -529,6 +778,8 @@ EFI_STATUS gui_set_mode(gui_state_t *state, UINTN want_w, UINTN want_h, int want
     if (!state->backbuffer) return EFI_OUT_OF_RESOURCES;
 
     gui_fill_rect(state, 0, 0, state->screen_width, state->screen_height, state->bg_color);
+
+    gui_fb_set_wc(state);
     gui_present(state);
     return EFI_SUCCESS;
 }
