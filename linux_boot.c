@@ -243,9 +243,6 @@ static CHAR8* cpio_name_from_path(CHAR16 *path) {
             (last_slash_check || src[cap + 1] == 0 ||
              src[cap + 1] == L'/' || src[cap + 1] == L'\\'))
             return NULL;
-        if (!slash && c == L'.' && last_slash_check && src[cap + 1] == L'.' &&
-            (src[cap + 2] == 0 || src[cap + 2] == L'/' || src[cap + 2] == L'\\'))
-            return NULL;
         last_slash_check = slash;
         cap++;
     }
