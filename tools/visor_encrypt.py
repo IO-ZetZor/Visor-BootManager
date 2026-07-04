@@ -18,8 +18,11 @@ HEADER = "<8sIIQ16s12s32s"
 HEADER_SIZE = struct.calcsize(HEADER)
 
 
+PASSWORD_MAX_LEN = 510
+
+
 def derive_key(password: str, salt: bytes, iterations: int) -> bytes:
-    p = password.encode("ascii", "replace")
+    p = password.encode("ascii")
     return hashlib.pbkdf2_hmac("sha256", p, salt, iterations, dklen=64)
 
 
@@ -74,8 +77,8 @@ def main() -> int:
     )
     ap.add_argument("input")
     ap.add_argument("output")
-    ap.add_argument("--iterations", type=int, default=200000,
-                    help="password hash iterations, default: 200000")
+    ap.add_argument("--iterations", type=int, default=600000,
+                    help="password hash iterations, default: 600000")
     args = ap.parse_args()
 
     if args.iterations < 1:
@@ -90,6 +93,14 @@ def main() -> int:
         return 1
     if not password:
         print("empty passwords are not allowed", file=sys.stderr)
+        return 1
+    if not password.isascii():
+        print("password must be ASCII only (the bootloader cannot enter "
+              "non-ASCII characters)", file=sys.stderr)
+        return 1
+    if len(password) > PASSWORD_MAX_LEN:
+        print(f"password must be at most {PASSWORD_MAX_LEN} characters "
+              "(bootloader input limit)", file=sys.stderr)
         return 1
 
     with open(args.input, "rb") as f:
