@@ -103,10 +103,6 @@ typedef struct {
 
     EFI_GRAPHICS_PIXEL_FORMAT pixel_format;
 
-    /* Set once at init: 1 when the linear framebuffer has been confirmed
-     * write-combining (direct CopyMem present is fast), 0 when it is still
-     * uncached (direct writes would be ~100x slower than the firmware Blt,
-     * so we must present via Blt instead). */
     int fb_fast;
 
     UINT32 *backbuffer;
