@@ -215,7 +215,8 @@ select_entry:
                 efi_log(L"WARN: background failed to load/decode - using solid colour");
             else
                 efi_log(L"main: background loaded");
-            gui_apply_accent(&gui);
+            /* accent disabled for this build */
+            /* gui_apply_accent(&gui); */
         }
 
         efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");
