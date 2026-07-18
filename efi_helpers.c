@@ -284,7 +284,7 @@ EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
 
 int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) {
     if (!dir || !name_out || name_cap == 0) return 0;
-    UINT8 buf[1024];
+    UINT8 buf[1024] __attribute__((aligned(8)));
     for (;;) {
         UINTN size = sizeof(buf);
         EFI_STATUS s = dir->Read(dir, &size, buf);
@@ -304,7 +304,7 @@ int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, in
 int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) {
     if (!dir || !dir->handle || !name_out || name_cap == 0) return 0;
 
-    UINT8 buf[1024];
+    UINT8 buf[1024] __attribute__((aligned(8)));
     for (;;) {
         UINTN size = sizeof(buf);
         EFI_STATUS s = dir->handle->Read(dir->handle, &size, buf);
@@ -326,17 +326,41 @@ int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) 
     }
 }
 
+UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
+    if (!fh) return 0;
+
+    UINTN info_size = 0;
+    EFI_STATUS s = fh->GetInfo(fh, &gEfiFileInfoGuid, &info_size, NULL);
+    if (s == EFI_BUFFER_TOO_SMALL && info_size > 0) {
+        EFI_FILE_INFO *info = efi_allocate_pool(info_size);
+        if (info) {
+            s = fh->GetInfo(fh, &gEfiFileInfoGuid, &info_size, info);
+            if (!EFI_ERROR(s)) {
+                UINT64 size = info->FileSize;
+                efi_free_pool(info);
+                return size;
+            }
+            efi_free_pool(info);
+        }
+    }
+
+    UINT64 size = 0;
+    fh->SetPosition(fh, ~0ULL);
+    if (EFI_ERROR(fh->GetPosition(fh, &size))) size = 0;
+    fh->SetPosition(fh, 0);
+    return size;
+}
+
 efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     efi_file_t *file = efi_fopen(path);
     if (!file) return NULL;
 
-    UINT64 size = 0;
-    file->handle->SetPosition(file->handle, ~0ULL);
-    file->handle->GetPosition(file->handle, &size);
-    file->handle->SetPosition(file->handle, 0);
+    UINT64 size = efi_file_size(file->handle);
 
     if (size == 0 || size > 256ULL * 1024 * 1024) {
-        efi_log(L"WARN: file size is zero or implausibly large - skipping");
+        CHAR16 d[96];
+        SPrint(d, sizeof(d), L"WARN: file size %ld is zero or implausibly large - skipping", size);
+        efi_log(d);
         efi_fclose(file);
         return NULL;
     }
@@ -385,10 +409,7 @@ int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
         if (EFI_ERROR(io->OpenVolume(io, &root)) || !root) continue;
         EFI_FILE_PROTOCOL *fh = NULL;
         if (!EFI_ERROR(root->Open(root, &fh, oldp, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && fh) {
-            UINT64 sz = 0;
-            fh->SetPosition(fh, ~0ULL);
-            fh->GetPosition(fh, &sz);
-            fh->SetPosition(fh, 0);
+            UINT64 sz = efi_file_size(fh);
             if (sz > 0 && sz < 1024 * 1024) {
                 UINT8 *buf = efi_allocate_pool((UINTN)sz);
                 if (buf) {
