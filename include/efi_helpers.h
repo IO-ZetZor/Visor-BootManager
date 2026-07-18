@@ -35,6 +35,7 @@ typedef struct {
     UINTN size;
 } efi_file_buffer_t;
 
+UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh);
 efi_file_buffer_t* efi_load_file(CHAR16 *path);
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
