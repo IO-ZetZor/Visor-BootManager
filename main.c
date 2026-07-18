@@ -29,10 +29,10 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     ST->ConOut->ClearScreen(ST->ConOut);
     ST->ConOut->EnableCursor(ST->ConOut, FALSE);
 
+    efi_print(L"Visor loading...\r\n");
+
     efi_log_begin();
     efi_log(L"main: efi_main entered, services initialised");
-
-    efi_print(L"Visor loading...\r\n");
 
     efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
     gui_state_t gui = {0};
@@ -118,6 +118,12 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.blur            = config.blur;
     gui.blur_title      = config.blur_title;
     gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
+    gui.accent_enabled   = config.accent_enabled;
+    gui.accent_icons     = config.accent_icons;
+    gui.accent_underline = config.accent_underline;
+    gui.accent_text      = config.accent_text;
+    gui.accent_os_icons  = config.accent_os_icons;
+    gui.accent_variant   = config.accent_variant;
     gui.animation       = config.animation;
     gui.anim_speed      = config.anim_speed;
     gui.fade_speed      = config.fade_speed;
@@ -209,6 +215,7 @@ select_entry:
                 efi_log(L"WARN: background failed to load/decode - using solid colour");
             else
                 efi_log(L"main: background loaded");
+            gui_apply_accent(&gui);
         }
 
         efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");
@@ -246,7 +253,7 @@ select_entry:
 
         UINT64 osind = 0;
         UINTN  sz = sizeof(osind);
-        UINT32 attr;
+        UINT32 attr = 0;
         RT->GetVariable(L"OsIndications", &gEfiGlobalVariableGuid, &attr, &sz, &osind);
         osind |= 0x0000000000000001ULL;
         EFI_STATUS sv = RT->SetVariable(L"OsIndications", &gEfiGlobalVariableGuid,
@@ -457,7 +464,7 @@ boot_selected:
         efi_log(L"recovery: firmware setup requested");
         UINT64 osind = 0;
         UINTN  sz = sizeof(osind);
-        UINT32 attr;
+        UINT32 attr = 0;
         RT->GetVariable(L"OsIndications", &gEfiGlobalVariableGuid, &attr, &sz, &osind);
         osind |= 0x0000000000000001ULL;
         RT->SetVariable(L"OsIndications", &gEfiGlobalVariableGuid,
