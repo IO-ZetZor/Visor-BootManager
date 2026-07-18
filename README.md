@@ -478,20 +478,64 @@ and boots with zero extra code. This is the simplest and most portable setup —
 prefer it unless you specifically want raw `vmlinuz`+`initrd` off a Linux
 filesystem.
 
-**Optional: bring-your-own filesystem driver.** Visor **ships no filesystem
-drivers** Instead it loads whatever EFI driver *you* place in **`\EFI\visor\drivers\`** — every `*.efi`
-there is started at boot and connected to your disks.
+---
 
-Obtain a driver yourself — the open-source `efifs` set provides `btrfs_x64.efi`, `ext4_x64.efi`, etc.:
+## Booting from non-FAT filesystems
+
+UEFI firmware can only read FAT. If your kernels live on an ext2/ext4/btrfs
+partition (a separate `/boot`, or `/boot` inside the root filesystem while the
+ESP is mounted at `/boot/efi`), Visor cannot see them until you add a
+filesystem driver.
+
+Visor **ships no filesystem drivers.** Instead it loads whatever EFI driver
+*you* place in **`\EFI\visor\drivers\`** — every `*.efi` there is started at
+boot and connected to your disks.
+
+**1. Install a driver.** The open-source [efifs](https://efi.akeo.ie/) set
+provides `ext2_x64.efi` (also handles ext3/ext4), `btrfs_x64.efi`, etc.:
 
 ```sh
 mkdir -p <ESP>/EFI/visor/drivers
-cp <your>/btrfs_x64.efi <ESP>/EFI/visor/drivers/
+cp ext2_x64.efi <ESP>/EFI/visor/drivers/
 ```
 
-`boot.log` reports `drivers: started N, connecting controllers` when this works.
-If Secure Boot is on, the driver must be signed/enrolled (e.g. via `sbctl`) too.
+(or use `./install.sh --fs-driver <path>`.)
 
+`boot.log` reports `drivers: started N, connecting controllers` when this
+works. If Secure Boot is on, the driver must be signed/enrolled (e.g. via
+`sbctl`) too.
+
+**2. Point `kernel=` at the file — relative to that filesystem's root.** Once
+the driver is loaded, the Linux partition becomes just another volume, and
+Visor searches all volumes for the path you give. Paths still use back-slashes
+and are relative to the root of *that partition*, not the ESP and not your
+mounted Linux paths.
+
+For example, with a separate `/boot` partition (kernels appear at the top of
+that filesystem):
+
+```ini
+entry {
+    name   = "Linux"
+    kernel = \vmlinuz-6.9.0
+    initrd = \initramfs-6.9.0.img
+    cmdline = "root=UUID=... rw"
+}
+```
+
+If `/boot` is a directory inside your root partition, prefix it:
+
+```ini
+    kernel = \boot\vmlinuz-6.9.0
+    initrd = \boot\initramfs-6.9.0.img
+```
+
+If the same path exists on several volumes, pin the right one with
+`uuid = <PARTUUID>` in the entry (find it with `lsblk -o NAME,PARTUUID`).
+
+Auto-detection also benefits: with a driver loaded, Visor's kernel scan and
+BLS/OSTree scan see the Linux partition too, so entries may appear with no
+config at all.
 ---
 
 ## Secure Boot
