@@ -134,7 +134,22 @@ int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid)
     return 0;
 }
 
+#define NORM_PATH_MAX 512
+static CHAR16* collapse_backslashes(CHAR16 *path, CHAR16 *buf, UINTN cap) {
+    if (!path) return path;
+    UINTN o = 0;
+    for (UINTN i = 0; path[i]; i++) {
+        if (path[i] == '\\' && o > 0 && buf[o - 1] == '\\') continue;
+        if (o + 1 >= cap) return path;
+        buf[o++] = path[i];
+    }
+    buf[o] = '\0';
+    return buf;
+}
+
 EFI_DEVICE_PATH* efi_make_file_path(EFI_HANDLE handle, CHAR16 *filename) {
+    CHAR16 nbuf[NORM_PATH_MAX];
+    filename = collapse_backslashes(filename, nbuf, NORM_PATH_MAX);
     EFI_DEVICE_PATH *dp = NULL;
     BS->HandleProtocol(handle, &gEfiDevicePathProtocolGuid, (void**)&dp);
     if (!dp) return NULL;
@@ -206,6 +221,9 @@ EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid) {
 }
 
 efi_file_t* efi_fopen(CHAR16 *path) {
+    CHAR16 nbuf[NORM_PATH_MAX];
+    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
+
     efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
     if (!file) return NULL;
     file->root = NULL;
@@ -267,6 +285,8 @@ UINTN efi_fread(efi_file_t *file, void *buf, UINTN size) {
 
 int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
     if (!root) return 0;
+    CHAR16 nbuf[NORM_PATH_MAX];
+    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
     EFI_FILE_PROTOCOL *f = NULL;
     if (EFI_ERROR(root->Open(root, &f, path, EFI_FILE_MODE_READ, 0)) || !f)
         return 0;
