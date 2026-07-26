@@ -17,25 +17,20 @@ HEADER_AUTH_SIZE = 52
 HEADER = "<8sIIQ16s12s32s"
 HEADER_SIZE = struct.calcsize(HEADER)
 
-
 PASSWORD_MAX_LEN = 510
-
 
 def derive_key(password: str, salt: bytes, iterations: int) -> bytes:
     p = password.encode("ascii")
     return hashlib.pbkdf2_hmac("sha256", p, salt, iterations, dklen=64)
 
-
 def rotl32(v: int, n: int) -> int:
     return ((v << n) & 0xFFFFFFFF) | (v >> (32 - n))
-
 
 def quarter_round(x: list[int], a: int, b: int, c: int, d: int) -> None:
     x[a] = (x[a] + x[b]) & 0xFFFFFFFF; x[d] ^= x[a]; x[d] = rotl32(x[d], 16)
     x[c] = (x[c] + x[d]) & 0xFFFFFFFF; x[b] ^= x[c]; x[b] = rotl32(x[b], 12)
     x[a] = (x[a] + x[b]) & 0xFFFFFFFF; x[d] ^= x[a]; x[d] = rotl32(x[d], 8)
     x[c] = (x[c] + x[d]) & 0xFFFFFFFF; x[b] ^= x[c]; x[b] = rotl32(x[b], 7)
-
 
 def chacha20_block(key: bytes, nonce: bytes, counter: int) -> bytes:
     constants = b"expand 32-byte k"
@@ -55,7 +50,6 @@ def chacha20_block(key: bytes, nonce: bytes, counter: int) -> bytes:
         quarter_round(x, 3, 4, 9, 14)
     return struct.pack("<16I", *[((x[i] + st[i]) & 0xFFFFFFFF) for i in range(16)])
 
-
 def crypt_stream(data: bytes, key: bytes, nonce: bytes) -> bytes:
     out = bytearray(data)
     counter = 1
@@ -70,21 +64,52 @@ def crypt_stream(data: bytes, key: bytes, nonce: bytes) -> bytes:
         counter += 1
     return bytes(out)
 
+def encrypt_file(inp: str, outp: str, password: str, iterations: int) -> None:
+    with open(inp, "rb") as f:
+        plain = f.read()
+    if not plain:
+        raise SystemExit(f"input is empty: {inp}")
+
+    salt = os.urandom(SALT_SIZE)
+    nonce = os.urandom(NONCE_SIZE)
+    keys = derive_key(password, salt, iterations)
+    enc_key = keys[:32]
+    mac_key = keys[32:]
+    cipher = crypt_stream(plain, enc_key, nonce)
+    auth_header = struct.pack("<8sIIQ16s12s", MAGIC, VERSION, iterations,
+                              len(plain), salt, nonce)
+    tag = hmac.new(mac_key, auth_header + cipher, hashlib.sha256).digest()
+
+    with open(outp, "wb") as f:
+        f.write(auth_header + tag)
+        f.write(cipher)
+
+    print(f"wrote {outp} ({HEADER_SIZE + len(cipher)} bytes)")
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Encrypt a kernel/UKI/initrd into Visor's boot-time container format."
+        description="Encrypt kernels/UKIs/initrds into Visor's boot-time "
+                    "container format. Multiple INPUT OUTPUT pairs share one "
+                    "password prompt."
     )
-    ap.add_argument("input")
-    ap.add_argument("output")
+    ap.add_argument("files", nargs="+", metavar="INPUT OUTPUT")
     ap.add_argument("--iterations", type=int, default=600000,
                     help="password hash iterations, default: 600000")
     args = ap.parse_args()
+
+    if len(args.files) % 2 != 0:
+        ap.error("arguments must be INPUT OUTPUT pairs")
+    pairs = list(zip(args.files[::2], args.files[1::2]))
 
     if args.iterations < 1:
         ap.error("--iterations must be at least 1")
     if args.iterations > MAX_ITERATIONS:
         ap.error(f"--iterations must be at most {MAX_ITERATIONS}")
+
+    for inp, _ in pairs:
+        if not os.path.isfile(inp):
+            print(f"input file not found: {inp}", file=sys.stderr)
+            return 1
 
     password = getpass.getpass("Password: ")
     confirm = getpass.getpass("Confirm: ")
@@ -103,30 +128,9 @@ def main() -> int:
               "(bootloader input limit)", file=sys.stderr)
         return 1
 
-    with open(args.input, "rb") as f:
-        plain = f.read()
-    if not plain:
-        print("input is empty", file=sys.stderr)
-        return 1
-
-    salt = os.urandom(SALT_SIZE)
-    nonce = os.urandom(NONCE_SIZE)
-    keys = derive_key(password, salt, args.iterations)
-    enc_key = keys[:32]
-    mac_key = keys[32:]
-    cipher = crypt_stream(plain, enc_key, nonce)
-    auth_header = struct.pack("<8sIIQ16s12s", MAGIC, VERSION, args.iterations,
-                              len(plain), salt, nonce)
-    tag = hmac.new(mac_key, auth_header + cipher, hashlib.sha256).digest()
-    header = auth_header + tag
-
-    with open(args.output, "wb") as f:
-        f.write(header)
-        f.write(cipher)
-
-    print(f"wrote {args.output} ({HEADER_SIZE + len(cipher)} bytes)")
+    for inp, outp in pairs:
+        encrypt_file(inp, outp, password, args.iterations)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -18,10 +18,14 @@ Commands:
   install [install-args...]     Run install.sh
   update [options]              Pull latest GitHub version, build, and install
   sign [options]                Sign installed EFI binaries with sbctl
+  drivers [options]             Install an EfiFs filesystem driver for /boot
+  encrypt <kernel> [initrd]     Encrypt kernel (and initrd) with one password,
+                                install to the ESP, and set up the boot entry
   uninstall [options]           Remove installed Visor files
   status [options]              Show install/source status
   config validate [options]      Validate a config file
   clean                         Remove build outputs
+  doctor                        Check build/install dependencies
   help                          Show this help
 
 Update options:
@@ -38,6 +42,21 @@ Sign options:
   --source-dir PATH  Local checkout path
   --no-drivers      Do not sign EFI files in \EFI\visor\drivers
 
+Drivers options:
+  --esp PATH         ESP mount point
+  --fs TYPE          filesystem type (default: auto-detect from /boot)
+  --sign             sign the installed driver with sbctl
+
+Encrypt options:
+  --esp PATH         ESP mount point (install the result into \EFI\visor)
+  --out PATH         Write the encrypted file here instead of the ESP (single input)
+  --name NAME        Output filename under \EFI\visor (default: <input>.enc)
+  --title TEXT       Menu entry name (default: "Encrypted Linux")
+  --iterations N     PBKDF2 iterations (default 600000)
+  --initrd           The single input is an initrd, not a kernel
+  --no-config        Only print the boot.conf entry, never offer to append it
+  --no-luks          Do not add luks=1 even if the running system uses LUKS
+
 Uninstall options:
   --esp PATH         ESP mount point
   --cli-dir PATH     Directory to remove the host-side command from
@@ -47,6 +66,12 @@ Status options:
   --esp PATH         ESP mount point
   --source-dir PATH  Local checkout path
 
+Doctor options:
+  --esp PATH         ESP mount point
+  --source-dir PATH  Source tree to check
+  --file PATH        Config file to validate
+  --build            Run a build as part of diagnostics
+
 Config validate options:
   --file PATH        Config file to validate
   --esp PATH         ESP mount point
@@ -55,6 +80,16 @@ EOF
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+need_value() {
+    local opt="$1"
+    local val="${2:-}"
+    [ -n "$val" ] || die "$opt needs a value"
+    case "$val" in
+        --*) die "$opt needs a value" ;;
+    esac
+    printf '%s\n' "$val"
 }
 
 script_dir() {
@@ -141,6 +176,16 @@ project_or_die() {
     printf '%s\n' "$dir"
 }
 
+find_encrypt_tool() {
+    local c
+    for c in "$(script_dir)/tools/visor_encrypt.py" \
+             "$(project_dir)/tools/visor_encrypt.py" \
+             "$DEFAULT_SOURCE_DIR/tools/visor_encrypt.py"; do
+        [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    return 1
+}
+
 cmd_build() {
     local dir
     dir="$(project_or_die)"
@@ -160,6 +205,215 @@ cmd_clean() {
     dir="$(project_or_die)"
     say "Cleaning build outputs in $dir"
     make --no-print-directory -C "$dir" clean
+}
+
+cmd_doctor() {
+    local esp=""
+    local source_dir=""
+    local config_file=""
+    local check_build=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --file) config_file="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --build) check_build=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown doctor option: $1" ;;
+        esac
+    done
+
+    local ok=1
+    local c
+    local dir
+    dir="$(project_dir)"
+    [ -z "$source_dir" ] && source_dir="$dir"
+
+    printf 'Source: %s\n' "$source_dir"
+    for c in git make objcopy objdump awk sed od; do
+        if command -v "$c" >/dev/null 2>&1; then
+            printf 'ok  %s\n' "$c"
+        else
+            printf 'miss %s\n' "$c"
+            ok=0
+        fi
+    done
+
+    if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
+        printf 'ok  x86_64-linux-gnu-gcc\n'
+    elif command -v gcc >/dev/null 2>&1; then
+        printf 'ok  gcc\n'
+    elif command -v cc >/dev/null 2>&1; then
+        printf 'ok  cc\n'
+    else
+        printf 'miss C compiler\n'
+        ok=0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        printf 'ok  python3\n'
+    else
+        printf 'warn python3 missing; encryption/font tools unavailable\n'
+    fi
+
+    if [ -d /usr/include/efi ] || [ -d /usr/local/include/efi ] || [ -d /usr/include/gnuefi/efi ]; then
+        printf 'ok  gnu-efi headers\n'
+    else
+        printf 'miss gnu-efi headers\n'
+        ok=0
+    fi
+
+    if [ -f /usr/lib/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib64/gnuefi/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib/gnuefi/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib/x86_64-linux-gnu/crt0-efi-x86_64.o ] ||
+       [ -f /usr/lib/x86_64-linux-gnu/gnuefi/crt0-efi-x86_64.o ]; then
+        printf 'ok  gnu-efi crt0\n'
+    else
+        printf 'miss gnu-efi crt0\n'
+        ok=0
+    fi
+
+    if [ -f "$source_dir/Makefile" ] && [ -f "$source_dir/install.sh" ]; then
+        printf 'ok  source tree\n'
+    else
+        printf 'miss source tree files\n'
+        ok=0
+    fi
+
+    if [ -f "$source_dir/visor_x64.efi" ]; then
+        printf 'ok  built EFI: %s\n' "$source_dir/visor_x64.efi"
+    else
+        printf 'warn built EFI missing: run visor build\n'
+    fi
+
+    if [ "$check_build" -eq 1 ] && [ -f "$source_dir/Makefile" ]; then
+        if make --no-print-directory -C "$source_dir" >/dev/null; then
+            printf 'ok  build\n'
+        else
+            printf 'fail build\n'
+            ok=0
+        fi
+    fi
+
+    for c in assets/icons/linux.png assets/icons/windows.png assets/icons/unknown.png assets/backgrounds/default.png; do
+        [ -f "$source_dir/$c" ] && printf 'ok  %s\n' "$c" || { printf 'miss %s\n' "$c"; ok=0; }
+    done
+
+    esp="$(resolve_esp "$esp" || true)"
+    if [ -n "$esp" ]; then
+        local root="$esp/EFI/visor"
+        printf 'ESP: %s\n' "$esp"
+        [ -d "$root" ] && printf 'ok  install dir\n' || { printf 'miss install dir: %s\n' "$root"; ok=0; }
+        [ -f "$root/visor_x64.efi" ] && printf 'ok  installed EFI\n' || { printf 'miss installed EFI\n'; ok=0; }
+        if [ -f "$root/boot.conf" ]; then
+            if validate_config_file "$root/boot.conf"; then
+                printf 'ok  installed config\n'
+            else
+                printf 'fail installed config\n'
+                ok=0
+            fi
+            [ -z "$config_file" ] && config_file="$root/boot.conf"
+        elif [ -f "$source_dir/boot.conf.example" ]; then
+            printf 'warn installed config missing; example exists\n'
+        else
+            printf 'miss installed config\n'
+            ok=0
+        fi
+        [ -f "$root/boot.log" ] && printf 'ok  boot log\n' || printf 'warn boot log missing; it appears after first boot\n'
+        [ -d "$root/icons" ] && printf 'ok  icons dir\n' || printf 'warn icons dir missing\n'
+        [ -d "$root/backgrounds" ] && printf 'ok  backgrounds dir\n' || printf 'warn backgrounds dir missing\n'
+        if [ -d "$root/drivers" ]; then
+            local driver_count
+            driver_count="$(find "$root/drivers" -maxdepth 1 \( -iname '*.efi' -o -iname '*.EFI' \) 2>/dev/null | wc -l | tr -d ' ')"
+            printf 'ok  drivers dir (%s EFI files)\n' "$driver_count"
+        else
+            printf 'ok  drivers dir absent\n'
+        fi
+
+        local venc_count=0
+        local old_venc=0
+        if command -v find >/dev/null 2>&1; then
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                venc_count=$((venc_count + 1))
+                if command -v od >/dev/null 2>&1; then
+                    local hdr magic version
+                    hdr="$(od -An -tx1 -N12 "$f" 2>/dev/null | tr -d ' \n')"
+                    magic="${hdr:0:16}"
+                    version="${hdr:16:8}"
+                    if [ "$magic" = "5649534f52454e43" ] && [ "$version" = "02000000" ]; then
+                        printf 'ok  encrypted artifact v2: %s\n' "$f"
+                    else
+                        printf 'warn encrypted artifact not VISORENC v2: %s\n' "$f"
+                        old_venc=$((old_venc + 1))
+                    fi
+                fi
+            done <<EOF
+$(find "$root" -type f -name '*.venc' 2>/dev/null)
+EOF
+        fi
+        [ "$venc_count" -eq 0 ] && printf 'ok  encrypted artifacts: none found\n'
+        [ "$old_venc" -eq 0 ] || ok=0
+    else
+        printf 'warn ESP not detected; pass --esp PATH for install checks\n'
+    fi
+
+    [ -z "$config_file" ] && [ -f ./boot.conf ] && config_file=./boot.conf
+    [ -z "$config_file" ] && [ -f "$source_dir/boot.conf.example" ] && config_file="$source_dir/boot.conf.example"
+    if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+        if validate_config_file "$config_file"; then
+            printf 'ok  config valid: %s\n' "$config_file"
+        else
+            printf 'fail config invalid: %s\n' "$config_file"
+            ok=0
+        fi
+        if grep -Eiq '^[[:space:]]*quiet[[:space:]]*=[[:space:]]*(1|true|yes)' "$config_file"; then
+            printf 'ok  quiet boot enabled; recovery will show captured logs after failure\n'
+        fi
+        if grep -Eiq '^[[:space:]]*luks[[:space:]]*=[[:space:]]*(1|true|yes)' "$config_file"; then
+            if ! grep -Eiq '^[[:space:]]*luks_(cmdline|preset)[[:space:]]*=' "$config_file"; then
+                printf 'warn luks=1 without luks_cmdline or luks_preset may leave initramfs prompting\n'
+            fi
+            if ! grep -Eiq '^[[:space:]]*initrd[[:space:]]*=' "$config_file"; then
+                printf 'warn luks=1 without initrd= only works for EFI-stub/UKI paths, not raw kernels\n'
+            fi
+        fi
+    else
+        printf 'warn config file unavailable\n'
+    fi
+
+    local sb_enabled=0
+    if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+        printf 'ok  secure boot enabled\n'
+        sb_enabled=1
+    elif command -v bootctl >/dev/null 2>&1; then
+        if bootctl status 2>/dev/null | grep -qi 'Secure Boot:.*enabled'; then
+            printf 'ok  secure boot enabled\n'
+            sb_enabled=1
+        elif bootctl status 2>/dev/null | grep -qi 'Secure Boot:'; then
+            printf 'warn secure boot not enabled\n'
+        fi
+    elif [ -d /sys/firmware/efi/efivars ]; then
+        printf 'warn secure boot state unavailable; bootctl missing\n'
+    fi
+
+    if [ "$sb_enabled" -eq 1 ] && [ -n "$esp" ] && [ -d "$esp/EFI/visor/drivers" ]; then
+        printf 'warn secure boot enabled with filesystem drivers present; firmware or shim must trust them\n'
+    fi
+
+    if command -v efibootmgr >/dev/null 2>&1; then
+        if efibootmgr 2>/dev/null | grep -qi 'Visor'; then
+            printf 'ok  UEFI boot entry\n'
+        else
+            printf 'warn UEFI boot entry missing\n'
+        fi
+    else
+        printf 'warn efibootmgr missing; boot entry not checked\n'
+    fi
+
+    [ "$ok" -eq 1 ] || return 1
 }
 
 git_default_branch() {
@@ -287,8 +541,8 @@ cmd_config_validate() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --file) file="${2:-}"; shift 2 ;;
-            --esp) esp="${2:-}"; shift 2 ;;
+            --file) file="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown config option: $1" ;;
         esac
@@ -319,8 +573,8 @@ cmd_status() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --esp) esp="${2:-}"; shift 2 ;;
-            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown status option: $1" ;;
         esac
@@ -372,8 +626,8 @@ cmd_sign() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --esp) esp="${2:-}"; shift 2 ;;
-            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --no-drivers) sign_drivers=0; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown sign option: $1" ;;
@@ -405,6 +659,156 @@ cmd_sign() {
     die "could not find an EFI binary to sign"
 }
 
+boot_fs_type() {
+    local t=""
+    if mountpoint -q /boot 2>/dev/null; then
+        t="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
+    fi
+    [ -z "$t" ] && t="$(findmnt -no FSTYPE / 2>/dev/null || true)"
+    printf '%s\n' "$t"
+}
+
+EFIFS_VERSION="${EFIFS_VERSION:-v1.12}"
+
+efifs_sha256_for() {
+    case "$1" in
+        btrfs_aa64.efi) echo 92dae5f1d0f6055afb6fd851a438e6173e7a452582f9ff13038ad4f2bf5088b9 ;;
+        btrfs_x64.efi) echo 8ae24aa9f38f71a1e347fb6d0646b4678e04466aadab9919fb2ad133d5ee879c ;;
+        exfat_aa64.efi) echo 629e567847ba028cb6ba1f75af12b1ace2094a6b1e70cddbfe1a99a82cdd0511 ;;
+        exfat_x64.efi) echo 21a5969dcd7b6c149b1dc9408c591749ba9c62fb264e2852cc70061fe3defff6 ;;
+        ext2_aa64.efi) echo a472ec2641475dfcc2dff290472186c9d2424ae005a1a3c46809aac2785d146b ;;
+        ext2_x64.efi) echo e009f02f25b9c5ad3beaf0d3a04f89042985eea1d90187b888130a708c35ca61 ;;
+        f2fs_aa64.efi) echo df07c2bc9f485e8b01e707552852a6ee129e74e7085bd5547b29734ae4848beb ;;
+        f2fs_x64.efi) echo 74490317fbbb4c3f37072c1c1ab93557d1c8834c533690970c41b4310b4527cb ;;
+        hfsplus_aa64.efi) echo fa23cc880464ec5daeb669b7a3a373e524136e87459a5585c2ba23e59ddfe1fb ;;
+        hfsplus_x64.efi) echo 894d5b2985808d92ae8a5476fd942d39075f4730ac86d9c182e421208af5fbaf ;;
+        jfs_aa64.efi) echo 8f8d8388f34342eca7cf566f2b5bdcadd44bc6862d0ffb9cde3d3535e8d58a51 ;;
+        jfs_x64.efi) echo 716d6328ba85d29faa7de377dc61e5a154f3455b3680037b06ec2b025e8eba82 ;;
+        nilfs2_aa64.efi) echo 33a74897a89828fb5ad9f311b0942716438fadd2ba19cf642b692bcec30d970b ;;
+        nilfs2_x64.efi) echo 2c43afe61c5d1fa309cadf79b39a789eca7424b9ed0363efbb246664d6b51a4e ;;
+        ntfs_aa64.efi) echo 5eb1827942bdc8006a714d719b9c80268bb57095d7e484e9529f47781d68c672 ;;
+        ntfs_x64.efi) echo 59c37d5026ca14553a158939e3f2cf20286b6135a713a62c08b569ac9caedcb7 ;;
+        reiserfs_aa64.efi) echo 5cb5300186487fbb497497889674c585a6e93c9a189a3fcdaf9ec411e3c85439 ;;
+        reiserfs_x64.efi) echo d14fd72d34cd04163cd810d465394c6664f30b8c4b45e96fa8b1b974b2933ac0 ;;
+        ufs2_aa64.efi) echo aba8cc7949b77986071c37a9e49502b884a09700d4006913fe39c4840aefc0e1 ;;
+        ufs2_x64.efi) echo 5f916e9263fc32bccd4f1e82b62d4fb72bc4b99b19010b4d4962a87d30854157 ;;
+        xfs_aa64.efi) echo 82af528c35f464f106af40c39336e18ec6a8972bab16054d7e4b4959d11d80f7 ;;
+        xfs_x64.efi) echo f75d595d8037d0f5612b4eaec2d6f4a581353530a792d904c2c6988d358e07f6 ;;
+        zfs_aa64.efi) echo 8c710d400bb4d57129cc96363d21e42ea2ab1835ca52182840ef3ebcdf6c0b53 ;;
+        zfs_x64.efi) echo e61dae69979979977f2ffa30283b86526e54fed8ad240ee4c0529690b1e5342d ;;
+        *) echo "" ;;
+    esac
+}
+
+efifs_verify_sha256() {
+    local want got
+    want="$(efifs_sha256_for "$2")"
+    if [ -z "$want" ]; then
+        warn "no pinned SHA-256 for $2 - skipping checksum verification"
+        return 0
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        got="$(sha256sum "$1" | cut -d" " -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        got="$(shasum -a 256 "$1" | cut -d" " -f1)"
+    else
+        warn "sha256sum not available - skipping checksum verification"
+        return 0
+    fi
+    [ "$got" = "$want" ]
+}
+
+efifs_name_for() {
+    case "$1" in
+        ext2|ext3|ext4) echo ext2 ;;
+        btrfs)          echo btrfs ;;
+        xfs)            echo xfs ;;
+        f2fs)           echo f2fs ;;
+        zfs)            echo zfs ;;
+        ntfs|ntfs3)     echo ntfs ;;
+        reiserfs)       echo reiserfs ;;
+        nilfs2)         echo nilfs2 ;;
+        jfs)            echo jfs ;;
+        exfat)          echo exfat ;;
+        hfsplus)        echo hfsplus ;;
+        ufs2)           echo ufs2 ;;
+        *)              echo "" ;;
+    esac
+}
+
+cmd_drivers() {
+    local esp=""
+    local fstype=""
+    local sign=0
+    local efifs_url="${EFIFS_URL:-https://github.com/pbatard/efifs/releases/download/$EFIFS_VERSION}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --fs) fstype="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --sign) sign=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown drivers option: $1" ;;
+        esac
+    done
+
+    esp="$(resolve_esp "$esp")"
+    [ -n "$esp" ] || die "could not find the ESP (pass --esp PATH)"
+    [ -d "$esp/EFI/visor" ] || die "Visor is not installed at $esp/EFI/visor - run 'visor install' first"
+
+    if [ -z "$fstype" ]; then
+        fstype="$(boot_fs_type)"
+        [ -n "$fstype" ] || die "could not detect the /boot filesystem (pass --fs TYPE)"
+        say "Detected kernel filesystem: $fstype"
+    fi
+    case "$fstype" in
+        vfat|msdos)
+            say "FAT is readable by the firmware already - no driver needed."
+            return 0 ;;
+    esac
+
+    local name arch driver tmp
+    name="$(efifs_name_for "$fstype")"
+    [ -n "$name" ] || die "no EfiFs driver known for filesystem '$fstype'"
+    case "$(uname -m)" in
+        aarch64) arch=aa64 ;;
+        *)       arch=x64 ;;
+    esac
+    driver="${name}_${arch}.efi"
+
+    tmp="$(mktemp)"
+    say "Downloading EfiFs driver $driver ..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 -o "$tmp" "$efifs_url/$driver" || { rm -f "$tmp"; die "download failed: $efifs_url/$driver"; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 15 -O "$tmp" "$efifs_url/$driver" || { rm -f "$tmp"; die "download failed: $efifs_url/$driver"; }
+    else
+        rm -f "$tmp"
+        die "curl or wget is required to download the driver"
+    fi
+    [ "$(head -c2 "$tmp" 2>/dev/null)" = "MZ" ] || { rm -f "$tmp"; die "downloaded file is not an EFI binary"; }
+    if [ -z "${EFIFS_URL:-}" ] && [ "$EFIFS_VERSION" = "v1.12" ]; then
+        efifs_verify_sha256 "$tmp" "$driver" || { rm -f "$tmp"; die "SHA-256 mismatch for $driver - refusing to install"; }
+        say "Driver checksum verified (EfiFs $EFIFS_VERSION)"
+    else
+        warn "EFIFS_URL/EFIFS_VERSION overridden - checksum table does not apply"
+    fi
+
+    run_root mkdir -p "$esp/EFI/visor/drivers"
+    run_root install -m 0644 "$tmp" "$esp/EFI/visor/drivers/$driver"
+    rm -f "$tmp"
+    say "Installed filesystem driver: $esp/EFI/visor/drivers/$driver"
+
+    if [ "$sign" -eq 1 ]; then
+        need_cmd sbctl
+        say "Signing $esp/EFI/visor/drivers/$driver"
+        run_root sbctl sign -s "$esp/EFI/visor/drivers/$driver"
+    elif command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+        warn "Secure Boot is enabled - sign the driver ('visor drivers --sign' or 'visor sign') or it will not load."
+    fi
+    say "Visor loads drivers from \\EFI\\visor\\drivers automatically at boot."
+}
+
 remove_boot_entry() {
     if ! command -v efibootmgr >/dev/null 2>&1; then
         warn "efibootmgr not installed; skipping boot entry removal."
@@ -427,8 +831,8 @@ cmd_uninstall() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --esp) esp="${2:-}"; shift 2 ;;
-            --cli-dir) cli_dir="${2:-}"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --cli-dir) cli_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --keep-entry) keep_entry=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown uninstall option: $1" ;;
@@ -467,10 +871,10 @@ cmd_update() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --esp) esp="${2:-}"; shift 2 ;;
-            --repo) repo="${2:-}"; shift 2 ;;
-            --branch) branch="${2:-}"; shift 2 ;;
-            --source-dir) source_dir="${2:-}"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --repo) repo="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --branch) branch="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --boot-entry) boot_entry=1; shift ;;
             --sign) sign=1; shift ;;
             --force-config) force_config=1; shift ;;
@@ -488,7 +892,7 @@ cmd_update() {
     say "Building latest Visor"
     make --no-print-directory -C "$source_dir"
 
-    local install_args=(--no-build --no-boot-entry --no-sign)
+    local install_args=(--no-build --no-boot-entry --no-sign --no-fs-drivers)
     [ -n "$esp" ] && install_args+=(--esp "$esp")
     [ "$boot_entry" -eq 1 ] && install_args+=(--boot-entry)
     [ "$sign" -eq 1 ] && install_args+=(--sign)
@@ -497,6 +901,196 @@ cmd_update() {
     say "Installing updated Visor"
     run_install "$source_dir/install.sh" "${install_args[@]}"
     say "Visor is up to date"
+}
+
+cmd_encrypt() {
+    local input="" initrd_input="" out="" esp="" name="" title="" iterations=""
+    local kind="kernel" no_config=0 no_luks=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out) out="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --name) name="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --title) title="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --iterations) iterations="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --initrd) kind="initrd"; shift ;;
+            --no-config) no_config=1; shift ;;
+            --no-luks) no_luks=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            --*) die "unknown encrypt option: $1" ;;
+            *)
+                if [ -z "$input" ]; then input="$1"
+                elif [ -z "$initrd_input" ]; then initrd_input="$1"
+                else die "unexpected argument: $1"; fi
+                shift ;;
+        esac
+    done
+
+    [ -n "$input" ] || die "usage: visor encrypt <kernel> [initrd] [--esp PATH | --out PATH] [--title TEXT] [--iterations N]"
+    [ -f "$input" ] || die "input file not found: $input"
+    [ -z "$initrd_input" ] || [ -f "$initrd_input" ] || die "input file not found: $initrd_input"
+    [ -z "$initrd_input" ] || [ "$kind" = "kernel" ] || die "--initrd only applies to a single input"
+    [ -z "$initrd_input" ] || [ -z "$out" ] || die "--out only works with a single input"
+    need_cmd python3
+
+    local tool
+    tool="$(find_encrypt_tool)" || die "visor_encrypt.py not found (run from the Visor source tree, or 'visor update' first)"
+
+    [ -n "$name" ] || name="$(basename "$input").enc"
+    case "$name" in */*|'') die "--name must be a bare filename" ;; esac
+    local initrd_name=""
+    [ -z "$initrd_input" ] || initrd_name="$(basename "$initrd_input").enc"
+
+    local install_to_esp=0 target initrd_target=""
+    if [ -n "$out" ]; then
+        target="$out"
+    else
+        esp="$(resolve_esp "$esp")"
+        [ -n "$esp" ] || die "could not find the ESP (pass --esp PATH or --out PATH)"
+        [ -d "$esp/EFI/visor" ] || die "Visor is not installed at $esp/EFI/visor - run 'visor install' first"
+        target="$(mktemp)"
+        [ -z "$initrd_input" ] || initrd_target="$(mktemp)"
+        install_to_esp=1
+    fi
+
+    local pyargs=("$tool")
+    [ -n "$iterations" ] && pyargs+=(--iterations "$iterations")
+    pyargs+=("$input" "$target")
+    [ -z "$initrd_input" ] || pyargs+=("$initrd_input" "$initrd_target")
+
+    if [ -n "$initrd_input" ]; then
+        say "Encrypting kernel and initrd (one password covers both) ..."
+    else
+        say "Encrypting $input (you will be prompted for a password) ..."
+    fi
+    if ! python3 "${pyargs[@]}"; then
+        if [ "$install_to_esp" -eq 1 ]; then
+            rm -f "$target"
+            [ -z "$initrd_target" ] || rm -f "$initrd_target"
+        fi
+        die "encryption failed"
+    fi
+
+    local kpath ipath=""
+    if [ "$install_to_esp" -eq 1 ]; then
+        run_root install -m 0644 "$target" "$esp/EFI/visor/$name"
+        rm -f "$target"
+        say "Installed: $esp/EFI/visor/$name"
+        kpath="\\EFI\\visor\\$name"
+        if [ -n "$initrd_input" ]; then
+            run_root install -m 0644 "$initrd_target" "$esp/EFI/visor/$initrd_name"
+            rm -f "$initrd_target"
+            say "Installed: $esp/EFI/visor/$initrd_name"
+            ipath="\\EFI\\visor\\$initrd_name"
+        fi
+    else
+        say "Wrote encrypted artifact: $target"
+        kpath="\\path\\to\\$(basename "$target")"
+    fi
+
+    [ -n "$title" ] || title="Encrypted Linux"
+    local cmdline="" w
+    if [ -r /proc/cmdline ]; then
+        for w in $(cat /proc/cmdline); do
+            case "$w" in BOOT_IMAGE=*|initrd=*) ;; *) cmdline="$cmdline $w" ;; esac
+        done
+        cmdline="${cmdline# }"
+    fi
+    [ -n "$cmdline" ] || cmdline="root=... rw"
+
+    local luks_lines="" luks_root=0 luks_dev=""
+    if [ "$no_luks" -eq 0 ]; then
+        case " $cmdline " in
+            *" cryptdevice="*|*" rd.luks.name="*|*" rd.luks.uuid="*) luks_root=1 ;;
+        esac
+    fi
+    if [ "$luks_root" -eq 1 ]; then
+        local preset=""
+        if command -v mkinitcpio >/dev/null 2>&1; then preset="mkinitcpio"
+        elif command -v dracut >/dev/null 2>&1; then preset="dracut"
+        elif [ -d /usr/lib/dracut ]; then preset="dracut"
+        fi
+        if [ -n "$preset" ]; then
+            luks_lines="$(printf '    luks        = 1\n    luks_preset = %s' "$preset")"
+        else
+            luks_lines="$(printf '    luks        = 1\n    # luks_preset = mkinitcpio | dracut (set to match your initramfs)')"
+        fi
+        for w in $cmdline; do
+            case "$w" in
+                cryptdevice=*) luks_dev="${w#cryptdevice=}"; luks_dev="${luks_dev%%:*}" ;;
+                rd.luks.uuid=*) luks_dev="UUID=${w#rd.luks.uuid=}" ;;
+                rd.luks.name=*) [ -n "$luks_dev" ] || { luks_dev="${w#rd.luks.name=}"; luks_dev="UUID=${luks_dev%%=*}"; } ;;
+            esac
+        done
+    fi
+
+    local entry_text
+    if [ -n "$initrd_input" ]; then
+        entry_text="$(cat <<EOF
+entry {
+    name      = "$title"
+    kernel    = $kpath
+    initrd    = $ipath
+    encrypted = 1
+${luks_lines:+$luks_lines
+}    cmdline   = "$cmdline"
+}
+EOF
+)"
+    elif [ "$kind" = "initrd" ]; then
+        entry_text="$(cat <<EOF
+entry {
+    name    = "$title"
+    kernel  = \\path\\to\\vmlinuz
+    initrd  = $kpath
+    initrd_encrypted = 1
+${luks_lines:+$luks_lines
+}    cmdline = "$cmdline"
+}
+EOF
+)"
+    else
+        entry_text="$(cat <<EOF
+entry {
+    name    = "$title"
+    kernel  = $kpath
+    kernel_encrypted = 1
+    cmdline = "$cmdline"
+}
+EOF
+)"
+    fi
+
+    printf '\n%s\n\n' "$entry_text"
+
+    local conf="$esp/EFI/visor/boot.conf" appended=0
+    if [ "$install_to_esp" -eq 1 ] && [ "$no_config" -eq 0 ] && [ -f "$conf" ] && [ -t 0 ]; then
+        printf 'Append this entry to boot.conf now? [y/N] '
+        local ans=""
+        read -r ans || ans=""
+        case "$ans" in
+            y|Y|yes|YES)
+                printf '\n%s\n' "$entry_text" | run_root tee -a "$conf" >/dev/null
+                say "Entry appended to $conf"
+                appended=1
+                ;;
+        esac
+    fi
+    if [ "$appended" -eq 0 ]; then
+        say "Add the entry above to \\EFI\\visor\\boot.conf (shown with your current cmdline)."
+    fi
+    say "At boot, Visor asks for the password and decrypts in memory."
+    if [ "$luks_root" -eq 1 ]; then
+        say "LUKS root detected: the entry unlocks it with the same password."
+        if [ -n "$luks_dev" ]; then
+            case "$luks_dev" in
+                UUID=*) say "Enroll that password as a LUKS key first: sudo cryptsetup luksAddKey /dev/disk/by-uuid/${luks_dev#UUID=}" ;;
+                *)      say "Enroll that password as a LUKS key first: sudo cryptsetup luksAddKey $luks_dev" ;;
+            esac
+        else
+            say "Enroll that password as a LUKS key first: sudo cryptsetup luksAddKey <your-luks-device>"
+        fi
+    fi
 }
 
 cmd_config() {
@@ -515,6 +1109,8 @@ main() {
         install) shift; cmd_install "$@" ;;
         update) shift; cmd_update "$@" ;;
         sign) shift; cmd_sign "$@" ;;
+        drivers) shift; cmd_drivers "$@" ;;
+        encrypt) shift; cmd_encrypt "$@" ;;
         uninstall) shift; cmd_uninstall "$@" ;;
         status) shift; cmd_status "$@" ;;
         config) shift; cmd_config "$@" ;;
