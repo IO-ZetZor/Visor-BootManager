@@ -1,7 +1,6 @@
-
 #include "config.h"
 #include "efi_helpers.h"
-/* #include "accent.h" */  /* accent disabled for this build */
+#include "accent.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -124,7 +123,19 @@ static void free_deployments(deployment_t *deps, UINTN count) {
     efi_free_pool(deps);
 }
 
-/* 'emilia-chan' */
+static void free_snapshots(snapshot_t *snaps, UINTN count) {
+    if (!snaps) return;
+    for (UINTN i = 0; i < count; i++) {
+        if (snaps[i].id)      efi_free_pool(snaps[i].id);
+        if (snaps[i].date)    efi_free_pool(snaps[i].date);
+        if (snaps[i].desc)    efi_free_pool(snaps[i].desc);
+        if (snaps[i].kernel)  efi_free_pool(snaps[i].kernel);
+        if (snaps[i].initrd)  efi_free_pool(snaps[i].initrd);
+        if (snaps[i].cmdline) efi_free_pool(snaps[i].cmdline);
+    }
+    efi_free_pool(snaps);
+}
+
 static UINTN parse_uint(CHAR16 *s) {
     UINTN n = 0;
     while (*s >= '0' && *s <= '9') {
@@ -228,7 +239,6 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
         CHAR16 *line = trim(lines[*idx]);
 
         if (line[0] == '}' || line[0] == '\0') {
-
             break;
         }
 
@@ -460,13 +470,300 @@ static CHAR16* find_initrd(EFI_FILE_PROTOCOL *root, CHAR16 *dir, CHAR16 *kernel_
     return NULL;
 }
 
-static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *dir) {
+static EFI_FILE_PROTOCOL *root_from_handle(EFI_HANDLE h);
+
+static UINT8* dc_read_file(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                           UINTN max, UINTN *out_len) {
+    EFI_FILE_PROTOCOL *fh = NULL;
+    if (EFI_ERROR(root->Open(root, &fh, path, EFI_FILE_MODE_READ, 0)) || !fh)
+        return NULL;
+    UINT8 *buf = efi_allocate_pool(max + 1);
+    if (!buf) { fh->Close(fh); return NULL; }
+    UINTN len = max;
+    if (EFI_ERROR(fh->Read(fh, &len, buf))) len = 0;
+    fh->Close(fh);
+    if (!len) { efi_free_pool(buf); return NULL; }
+    buf[len] = 0;
+    *out_len = len;
+    return buf;
+}
+
+static int dc_is_space(UINT8 c) { return c == ' ' || c == '\t' || c == '\r'; }
+
+static UINTN dc_token(UINT8 **p, UINT8 *end, CHAR16 *out, UINTN cap) {
+    while (*p < end && dc_is_space(**p)) (*p)++;
+    UINTN n = 0;
+    while (*p < end && **p && !dc_is_space(**p) && **p != '\n') {
+        if (n + 1 < cap) out[n++] = (CHAR16)**p;
+        (*p)++;
+    }
+    out[n] = 0;
+    return n;
+}
+
+static int dc_prefix(CHAR16 *s, const CHAR16 *pre) {
+    UINTN i = 0;
+    while (pre[i]) { if (lc16(s[i]) != lc16((CHAR16)pre[i])) return 0; i++; }
+    return 1;
+}
+
+static CHAR16* dc_uki_cmdline_file(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
+    EFI_FILE_PROTOCOL *fh = NULL;
+    if (EFI_ERROR(root->Open(root, &fh, path, EFI_FILE_MODE_READ, 0)) || !fh)
+        return NULL;
+    UINT8 hdr[4096];
+    UINTN len = sizeof(hdr);
+    CHAR16 *out = NULL;
+    if (EFI_ERROR(fh->Read(fh, &len, hdr)) || len < 0x40 ||
+        hdr[0] != 'M' || hdr[1] != 'Z') {
+        fh->Close(fh);
+        return NULL;
+    }
+    UINT32 pe_off;
+    CopyMem(&pe_off, hdr + 0x3C, sizeof(pe_off));
+    if ((UINTN)pe_off + 24 > len ||
+        hdr[pe_off] != 'P' || hdr[pe_off + 1] != 'E' ||
+        hdr[pe_off + 2] != 0 || hdr[pe_off + 3] != 0) {
+        fh->Close(fh);
+        return NULL;
+    }
+    UINT16 nsec, optsz;
+    CopyMem(&nsec,  hdr + pe_off + 6,  sizeof(nsec));
+    CopyMem(&optsz, hdr + pe_off + 20, sizeof(optsz));
+    UINTN sect = (UINTN)pe_off + 24 + optsz;
+    for (UINT16 s = 0; s < nsec && !out; s++) {
+        UINTN off = sect + (UINTN)s * 40;
+        if (off + 40 > len) break;
+        if (CompareMem(hdr + off, (void*)".cmdline", 8) != 0) continue;
+        UINT32 vsz, rsz, roff;
+        CopyMem(&vsz,  hdr + off + 8,  sizeof(vsz));
+        CopyMem(&rsz,  hdr + off + 16, sizeof(rsz));
+        CopyMem(&roff, hdr + off + 20, sizeof(roff));
+        UINTN csz = (vsz && vsz < rsz) ? vsz : rsz;
+        if (!csz || csz > 2048) break;
+        UINT8 *cbuf = efi_allocate_pool(csz);
+        if (!cbuf) break;
+        if (!EFI_ERROR(fh->SetPosition(fh, roff))) {
+            UINTN rl = csz;
+            if (!EFI_ERROR(fh->Read(fh, &rl, cbuf)) && rl) {
+                while (rl && (cbuf[rl - 1] == 0 || cbuf[rl - 1] == '\n' ||
+                              cbuf[rl - 1] == '\r' || cbuf[rl - 1] == ' '))
+                    rl--;
+                if (rl) {
+                    out = efi_allocate_pool((rl + 1) * sizeof(CHAR16));
+                    if (out) {
+                        for (UINTN i = 0; i < rl; i++)
+                            out[i] = (cbuf[i] == '\n' || cbuf[i] == '\r' ||
+                                      cbuf[i] == '\t') ? L' ' : (CHAR16)cbuf[i];
+                        out[rl] = 0;
+                    }
+                }
+            }
+        }
+        efi_free_pool(cbuf);
+    }
+    fh->Close(fh);
+    return out;
+}
+
+static CHAR16* dc_from_uki(EFI_FILE_PROTOCOL *root) {
+    EFI_FILE_PROTOCOL *d = efi_open_dir(root, L"\\EFI\\Linux");
+    if (!d) return NULL;
+    CHAR16 name[128];
+    int is_dir;
+    CHAR16 *out = NULL;
+    while (!out && efi_read_dirent(d, name, 128, &is_dir)) {
+        if (is_dir || !ends_with_ci(name, L".efi")) continue;
+        CHAR16 path[MAX_PATH];
+        SPrint(path, sizeof(path), L"\\EFI\\Linux\\%s", name);
+        out = dc_uki_cmdline_file(root, path);
+        if (out) {
+            efi_log(L"config: cmdline taken from UKI .cmdline section");
+            efi_log(path);
+            efi_log(out);
+        }
+    }
+    d->Close(d);
+    return out;
+}
+
+static CHAR16* dc_from_fstab(EFI_FILE_PROTOCOL *root) {
+    static CHAR16 *paths[] = { L"\\etc\\fstab", L"\\@\\etc\\fstab", NULL };
+    for (int pi = 0; paths[pi]; pi++) {
+        UINTN len = 0;
+        UINT8 *data = dc_read_file(root, paths[pi], 65536, &len);
+        if (!data) continue;
+        UINT8 *p = data, *end = data + len;
+        CHAR16 *result = NULL;
+        while (p < end && !result) {
+            while (p < end && (dc_is_space(*p) || *p == '\n')) p++;
+            if (p >= end) break;
+            if (*p == '#') { while (p < end && *p != '\n') p++; continue; }
+            CHAR16 spec[160], mnt[80], type[40], opts[256];
+            dc_token(&p, end, spec, 160);
+            dc_token(&p, end, mnt, 80);
+            dc_token(&p, end, type, 40);
+            dc_token(&p, end, opts, 256);
+            while (p < end && *p != '\n') p++;
+            if (!(mnt[0] == '/' && mnt[1] == 0)) continue;
+            if (!(dc_prefix(spec, L"UUID=") || dc_prefix(spec, L"PARTUUID=") ||
+                  dc_prefix(spec, L"LABEL=") || dc_prefix(spec, L"PARTLABEL=") ||
+                  dc_prefix(spec, L"/dev/")))
+                continue;
+
+            CHAR16 flags[160];
+            UINTN fn = 0;
+            int ro = 0;
+            for (UINTN i = 0; opts[i]; ) {
+                CHAR16 o[128];
+                UINTN on = 0;
+                while (opts[i] && opts[i] != ',') {
+                    if (on + 1 < 128) o[on++] = opts[i];
+                    i++;
+                }
+                o[on] = 0;
+                if (opts[i] == ',') i++;
+                if (o[0] == 'r' && o[1] == 'o' && !o[2]) ro = 1;
+                if (dc_prefix(o, L"subvol=") || dc_prefix(o, L"subvolid=")) {
+                    if (fn && fn + 1 < 160) flags[fn++] = ',';
+                    for (UINTN k = 0; o[k] && fn + 1 < 160; k++) flags[fn++] = o[k];
+                }
+            }
+            flags[fn] = 0;
+            CHAR16 out[512];
+            if (fn)
+                SPrint(out, sizeof(out), L"root=%s rootflags=%s %s",
+                       spec, flags, ro ? L"ro" : L"rw");
+            else
+                SPrint(out, sizeof(out), L"root=%s %s", spec, ro ? L"ro" : L"rw");
+            result = efi_strdup(out);
+            if (result) {
+                efi_log(L"config: cmdline derived from fstab");
+                efi_log(paths[pi]);
+                efi_log(result);
+            }
+        }
+        efi_free_pool(data);
+        if (result) return result;
+    }
+    return NULL;
+}
+
+static CHAR16* dc_from_gpt(void) {
+#if defined(__aarch64__)
+    static const EFI_GUID root_type =
+        { 0xb921b045, 0x1df0, 0x41c3, { 0xaf,0x44,0x4c,0x6f,0x28,0x0d,0x3f,0xae } };
+#else
+    static const EFI_GUID root_type =
+        { 0x4f68bce3, 0xe8cd, 0x4db1, { 0x96,0xe7,0xfb,0xca,0xf9,0x84,0xb7,0x09 } };
+#endif
+    UINTN nh = 0;
+    EFI_HANDLE *hs = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nh);
+    if (!hs) return NULL;
+    CHAR16 *out = NULL;
+    for (UINTN h = 0; h < nh && !out; h++) {
+        EFI_BLOCK_IO *bio = NULL;
+        if (EFI_ERROR(BS->HandleProtocol(hs[h], &gEfiBlockIoProtocolGuid,
+                                         (void**)&bio)) || !bio || !bio->Media)
+            continue;
+        if (bio->Media->LogicalPartition || !bio->Media->MediaPresent) continue;
+        UINT32 bs = bio->Media->BlockSize;
+        if (bs < 512 || bs > 4096) continue;
+        UINTN align = bio->Media->IoAlign > 1 ? bio->Media->IoAlign : 1;
+
+        UINT8 *raw = efi_allocate_pool(bs + align);
+        if (!raw) continue;
+        UINT8 *hdr = raw + ((align - ((UINTN)raw & (align - 1))) & (align - 1));
+        if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, 1, bs, hdr)) ||
+            CompareMem(hdr, (void*)"EFI PART", 8) != 0) {
+            efi_free_pool(raw);
+            continue;
+        }
+        UINT64 elba;
+        UINT32 num, esz;
+        CopyMem(&elba, hdr + 72, sizeof(elba));
+        CopyMem(&num,  hdr + 80, sizeof(num));
+        CopyMem(&esz,  hdr + 84, sizeof(esz));
+        efi_free_pool(raw);
+        if (esz < 128 || esz > 4096 || !num) continue;
+        if (num > 128) num = 128;
+        UINTN rdsz = (((UINTN)num * esz + bs - 1) / bs) * bs;
+
+        raw = efi_allocate_pool(rdsz + align);
+        if (!raw) continue;
+        UINT8 *ents = raw + ((align - ((UINTN)raw & (align - 1))) & (align - 1));
+        if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, elba, rdsz, ents))) {
+            efi_free_pool(raw);
+            continue;
+        }
+        for (UINT32 i = 0; i < num && !out; i++) {
+            UINT8 *e = ents + (UINTN)i * esz;
+            if (CompareMem(e, (void*)&root_type, 16) != 0) continue;
+            EFI_GUID g;
+            CopyMem(&g, e + 16, sizeof(g));
+            UINT8 b[16] = {
+                (UINT8)(g.Data1 >> 24), (UINT8)(g.Data1 >> 16),
+                (UINT8)(g.Data1 >> 8),  (UINT8)g.Data1,
+                (UINT8)(g.Data2 >> 8),  (UINT8)g.Data2,
+                (UINT8)(g.Data3 >> 8),  (UINT8)g.Data3,
+                g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+                g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]
+            };
+            static const CHAR16 hex[] = L"0123456789abcdef";
+            CHAR16 u[37];
+            UINTN w = 0;
+            for (UINTN k = 0; k < 16; k++) {
+                if (k == 4 || k == 6 || k == 8 || k == 10) u[w++] = '-';
+                u[w++] = hex[b[k] >> 4];
+                u[w++] = hex[b[k] & 0xF];
+            }
+            u[w] = 0;
+            CHAR16 cmd[80];
+            SPrint(cmd, sizeof(cmd), L"root=PARTUUID=%s rw", u);
+            out = efi_strdup(cmd);
+            if (out) {
+                efi_log(L"config: cmdline derived from GPT root partition");
+                efi_log(out);
+            }
+        }
+        efi_free_pool(raw);
+    }
+    efi_free_pool(hs);
+    return out;
+}
+
+static CHAR16* dc_derive_cmdline(EFI_FILE_PROTOCOL *root, int global_src) {
+    CHAR16 *cmd = dc_from_uki(root);
+    if (!cmd) cmd = dc_from_fstab(root);
+    if (!cmd && global_src) {
+
+        UINTN n = 0;
+        EFI_HANDLE *hs = efi_locate_handle_buffer(
+            &gEfiSimpleFileSystemProtocolGuid, &n);
+        if (hs) {
+            for (UINTN i = 0; i < n && !cmd; i++) {
+                EFI_FILE_PROTOCOL *r = root_from_handle(hs[i]);
+                if (!r) continue;
+                cmd = dc_from_fstab(r);
+                r->Close(r);
+            }
+            efi_free_pool(hs);
+        }
+    }
+    if (!cmd && global_src) cmd = dc_from_gpt();
+    return cmd;
+}
+
+static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root,
+                           CHAR16 *dir, int global_cmdline) {
     EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
     if (!d) return 0;
 
     int added = 0;
     CHAR16 name[128];
     int is_dir;
+    CHAR16 *auto_cmd = NULL;
+    int auto_tried = 0;
     while (efi_read_dirent(d, name, 128, &is_dir)) {
         if (is_dir) continue;
         if (!is_kernel_name(name)) continue;
@@ -479,24 +776,33 @@ static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root, CHAR16 *di
         efi_log(path);
         if (initrd) efi_log(initrd);
 
+        if (!auto_tried) {
+            auto_tried = 1;
+            auto_cmd = dc_derive_cmdline(root, global_cmdline);
+        }
+
         CHAR16 *entry_name = efi_strdup(name);
         CHAR16 *entry_icon = icon_path_for(L"unknown.png");
         CHAR16 *entry_path = efi_strdup(path);
+        CHAR16 *entry_cmd  = auto_cmd ? efi_strdup(auto_cmd) : NULL;
         if (!entry_name || !entry_path) {
             free_char16(&entry_name);
             free_char16(&entry_icon);
             free_char16(&entry_path);
             free_char16(&initrd);
+            free_char16(&entry_cmd);
         } else if (config_add_entry(config, entry_name, entry_icon,
-                             entry_path, initrd, NULL, NULL, 0, 0, 0)) {
+                             entry_path, initrd, entry_cmd, NULL, 0, 0, 0)) {
             added++;
         } else {
             free_char16(&entry_name);
             free_char16(&entry_icon);
             free_char16(&entry_path);
             free_char16(&initrd);
+            free_char16(&entry_cmd);
         }
     }
+    if (auto_cmd) efi_free_pool(auto_cmd);
     d->Close(d);
     return added;
 }
@@ -843,23 +1149,20 @@ void bls_decrement(boot_entry_t *e) {
         efi_log(L"WARN: could not update boot-counter (read-only /boot?)");
 }
 
-static EFI_STATUS detect_entries(config_t *config) {
+static int detect_scan_volumes(config_t *config, int bls) {
     static CHAR16 *windows_paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
         L"\\EFI\\BOOT\\bootmgfw.efi",
         NULL
     };
 
-    config->show_names = 0;
-    config->center_info = 1;
-
-    int bls = bls_detect(config);
+    UINTN start_count = config->entry_count;
 
     UINTN nvol = 0;
     EFI_HANDLE *vols = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nvol);
     if (!vols || nvol == 0) {
         if (vols) efi_free_pool(vols);
-        return EFI_NOT_FOUND;
+        return 0;
     }
 
     int windows_found = 0;
@@ -897,28 +1200,259 @@ static EFI_STATUS detect_entries(config_t *config) {
         root->Close(root);
     }
 
-    if (!uki_found && !bls) {
-        int raw_found = 0;
+    int raw_found = 0;
+    if (!bls) {
         for (UINTN v = 0; v < nvol; v++) {
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
-            raw_found += scan_kernel_dir(config, root, L"\\boot");
-            raw_found += scan_kernel_dir(config, root, L"\\");
+            raw_found += scan_kernel_dir(config, root, L"\\boot", 1);
+            raw_found += scan_kernel_dir(config, root, L"\\@\\boot", 1);
+            raw_found += scan_kernel_dir(config, root, L"\\", 1);
             root->Close(root);
         }
         { CHAR16 d[64]; SPrint(d, sizeof(d), L"config: raw kernel scan found %d", raw_found); efi_log(d); }
-        if (!raw_found) {
-            for (UINTN v = 0; v < nvol; v++) {
-                EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
-                if (!root) continue;
-                scan_vendor_loaders(config, root);
-                root->Close(root);
-            }
+    }
+    if (!uki_found && !bls && !raw_found) {
+        for (UINTN v = 0; v < nvol; v++) {
+            EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
+            if (!root) continue;
+            scan_vendor_loaders(config, root);
+            root->Close(root);
         }
     }
 
     efi_free_pool(vols);
+    return (int)(config->entry_count - start_count);
+}
+
+static EFI_STATUS detect_entries(config_t *config) {
+    config->show_names = 0;
+    config->center_info = 1;
+
+    int bls = bls_detect(config);
+    int found = detect_scan_volumes(config, bls);
+
+    if (!found && !bls && efi_fs_drivers_deferred()) {
+        efi_log(L"config: no entries on fast volumes; starting FS drivers and rescanning");
+        efi_start_deferred_drivers();
+        found += detect_scan_volumes(config, bls);
+    }
+
+    if (!found && !bls) return EFI_NOT_FOUND;
     return EFI_SUCCESS;
+}
+
+static EFI_HANDLE *hp_fs_known;  static UINTN hp_fs_n;
+static EFI_HANDLE *hp_blk_known; static UINTN hp_blk_n;
+
+static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
+    for (UINTN i = 0; i < n; i++)
+        if (set[i] == h) return 1;
+    return 0;
+}
+
+void config_hotplug_arm(config_t *config) {
+    (void)config;
+    if (hp_fs_known)  efi_free_pool(hp_fs_known);
+    if (hp_blk_known) efi_free_pool(hp_blk_known);
+    hp_fs_n = hp_blk_n = 0;
+    hp_fs_known  = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &hp_fs_n);
+    hp_blk_known = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &hp_blk_n);
+    if (!hp_fs_known)  hp_fs_n = 0;
+    if (!hp_blk_known) hp_blk_n = 0;
+}
+
+static EFI_GUID hp_fs_info_guid = { 0x09576e93, 0x6d3f, 0x11d2,
+    { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } };
+
+static CHAR16* hp_volume_label(EFI_FILE_PROTOCOL *root) {
+    UINT8 buf[SIZE_OF_EFI_FILE_SYSTEM_INFO + 64 * sizeof(CHAR16)]
+        __attribute__((aligned(8)));
+    UINTN size = sizeof(buf);
+    EFI_FILE_SYSTEM_INFO *info = (EFI_FILE_SYSTEM_INFO*)buf;
+    if (EFI_ERROR(root->GetInfo(root, &hp_fs_info_guid, &size, info)))
+        return NULL;
+    if (size < SIZE_OF_EFI_FILE_SYSTEM_INFO + sizeof(CHAR16) ||
+        !info->VolumeLabel[0])
+        return NULL;
+    return efi_strdup(info->VolumeLabel);
+}
+
+static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
+
+    for (boot_entry_t *e = config->entries; e; e = e->next)
+        if (e->uuid && e->uuid[0] &&
+            efi_handle_matches_partition_uuid(vol, e->uuid))
+            return 0;
+
+    EFI_FILE_PROTOCOL *root = root_from_handle(vol);
+    if (!root) return 0;
+
+    UINTN before = config->entry_count;
+
+    static CHAR16 *win_paths[] = {
+        L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+        L"\\EFI\\BOOT\\bootmgfw.efi",
+        NULL
+    };
+    for (int i = 0; win_paths[i]; i++) {
+        if (!efi_file_exists_root(root, win_paths[i])) continue;
+        CHAR16 *entry_name = efi_strdup(L"Windows Boot Manager");
+        CHAR16 *entry_icon = icon_path_for(L"windows.png");
+        CHAR16 *entry_path = efi_strdup(win_paths[i]);
+        if (!entry_name || !entry_path ||
+            !config_add_entry(config, entry_name, entry_icon,
+                              entry_path, NULL, NULL, NULL, 1, 0, 0)) {
+            free_char16(&entry_name);
+            free_char16(&entry_icon);
+            free_char16(&entry_path);
+        }
+        break;
+    }
+
+    int uki = scan_uki_dir(config, root, L"\\EFI\\Linux");
+
+    int raw = 0;
+    raw += scan_kernel_dir(config, root, L"\\boot", 0);
+    raw += scan_kernel_dir(config, root, L"\\@\\boot", 0);
+    raw += scan_kernel_dir(config, root, L"\\", 0);
+    if (!uki && !raw && config->entry_count == before)
+        scan_vendor_loaders(config, root);
+
+    if (config->entry_count == before) {
+#if defined(__aarch64__)
+        CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTAA64.EFI";
+#else
+        CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTX64.EFI";
+#endif
+        if (efi_file_exists_root(root, fallback)) {
+            CHAR16 *label = hp_volume_label(root);
+            CHAR16 *entry_name = label ? label : efi_strdup(L"USB Device");
+            CHAR16 *entry_icon = icon_path_for(L"unknown.png");
+            CHAR16 *entry_path = efi_strdup(fallback);
+            if (!entry_name || !entry_path ||
+                !config_add_entry(config, entry_name, entry_icon,
+                                  entry_path, NULL, NULL, NULL, 1, 0, 0)) {
+                free_char16(&entry_name);
+                free_char16(&entry_icon);
+                free_char16(&entry_path);
+            }
+        }
+    }
+    root->Close(root);
+
+    int added = (int)(config->entry_count - before);
+    if (added > 0) {
+
+        CHAR16 *uuid = efi_handle_partition_uuid(vol);
+        UINTN idx = 0;
+        for (boot_entry_t *e = config->entries; e; e = e->next, idx++) {
+            if (idx < before) continue;
+            e->hp_volume = vol;
+            if (uuid && !e->uuid) e->uuid = efi_strdup(uuid);
+        }
+        if (uuid) efi_free_pool(uuid);
+        CHAR16 d[64];
+        SPrint(d, sizeof(d), L"hotplug: added %d boot entr%s", added,
+               added == 1 ? L"y" : L"ies");
+        efi_log(d);
+    }
+    return added;
+}
+
+static void hp_free_entry(boot_entry_t *e) {
+    if (e->name)        efi_free_pool(e->name);
+    if (e->icon_path)   efi_free_pool(e->icon_path);
+    if (e->kernel_path) efi_free_pool(e->kernel_path);
+    if (e->initrd_path) efi_free_pool(e->initrd_path);
+    if (e->cmdline)     efi_free_pool(e->cmdline);
+    if (e->uuid)        efi_free_pool(e->uuid);
+    if (e->icon) {
+        if (e->icon->scaled) efi_free_pool(e->icon->scaled);
+        if (e->icon->pixels) efi_free_pool(e->icon->pixels);
+        efi_free_pool(e->icon);
+    }
+    efi_free_pool(e);
+}
+
+static int hp_vol_present(EFI_HANDLE *fs, UINTN nf, EFI_HANDLE h) {
+    if (!hp_in_set(fs, nf, h)) return 0;
+    EFI_BLOCK_IO *bio = NULL;
+    if (!EFI_ERROR(BS->HandleProtocol(h, &gEfiBlockIoProtocolGuid,
+                                      (void**)&bio)) &&
+        bio && bio->Media && !bio->Media->MediaPresent)
+        return 0;
+    return 1;
+}
+
+int config_hotplug_poll(config_t *config, UINTN *first_new) {
+
+    UINTN nb = 0;
+    EFI_HANDLE *blk = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nb);
+    if (blk) {
+        int fresh = 0;
+        for (UINTN i = 0; i < nb; i++)
+            if (!hp_in_set(hp_blk_known, hp_blk_n, blk[i])) {
+                BS->ConnectController(blk[i], NULL, NULL, TRUE);
+                fresh = 1;
+            }
+        if (fresh) {
+            if (hp_blk_known) efi_free_pool(hp_blk_known);
+            hp_blk_known = blk;
+            hp_blk_n = nb;
+        } else {
+            efi_free_pool(blk);
+        }
+    }
+
+    UINTN nf = 0;
+    EFI_HANDLE *fs = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nf);
+    if (!fs) return 0;
+
+    int mask = 0;
+
+    UINTN removed_at = 0, idx = 0;
+    int removed = 0;
+    boot_entry_t **link = &config->entries;
+    while (*link) {
+        boot_entry_t *e = *link;
+        if (e->hp_volume && !hp_vol_present(fs, nf, e->hp_volume)) {
+            if (!removed) removed_at = idx;
+            *link = e->next;
+            efi_log(L"hotplug: volume removed - dropping boot entry");
+            efi_log(e->name);
+            hp_free_entry(e);
+            config->entry_count--;
+            removed++;
+            continue;
+        }
+        link = &e->next;
+        idx++;
+    }
+    if (removed) {
+        boot_entry_t *t = config->entries;
+        while (t && t->next) t = t->next;
+        config->tail = t;
+        UINTN i2 = 0;
+        for (boot_entry_t *e = config->entries; e; e = e->next) e->index = i2++;
+        mask |= 2;
+    }
+
+    int added = 0;
+    UINTN before = config->entry_count;
+    for (UINTN i = 0; i < nf; i++) {
+        if (hp_in_set(hp_fs_known, hp_fs_n, fs[i])) continue;
+        efi_log(L"hotplug: new filesystem volume detected");
+        added += hp_scan_volume(config, fs[i]);
+    }
+
+    if (hp_fs_known) efi_free_pool(hp_fs_known);
+    hp_fs_known = fs;
+    hp_fs_n = nf;
+
+    if (added > 0) mask |= 1;
+    if (first_new) *first_new = (mask & 1) ? before : removed_at;
+    return mask;
 }
 
 #define CONFIG_TEXT_MAX (1024ULL * 1024ULL)
@@ -1004,6 +1538,11 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->remember_last = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"recovery_entries") == 0 || efi_strcmp(key, L"recovery") == 0) {
         config->recovery_entries = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"snapshots") == 0) {
+        if (efi_strcmp(value, L"manifest") == 0) config->snapshots_mode = 2;
+        else config->snapshots_mode = (*value == '1' || *value == 't' || *value == 'y') ? 1 : 0;
+    } else if (efi_strcmp(key, L"hotplug") == 0) {
+        config->hotplug = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"mouse") == 0 || efi_strcmp(key, L"pointer") == 0) {
         config->mouse = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"editor") == 0) {
@@ -1131,7 +1670,6 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
             config->has_blur_color = 1;
         else
             efi_log(L"WARN: invalid blur_color (use #RRGGBB)");
-    /* accent disabled for this build
     } else if (efi_strcmp(key, L"accent") == 0) {
         config->accent_enabled = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"accent_icons") == 0) {
@@ -1144,7 +1682,6 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->accent_os_icons = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"accent_variant") == 0) {
         config->accent_variant = accent_variant_from_str(value);
-    */
     }
 }
 
@@ -1297,6 +1834,559 @@ static void add_recovery_entries(config_t *config) {
     }
 }
 
+#define SNAPSHOTS_FILE L"\\EFI\\visor\\snapshots.conf"
+#define MAX_SNAPS 64
+
+static int load_snapshots(config_t *config) {
+    CHAR16 *buf = read_text_file(SNAPSHOTS_FILE);
+    if (!buf) return 0;
+
+    snapshot_t tmp[MAX_SNAPS];
+    boot_entry_t *owner[MAX_SNAPS];
+    UINTN n = 0;
+
+    CHAR16 *lines[512];
+    UINTN line_count = 0;
+    CHAR16 *start = buf;
+    while (*start && line_count < 512) {
+        CHAR16 *end = start;
+        while (*end && *end != '\n') end++;
+        if (*end == '\n') *end = '\0';
+        CHAR16 *cr = efi_strchr(start, '\r');
+        if (cr) *cr = '\0';
+        lines[line_count++] = start;
+        start = end + 1;
+    }
+
+    for (UINTN i = 0; i < line_count && n < MAX_SNAPS; i++) {
+        CHAR16 *line = trim(lines[i]);
+        if (line[0] == '#' || line[0] == '\0') continue;
+        if (!is_header(line, L"snapshot")) continue;
+
+        snapshot_t s = { NULL, NULL, NULL, NULL, NULL, NULL };
+        CHAR16 *os = NULL;
+        i++;
+        while (i < line_count) {
+            CHAR16 *l = trim(lines[i]);
+            if (l[0] == '}' || l[0] == '\0') break;
+            CHAR16 *eq = efi_strchr(l, '=');
+            if (eq) {
+                *eq = '\0';
+                CHAR16 *key = trim(l);
+                strip_inline_comment(eq + 1);
+                CHAR16 *value = trim(eq + 1);
+                if      (efi_strcmp(key, L"os") == 0)      os = value;
+                else if (efi_strcmp(key, L"id") == 0)      { if (!s.id)   s.id   = efi_strdup(value); }
+                else if (efi_strcmp(key, L"date") == 0)    { if (!s.date) s.date = efi_strdup(value); }
+                else if (efi_strcmp(key, L"desc") == 0 ||
+                         efi_strcmp(key, L"description") == 0)
+                                                           { if (!s.desc) s.desc = efi_strdup(value); }
+                else if (efi_strcmp(key, L"kernel") == 0)  { if (!s.kernel) s.kernel = dup_path(value); }
+                else if (efi_strcmp(key, L"initrd") == 0)  { if (!s.initrd) s.initrd = dup_path(value); }
+                else if (efi_strcmp(key, L"cmdline") == 0 ||
+                         efi_strcmp(key, L"options") == 0)
+                                                           { if (!s.cmdline) s.cmdline = efi_strdup(value); }
+            }
+            i++;
+        }
+
+        boot_entry_t *tgt = NULL;
+        if (os && os[0]) {
+            for (boot_entry_t *e = config->entries; e; e = e->next)
+                if (contains_ci(e->name, os)) { tgt = e; break; }
+        } else if (config->entries && !config->entries->next) {
+            tgt = config->entries;
+        }
+        if (tgt && s.cmdline && s.id) {
+            tmp[n] = s;
+            owner[n] = tgt;
+            n++;
+        } else {
+            if (s.id)      efi_free_pool(s.id);
+            if (s.date)    efi_free_pool(s.date);
+            if (s.desc)    efi_free_pool(s.desc);
+            if (s.kernel)  efi_free_pool(s.kernel);
+            if (s.initrd)  efi_free_pool(s.initrd);
+            if (s.cmdline) efi_free_pool(s.cmdline);
+        }
+    }
+    efi_free_pool(buf);
+    if (!n) return 1;
+
+    for (boot_entry_t *e = config->entries; e; e = e->next) {
+        UINTN cnt = 0;
+        for (UINTN i = 0; i < n; i++) if (owner[i] == e) cnt++;
+        if (!cnt) continue;
+        snapshot_t *arr = efi_allocate_pool(cnt * sizeof(snapshot_t));
+        if (!arr) continue;
+        UINTN k = 0;
+        for (UINTN i = 0; i < n; i++)
+            if (owner[i] == e) { arr[k++] = tmp[i]; owner[i] = NULL; }
+        e->snapshots = arr;
+        e->snap_count = cnt;
+        e->snap_sel = 0;
+    }
+    for (UINTN i = 0; i < n; i++) {
+        if (!owner[i]) continue;
+        if (tmp[i].id)      efi_free_pool(tmp[i].id);
+        if (tmp[i].date)    efi_free_pool(tmp[i].date);
+        if (tmp[i].desc)    efi_free_pool(tmp[i].desc);
+        if (tmp[i].kernel)  efi_free_pool(tmp[i].kernel);
+        if (tmp[i].initrd)  efi_free_pool(tmp[i].initrd);
+        if (tmp[i].cmdline) efi_free_pool(tmp[i].cmdline);
+    }
+    efi_log(L"config: snapshot manifest loaded");
+    return 1;
+}
+
+#define AUTO_SNAP_MAX 12
+
+static CHAR16* find_sub(CHAR16 *hay, const CHAR16 *needle) {
+    if (!hay || !needle) return NULL;
+    for (UINTN i = 0; hay[i]; i++) {
+        UINTN j = 0;
+        while (needle[j] && hay[i + j] == needle[j]) j++;
+        if (!needle[j]) return hay + i;
+    }
+    return NULL;
+}
+
+static int is_digits(CHAR16 *s) {
+    if (!s[0]) return 0;
+    for (UINTN i = 0; s[i]; i++)
+        if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+static CHAR16* xml_field(CHAR16 *xml, const CHAR16 *open, const CHAR16 *close, UINTN maxch) {
+    CHAR16 *p = find_sub(xml, open);
+    if (!p) return NULL;
+    while (*p && *p != '>') p++;
+    if (!*p) return NULL;
+    p++;
+    CHAR16 *q = find_sub(p, close);
+    if (!q) return NULL;
+    UINTN len = (UINTN)(q - p);
+    if (len > maxch) len = maxch;
+    CHAR16 buf[128];
+    if (len > 127) len = 127;
+    for (UINTN i = 0; i < len; i++) buf[i] = p[i];
+    buf[len] = '\0';
+    return efi_strdup(trim(buf));
+}
+
+static int cmdline_subvol(CHAR16 *cl, CHAR16 *out, UINTN cap) {
+    out[0] = '\0';
+    CHAR16 *rf = cl ? find_sub(cl, L"rootflags=") : NULL;
+    if (!rf) return 0;
+    CHAR16 *p = rf + 10;
+    CHAR16 *sv = NULL;
+    while (*p && *p != ' ') {
+        if (find_sub(p, L"subvol=") == p) { sv = p + 7; break; }
+        while (*p && *p != ' ' && *p != ',') p++;
+        if (*p == ',') p++;
+    }
+    if (!sv) return 0;
+    while (*sv == '/') sv++;
+    UINTN o = 0;
+    while (*sv && *sv != ',' && *sv != ' ' && o + 1 < cap) out[o++] = *sv++;
+    while (o && out[o - 1] == '/') o--;
+    out[o] = '\0';
+    return out[0] != '\0';
+}
+
+static void base_to_pfx(const CHAR16 *base, CHAR16 *pfx, UINTN cap) {
+    UINTN i = 0, o = 0;
+    while (base[i] == '\\') i++;
+    for (; base[i] && o + 1 < cap; i++)
+        pfx[o++] = (base[i] == '\\') ? '/' : base[i];
+    pfx[o] = '\0';
+}
+
+static INTN cmp16(const CHAR16 *a, const CHAR16 *b) {
+    UINTN i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return (INTN)a[i] - (INTN)b[i];
+}
+
+static CHAR16* json_field(CHAR16 *j, const CHAR16 *key, UINTN maxch) {
+    CHAR16 pat[24];
+    SPrint(pat, sizeof(pat), L"\"%s\"", key);
+    CHAR16 *p = find_sub(j, pat);
+    if (!p) return NULL;
+    while (*p && *p != ':') p++;
+    if (!*p) return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return NULL;
+    p++;
+    CHAR16 buf[128];
+    UINTN o = 0;
+    while (*p && *p != '"' && o < maxch && o < 127) {
+        if (*p == '\\' && p[1]) p++;
+        buf[o++] = *p++;
+    }
+    buf[o] = '\0';
+    CHAR16 *t = trim(buf);
+    if (!t[0]) return NULL;
+    return efi_strdup(t);
+}
+
+static int ts_tag_ok(CHAR16 *s) {
+    static const CHAR16 pat[] = L"dddd-dd-dd_dd-dd-dd";
+    for (UINTN i = 0; pat[i]; i++) {
+        if (!s[i]) return 0;
+        if (pat[i] == 'd') {
+            if (s[i] < '0' || s[i] > '9') return 0;
+        } else if (s[i] != pat[i]) {
+            return 0;
+        }
+    }
+    return s[19] == '\0';
+}
+
+static void snap_build_cmdline(CHAR16 *out, UINTN cap, CHAR16 *cl, CHAR16 *subvol) {
+    UINTN o = 0;
+    CHAR16 extra[MAX_CMDLINE];
+    UINTN x = 0;
+    extra[0] = '\0';
+    UINTN i = 0;
+    while (cl && cl[i]) {
+        while (cl[i] == ' ' || cl[i] == '\t') i++;
+        if (!cl[i]) break;
+        UINTN j = i;
+        while (cl[j] && cl[j] != ' ' && cl[j] != '\t') j++;
+        if (find_sub(cl + i, L"rootflags=") == cl + i) {
+            UINTN k = i + 10;
+            while (k < j) {
+                UINTN m = k;
+                while (m < j && cl[m] != ',') m++;
+                if (find_sub(cl + k, L"subvol") != cl + k) {
+                    for (UINTN t = k; t < m && x + 2 < MAX_CMDLINE; t++) {
+                        if (t == k && x) extra[x++] = ',';
+                        else if (t == k) { }
+                        extra[x++] = cl[t];
+                    }
+                    extra[x] = '\0';
+                }
+                k = m + (m < j ? 1 : 0);
+            }
+        } else {
+            if (o && o + 1 < cap) out[o++] = ' ';
+            for (UINTN t = i; t < j && o + 1 < cap; t++) out[o++] = cl[t];
+        }
+        i = j;
+    }
+    out[o] = '\0';
+    CHAR16 tail[MAX_CMDLINE];
+    if (extra[0])
+        SPrint(tail, sizeof(tail), L"%srootflags=subvol=%s,%s", o ? L" " : L"", subvol, extra);
+    else
+        SPrint(tail, sizeof(tail), L"%srootflags=subvol=%s", o ? L" " : L"", subvol);
+    for (UINTN t = 0; tail[t] && o + 1 < cap; t++) out[o++] = tail[t];
+    out[o] = '\0';
+}
+
+static boot_entry_t* snap_autodetect_target(config_t *config) {
+    boot_entry_t *found = NULL;
+    for (boot_entry_t *e = config->entries; e; e = e->next) {
+        if (looks_windows(e->kernel_path)) continue;
+        CHAR16 *cl = e->cmdline ? e->cmdline : config->def_cmdline;
+        if (!cl || !find_sub(cl, L"root=")) continue;
+        if (found) return NULL;
+        found = e;
+    }
+    return found;
+}
+
+typedef struct {
+    EFI_FILE_PROTOCOL *root;
+    CHAR16 *cl;
+    snapshot_t arr[AUTO_SNAP_MAX];
+    UINTN made;
+} snap_ctx_t;
+
+static void snap_add(snap_ctx_t *c, CHAR16 *sv, CHAR16 *id, CHAR16 *date, CHAR16 *desc) {
+    if (c->made >= AUTO_SNAP_MAX || !id) {
+        if (id)   efi_free_pool(id);
+        if (date) efi_free_pool(date);
+        if (desc) efi_free_pool(desc);
+        return;
+    }
+    CHAR16 buf[MAX_CMDLINE];
+    snap_build_cmdline(buf, MAX_CMDLINE, c->cl, sv);
+    snapshot_t *s = &c->arr[c->made];
+    s->kernel = NULL;
+    s->initrd = NULL;
+    s->id = id;
+    s->date = date ? date : efi_strdup(L"?");
+    s->desc = desc ? desc : efi_strdup(L"snapshot");
+    s->cmdline = efi_strdup(buf);
+    if (!s->cmdline) {
+        if (s->id)   efi_free_pool(s->id);
+        if (s->date) efi_free_pool(s->date);
+        if (s->desc) efi_free_pool(s->desc);
+        return;
+    }
+    c->made++;
+}
+
+static UINTN scan_snapper(snap_ctx_t *c, const CHAR16 *base) {
+    CHAR16 dirp[MAX_PATH];
+    SPrint(dirp, sizeof(dirp), L"%s\\.snapshots", base);
+    EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, dirp);
+    if (!d) return 0;
+
+    UINTN ids[MAX_SNAPS];
+    UINTN n = 0;
+    CHAR16 name[64];
+    int is_dir;
+    while (efi_read_dirent(d, name, 64, &is_dir) && n < MAX_SNAPS) {
+        if (!is_dir || !is_digits(name)) continue;
+        CHAR16 sp[MAX_PATH];
+        SPrint(sp, sizeof(sp), L"%s\\%s\\snapshot", dirp, name);
+        EFI_FILE_PROTOCOL *sd = efi_open_dir(c->root, sp);
+        if (!sd) continue;
+        sd->Close(sd);
+        ids[n++] = parse_uint(name);
+    }
+    d->Close(d);
+    if (!n) return 0;
+
+    for (UINTN a = 1; a < n; a++) {
+        UINTN v = ids[a];
+        UINTN b = a;
+        while (b > 0 && ids[b - 1] < v) { ids[b] = ids[b - 1]; b--; }
+        ids[b] = v;
+    }
+    if (n > AUTO_SNAP_MAX) n = AUTO_SNAP_MAX;
+
+    CHAR16 pfx[128];
+    base_to_pfx(base, pfx, 128);
+
+    UINTN before = c->made;
+    for (UINTN a = 0; a < n && c->made < AUTO_SNAP_MAX; a++) {
+        CHAR16 sv[MAX_PATH], buf[MAX_PATH];
+        if (pfx[0])
+            SPrint(sv, sizeof(sv), L"/%s/.snapshots/%d/snapshot", pfx, ids[a]);
+        else
+            SPrint(sv, sizeof(sv), L"/.snapshots/%d/snapshot", ids[a]);
+
+        CHAR16 *date = NULL, *desc = NULL;
+        SPrint(buf, sizeof(buf), L"%s\\%d\\info.xml", dirp, ids[a]);
+        CHAR16 *xml = read_text_from_root(c->root, buf);
+        if (xml) {
+            date = xml_field(xml, L"<date", L"</date>", 16);
+            desc = xml_field(xml, L"<description", L"</description>", 64);
+            efi_free_pool(xml);
+        }
+        SPrint(buf, sizeof(buf), L"%d", ids[a]);
+        snap_add(c, sv, efi_strdup(buf), date, desc);
+    }
+    return c->made - before;
+}
+
+static UINTN scan_timeshift(snap_ctx_t *c) {
+    EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, L"\\timeshift-btrfs\\snapshots");
+    if (!d) return 0;
+
+    CHAR16 tags[32][20];
+    UINTN n = 0;
+    CHAR16 name[64];
+    int is_dir;
+    while (efi_read_dirent(d, name, 64, &is_dir) && n < 32) {
+        if (!is_dir || !ts_tag_ok(name)) continue;
+        CHAR16 sp[MAX_PATH];
+        SPrint(sp, sizeof(sp), L"\\timeshift-btrfs\\snapshots\\%s\\@", name);
+        EFI_FILE_PROTOCOL *sd = efi_open_dir(c->root, sp);
+        if (!sd) continue;
+        sd->Close(sd);
+        for (UINTN i = 0; i < 20; i++) tags[n][i] = name[i];
+        n++;
+    }
+    d->Close(d);
+    if (!n) return 0;
+
+    for (UINTN a = 1; a < n; a++) {
+        CHAR16 tmp[20];
+        for (UINTN i = 0; i < 20; i++) tmp[i] = tags[a][i];
+        UINTN b = a;
+        while (b > 0 && cmp16(tags[b - 1], tmp) < 0) {
+            for (UINTN i = 0; i < 20; i++) tags[b][i] = tags[b - 1][i];
+            b--;
+        }
+        for (UINTN i = 0; i < 20; i++) tags[b][i] = tmp[i];
+    }
+    if (n > AUTO_SNAP_MAX) n = AUTO_SNAP_MAX;
+
+    UINTN before = c->made;
+    for (UINTN a = 0; a < n && c->made < AUTO_SNAP_MAX; a++) {
+        CHAR16 sv[MAX_PATH], buf[MAX_PATH];
+        SPrint(sv, sizeof(sv), L"/timeshift-btrfs/snapshots/%s/@", tags[a]);
+
+        CHAR16 datebuf[17];
+        for (UINTN i = 0; i < 10; i++) datebuf[i] = tags[a][i];
+        datebuf[10] = ' ';
+        datebuf[11] = tags[a][11];
+        datebuf[12] = tags[a][12];
+        datebuf[13] = ':';
+        datebuf[14] = tags[a][14];
+        datebuf[15] = tags[a][15];
+        datebuf[16] = '\0';
+
+        CHAR16 *desc = NULL;
+        SPrint(buf, sizeof(buf), L"\\timeshift-btrfs\\snapshots\\%s\\info.json", tags[a]);
+        CHAR16 *js = read_text_from_root(c->root, buf);
+        if (js) {
+            desc = json_field(js, L"comments", 64);
+            if (!desc) desc = json_field(js, L"tags", 24);
+            efi_free_pool(js);
+        }
+        if (!desc) desc = efi_strdup(L"timeshift");
+        snap_add(c, sv, efi_strdup(tags[a]), efi_strdup(datebuf), desc);
+    }
+    return c->made - before;
+}
+
+static UINTN scan_plain_dir(snap_ctx_t *c, const CHAR16 *base, const CHAR16 *dirname) {
+    CHAR16 dirp[MAX_PATH];
+    SPrint(dirp, sizeof(dirp), L"%s\\%s", base, dirname);
+    EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, dirp);
+    if (!d) return 0;
+
+    CHAR16 names[32][64];
+    UINTN n = 0;
+    CHAR16 name[64];
+    int is_dir;
+    while (efi_read_dirent(d, name, 64, &is_dir) && n < 32) {
+        if (!is_dir) continue;
+        for (UINTN i = 0; i < 64; i++) names[n][i] = name[i];
+        n++;
+    }
+    d->Close(d);
+    if (!n) return 0;
+
+    for (UINTN a = 1; a < n; a++) {
+        CHAR16 tmp[64];
+        for (UINTN i = 0; i < 64; i++) tmp[i] = names[a][i];
+        UINTN b = a;
+        while (b > 0 && cmp16(names[b - 1], tmp) < 0) {
+            for (UINTN i = 0; i < 64; i++) names[b][i] = names[b - 1][i];
+            b--;
+        }
+        for (UINTN i = 0; i < 64; i++) names[b][i] = tmp[i];
+    }
+
+    CHAR16 pfx[128];
+    base_to_pfx(base, pfx, 128);
+
+    UINTN before = c->made;
+    for (UINTN a = 0; a < n && c->made < AUTO_SNAP_MAX; a++) {
+        CHAR16 sv[MAX_PATH];
+        if (pfx[0])
+            SPrint(sv, sizeof(sv), L"/%s/%s/%s", pfx, dirname, names[a]);
+        else
+            SPrint(sv, sizeof(sv), L"/%s/%s", dirname, names[a]);
+        snap_add(c, sv, efi_strdup(names[a]), NULL, efi_strdup(L"btrfs subvolume"));
+    }
+    return c->made - before;
+}
+
+static void snapshots_autodetect(config_t *config) {
+    boot_entry_t *e = snap_autodetect_target(config);
+    if (!e) return;
+
+    CHAR16 *cl = e->cmdline ? e->cmdline : config->def_cmdline;
+
+    CHAR16 bases[3][130];
+    UINTN nb = 0;
+    CHAR16 sv[128];
+    if (cmdline_subvol(cl, sv, 128)) {
+        UINTN o = 0;
+        bases[nb][o++] = '\\';
+        for (UINTN i = 0; sv[i] && o + 1 < 130; i++)
+            bases[nb][o++] = (sv[i] == '/') ? '\\' : sv[i];
+        bases[nb][o] = '\0';
+        nb++;
+    }
+    if (nb == 0 || cmp16(bases[0], L"") != 0) {
+        bases[nb][0] = '\0';
+        nb++;
+    }
+    if (nb == 1 || cmp16(bases[0], L"\\@") != 0) {
+        bases[nb][0] = '\\';
+        bases[nb][1] = '@';
+        bases[nb][2] = '\0';
+        nb++;
+    }
+
+    UINTN nvol = 0;
+    EFI_HANDLE *vols = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nvol);
+    if (!vols) return;
+
+    snap_ctx_t ctx;
+    ctx.cl = cl;
+    ctx.made = 0;
+    const CHAR16 *src = L"";
+
+    int have_uuid = e->uuid && e->uuid[0];
+    for (int pass = have_uuid ? 0 : 1; pass < 2 && !ctx.made; pass++) {
+        for (UINTN v = 0; v < nvol && !ctx.made; v++) {
+            if (pass == 0 &&
+                !efi_handle_matches_partition_uuid(vols[v], e->uuid))
+                continue;
+            EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
+            if (!root) continue;
+            ctx.root = root;
+
+            for (UINTN b = 0; b < nb; b++) scan_snapper(&ctx, bases[b]);
+            if (ctx.made) src = L"snapper";
+
+            if (!ctx.made && scan_timeshift(&ctx)) src = L"timeshift";
+
+            if (!ctx.made) {
+                for (UINTN b = 0; b < nb && !ctx.made; b++) {
+                    scan_plain_dir(&ctx, bases[b], L".snapshots");
+                    scan_plain_dir(&ctx, bases[b], L"snapshots");
+                    scan_plain_dir(&ctx, bases[b], L"@snapshots");
+                }
+                if (ctx.made) src = L"btrfs";
+            }
+            root->Close(root);
+        }
+        if (pass == 0 && !ctx.made)
+            efi_log(L"config: no snapshots on uuid= volume - trying all volumes");
+    }
+    efi_free_pool(vols);
+
+    if (!ctx.made) return;
+
+    snapshot_t *arr = efi_allocate_pool(ctx.made * sizeof(snapshot_t));
+    if (!arr) {
+        for (UINTN i = 0; i < ctx.made; i++) {
+            if (ctx.arr[i].id)      efi_free_pool(ctx.arr[i].id);
+            if (ctx.arr[i].date)    efi_free_pool(ctx.arr[i].date);
+            if (ctx.arr[i].desc)    efi_free_pool(ctx.arr[i].desc);
+            if (ctx.arr[i].cmdline) efi_free_pool(ctx.arr[i].cmdline);
+        }
+        return;
+    }
+    for (UINTN i = 0; i < ctx.made; i++) arr[i] = ctx.arr[i];
+    e->snapshots = arr;
+    e->snap_count = ctx.made;
+    e->snap_sel = 0;
+
+    CHAR16 d[96];
+    SPrint(d, sizeof(d), L"config: auto-detected %d snapshot(s) (%s)", ctx.made, src);
+    efi_log(d);
+}
+
+static void snapshots_apply(config_t *config) {
+    if (config->snapshots_mode == 0) return;
+    if (load_snapshots(config)) return;
+    if (config->snapshots_mode != 2) snapshots_autodetect(config);
+}
+
 EFI_STATUS config_parse(config_t *config) {
 
     config->timeout = 5;
@@ -1312,6 +2402,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->box_radius = 0;
     config->remember_last = 0;
     config->recovery_entries = 0;
+    config->snapshots_mode = 1;
     config->autoboot = 0;
     config->mouse = 1;
     config->editor = 1;
@@ -1345,18 +2436,17 @@ EFI_STATUS config_parse(config_t *config) {
     config->blur_title = 0;
     config->blur_color = COLOR_WHITE;
     config->has_blur_color = 0;
-    /* accent disabled for this build
     config->accent_enabled = 0;
     config->accent_icons = 1;
     config->accent_underline = 1;
     config->accent_text = 0;
     config->accent_os_icons = 0;
-    config->accent_variant = ACCENT_TONAL;
-    */
+    config->accent_variant = 0;
     config->animation = 1;
     config->anim_speed = 0;
     config->fade_speed = 0;
     config->entries_per_page = 0;
+    config->hotplug = 1;
     config->power_icons = 0;
     config->power_icon_size = 0;
     config->shutdown_icon = NULL;
@@ -1369,26 +2459,40 @@ EFI_STATUS config_parse(config_t *config) {
     CHAR16 *buf = read_text_file(CONFIG_FILE);
     if (!buf) {
         efi_log(L"config: boot.conf not found, auto-detecting boot entries");
-        return detect_entries(config);
+        EFI_STATUS st = detect_entries(config);
+        snapshots_apply(config);
+        return st;
     }
 
-    CHAR16 *lines[256];
+    UINTN max_lines = 1;
+    for (CHAR16 *p = buf; *p; p++)
+        if (*p == '\n') max_lines++;
+
+    CHAR16 **lines = efi_allocate_pool(max_lines * sizeof(CHAR16 *));
+    if (!lines) {
+        efi_free_pool(buf);
+        efi_log(L"ERROR: out of memory splitting config - auto-detecting");
+        EFI_STATUS st = detect_entries(config);
+        snapshots_apply(config);
+        return st;
+    }
+
     UINTN line_count = 0;
     CHAR16 *start = buf;
 
-    while (*start && line_count < 256) {
+    while (*start && line_count < max_lines) {
         CHAR16 *end = start;
         while (*end && *end != '\n') end++;
-        if (*end == '\n') *end = '\0';
+        int had_nl = (*end == '\n');
+        if (had_nl) *end = '\0';
 
         CHAR16 *cr = efi_strchr(start, '\r');
         if (cr) *cr = '\0';
 
         lines[line_count++] = start;
+        if (!had_nl) break;
         start = end + 1;
     }
-    if (*start)
-        efi_log(L"WARN: config exceeds 256 lines - remainder ignored");
 
     UINTN entry_count_before_parse = config->entry_count;
 
@@ -1412,6 +2516,7 @@ EFI_STATUS config_parse(config_t *config) {
             if (is_header(line, L"entry") ||
                 is_header(line, L"linux") ||
                 win_hint) {
+                efi_log(L"config: calling parse_entry");
                 parse_entry(config, lines, &i, line_count, win_hint);
             }
         }
@@ -1428,6 +2533,7 @@ EFI_STATUS config_parse(config_t *config) {
         if (config->theme) apply_theme(config, config->theme);
     }
 
+    efi_free_pool(lines);
     efi_free_pool(buf);
 
     if (config->entry_count == entry_count_before_parse) {
@@ -1435,6 +2541,8 @@ EFI_STATUS config_parse(config_t *config) {
     }
 
     if (config->recovery_entries) add_recovery_entries(config);
+
+    snapshots_apply(config);
 
     return EFI_SUCCESS;
 }
@@ -1478,11 +2586,15 @@ static boot_entry_t* config_add_entry(config_t *config,
     entry->luks_cmdline = NULL;
     entry->luks_preset = NULL;
     entry->decrypt_password = NULL;
+    entry->hp_volume = NULL;
     entry->next = NULL;
     entry->deployments = NULL;
     entry->deploy_count = 0;
     entry->deploy_default = 0;
     entry->deploy_sel = 0;
+    entry->snapshots = NULL;
+    entry->snap_count = 0;
+    entry->snap_sel = 0;
 
     efi_log(L"config: adding entry");
     efi_log(entry->name);
@@ -1529,6 +2641,7 @@ void config_free(config_t *config) {
             if (entry->cmdline) efi_free_pool(entry->cmdline);
         }
         if (entry->uuid) efi_free_pool(entry->uuid);
+        if (entry->snapshots) free_snapshots(entry->snapshots, entry->snap_count);
         if (entry->luks_key_path) efi_free_pool(entry->luks_key_path);
         if (entry->luks_cmdline) efi_free_pool(entry->luks_cmdline);
         if (entry->luks_preset) efi_free_pool(entry->luks_preset);

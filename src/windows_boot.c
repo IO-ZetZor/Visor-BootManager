@@ -1,4 +1,3 @@
-
 #include "windows_boot.h"
 #include "efi_helpers.h"
 #include <efi.h>
@@ -10,7 +9,6 @@ EFI_STATUS windows_find_bootmgr(CHAR16 *partition_uuid, EFI_DEVICE_PATH **bootmg
     CHAR16 *paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
         L"\\EFI\\BOOT\\bootmgfw.efi",
-        L"\\EFI\\BOOT\\BOOTX64.EFI",
         NULL
     };
 

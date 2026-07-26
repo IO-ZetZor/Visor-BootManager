@@ -62,8 +62,15 @@ typedef struct {
     UINT16 checksum;
 } __attribute__((packed)) setup_block_t;
 
-#define LINUX_SIGNATURE 0x53726452
-#define HANDOVER_MASK   0x01
+#define LINUX_SIGNATURE 0x53726448
+#define LINUX_SETUP_HEADER_OFFSET 0x1F1u
+#define LINUX_BOOT_FLAG_MAGIC     0xAA55u
+#define LINUX_BOOT_PARAMS_SIZE    0x1000u
+
+#define LINUX_XLF_KERNEL_64       (1u << 0)
+#define LINUX_XLF_ABOVE_4G        (1u << 1)
+#define LINUX_XLF_HANDOVER_32     (1u << 2)
+#define LINUX_XLF_HANDOVER_64     (1u << 3)
 
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st);
 

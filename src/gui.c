@@ -1,6 +1,8 @@
 #include "gui.h"
 #include "font.h"
 #include "efi_helpers.h"
+#include "arch.h"
+#include "accent.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -36,6 +38,7 @@ static void font_ensure_decoded(void) {
             while (cnt-- && o < f->unpacked_size) out[o++] = v;
         }
     }
+    while (o < f->unpacked_size) out[o++] = 0;
     g_glyph_cov = out;
 }
 
@@ -115,6 +118,15 @@ static int mul_overflow_uintn(UINTN a, UINTN b, UINTN *out) {
     if (a && b > ~(UINTN)0 / a) return 1;
     *out = a * b;
     return 0;
+}
+
+static UINT16 rd16le(const UINT8 *p) {
+    return (UINT16)((UINT16)p[0] | ((UINT16)p[1] << 8));
+}
+
+static UINT32 rd32le(const UINT8 *p) {
+    return (UINT32)p[0] | ((UINT32)p[1] << 8) |
+           ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24);
 }
 
 static void wipe16(CHAR16 *s, UINTN n) {
@@ -233,23 +245,6 @@ static UINTN fade_duration_ms(gui_state_t *state) {
          - (UINTN)sp * (FADE_MAX_DURATION_MS - FADE_MIN_DURATION_MS) / 10;
 }
 
-static UINT64 fade_tsc_per_us = 0;
-
-static UINT64 fade_now_us(void) {
-    return __builtin_ia32_rdtsc() / fade_tsc_per_us;
-}
-
-static void fade_calibrate_clock(void) {
-    if (fade_tsc_per_us) return;
-
-    UINT64 t0 = __builtin_ia32_rdtsc();
-    BS->Stall(10000);
-    UINT64 elapsed = __builtin_ia32_rdtsc() - t0;
-
-    fade_tsc_per_us = elapsed / 10000;
-    if (fade_tsc_per_us == 0) fade_tsc_per_us = 1;
-}
-
 static int gui_animation_on(gui_state_t *state) {
     return state && state->animation;
 }
@@ -309,12 +304,12 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
         return;
     }
 
-    fade_calibrate_clock();
+    arch_clock_init();
     UINT64 duration_us = (UINT64)fade_duration_ms(state) * 1000;
-    UINT64 start = fade_now_us();
+    UINT64 start = arch_now_us();
 
     for (;;) {
-        UINT64 frame_start = fade_now_us();
+        UINT64 frame_start = arch_now_us();
         UINT64 elapsed = frame_start - start;
         int done = elapsed >= duration_us;
 
@@ -326,7 +321,7 @@ static void gui_fade_from_snapshot(gui_state_t *state, UINT32 *snapshot,
         gui_present(state);
         if (done) break;
 
-        UINT64 spent = fade_now_us() - frame_start;
+        UINT64 spent = arch_now_us() - frame_start;
         if (spent < FADE_MIN_FRAME_US) BS->Stall(FADE_MIN_FRAME_US - spent);
     }
 }
@@ -360,182 +355,21 @@ void gui_fade_out(gui_state_t *state) {
     efi_free_pool(snapshot);
 }
 
-typedef struct visor_cpu_arch visor_cpu_arch_t;
-struct visor_cpu_arch {
-    void *FlushDataCache;
-    void *EnableInterrupt;
-    void *DisableInterrupt;
-    void *GetInterruptState;
-    void *Init;
-    void *RegisterInterruptHandler;
-    void *GetTimerValue;
-    EFI_STATUS (EFIAPI *SetMemoryAttributes)(visor_cpu_arch_t *This,
-        EFI_PHYSICAL_ADDRESS BaseAddress, UINT64 Length, UINT64 Attributes);
-};
-
-#define MSR_MTRRCAP        0x0FE
-#define MSR_MTRR_DEF_TYPE  0x2FF
-#define MSR_MTRR_PHYSBASE0 0x200
-#define MTRR_TYPE_WC       0x01
-
-static inline UINT64 x_rdmsr(UINT32 i){ UINT32 lo,hi; __asm__ volatile("rdmsr":"=a"(lo),"=d"(hi):"c"(i)); return ((UINT64)hi<<32)|lo; }
-static inline void   x_wrmsr(UINT32 i, UINT64 v){ __asm__ volatile("wrmsr"::"c"(i),"a"((UINT32)v),"d"((UINT32)(v>>32))); }
-static inline void   x_wbinvd(void){ __asm__ volatile("wbinvd":::"memory"); }
-static inline UINT64 x_rdcr0(void){ UINT64 v; __asm__ volatile("mov %%cr0,%0":"=r"(v)); return v; }
-static inline void   x_wrcr0(UINT64 v){ __asm__ volatile("mov %0,%%cr0"::"r"(v):"memory"); }
-static inline UINT64 x_rdcr3(void){ UINT64 v; __asm__ volatile("mov %%cr3,%0":"=r"(v)); return v; }
-static inline void   x_wrcr3(UINT64 v){ __asm__ volatile("mov %0,%%cr3"::"r"(v):"memory"); }
-static inline UINT64 x_rdcr4(void){ UINT64 v; __asm__ volatile("mov %%cr4,%0":"=r"(v)); return v; }
-static inline void   x_wrcr4(UINT64 v){ __asm__ volatile("mov %0,%%cr4"::"r"(v):"memory"); }
-static inline void   x_cpuid(UINT32 leaf, UINT32 *a, UINT32 *b, UINT32 *c, UINT32 *d){
-    __asm__ volatile("cpuid":"=a"(*a),"=b"(*b),"=c"(*c),"=d"(*d):"a"(leaf),"c"(0)); }
-
-static int mtrr_add_wc(UINT64 base, UINT64 size) {
-    UINT64 cap = x_rdmsr(MSR_MTRRCAP);
-    UINT32 vcnt = (UINT32)(cap & 0xFF);
-    if (!(cap & (1ull << 10)) || vcnt == 0) return 0;
-
-    UINT32 a, b, c, d, maxphys = 36;
-    x_cpuid(0x80000000, &a, &b, &c, &d);
-    if (a >= 0x80000008) { x_cpuid(0x80000008, &a, &b, &c, &d); maxphys = a & 0xFF; }
-    if (maxphys < 32 || maxphys > 52) maxphys = 40;
-    UINT64 pmask = (maxphys >= 64 ? ~0ull : ((1ull << maxphys) - 1)) & ~0xFFFull;
-
-    UINT64 sz = 0x1000;
-    while (sz < size) sz <<= 1;
-    if (base & (sz - 1)) return 0;
-
-    int slot = -1;
-    for (UINT32 i = 0; i < vcnt; i++) {
-        UINT64 pm = x_rdmsr(MSR_MTRR_PHYSBASE0 + 2*i + 1);
-        UINT64 pb = x_rdmsr(MSR_MTRR_PHYSBASE0 + 2*i);
-        if (!(pm & (1ull << 11))) { if (slot < 0) slot = (int)i; continue; }
-        if ((pb & 0xFF) == MTRR_TYPE_WC && (pb & pmask) == (base & pmask)) return 1;
-    }
-    if (slot < 0) return 0;
-
-    UINT64 nb = (base & pmask) | MTRR_TYPE_WC;
-    UINT64 nm = ((~(sz - 1)) & pmask) | (1ull << 11);
-
-    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    UINT64 cr0 = x_rdcr0();
-    x_wrcr0((cr0 & ~(1ull << 29)) | (1ull << 30));
-    x_wbinvd();
-    x_wrcr3(x_rdcr3());
-    UINT64 deftype = x_rdmsr(MSR_MTRR_DEF_TYPE);
-    x_wrmsr(MSR_MTRR_DEF_TYPE, deftype & ~(1ull << 11));
-
-    x_wrmsr(MSR_MTRR_PHYSBASE0 + 2*slot,     nb);
-    x_wrmsr(MSR_MTRR_PHYSBASE0 + 2*slot + 1, nm);
-
-    x_wrmsr(MSR_MTRR_DEF_TYPE, deftype | (1ull << 11));
-    x_wbinvd();
-    x_wrcr3(x_rdcr3());
-    x_wrcr0(cr0);
-    if (flags & 0x200) __asm__ volatile("sti");
-    return 1;
-}
-
-#define MSR_IA32_PAT 0x277
-#define PTE_P     (1ull << 0)
-#define PTE_PWT   (1ull << 3)
-#define PTE_PCD   (1ull << 4)
-#define PTE_PS    (1ull << 7)
-#define PTE_PAT4K (1ull << 7)
-#define PTE_PATLG (1ull << 12)
-#define PTE_ADDR  0x000FFFFFFFFFF000ull
-
-static void pat_set_slot1_wc(void) {
-    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    UINT64 cr4 = x_rdcr4();
-    if (cr4 & (1ull << 7)) x_wrcr4(cr4 & ~(1ull << 7));
-    UINT64 cr0 = x_rdcr0();
-    x_wrcr0((cr0 & ~(1ull << 29)) | (1ull << 30));
-    x_wbinvd();
-    x_wrcr3(x_rdcr3());
-    UINT64 pat = x_rdmsr(MSR_IA32_PAT);
-    pat = (pat & ~(0xFFull << 8)) | (0x01ull << 8);
-    x_wrmsr(MSR_IA32_PAT, pat);
-    x_wbinvd();
-    x_wrcr3(x_rdcr3());
-    x_wrcr0(cr0);
-    if (cr4 & (1ull << 7)) x_wrcr4(cr4);
-    if (flags & 0x200) __asm__ volatile("sti");
-}
-
-static UINT64 pte_set_wc(UINT64 va) {
-    UINT64 *pml4 = (UINT64*)(x_rdcr3() & PTE_ADDR);
-    UINT64 *e = &pml4[(va >> 39) & 0x1FF];
-    if (!(*e & PTE_P)) return 0;
-    UINT64 *pdpt = (UINT64*)(*e & PTE_ADDR);
-    e = &pdpt[(va >> 30) & 0x1FF];
-    if (!(*e & PTE_P)) return 0;
-    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 30; }
-    UINT64 *pd = (UINT64*)(*e & PTE_ADDR);
-    e = &pd[(va >> 21) & 0x1FF];
-    if (!(*e & PTE_P)) return 0;
-    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 21; }
-    UINT64 *pt = (UINT64*)(*e & PTE_ADDR);
-    e = &pt[(va >> 12) & 0x1FF];
-    if (!(*e & PTE_P)) return 0;
-    *e = (*e & ~(PTE_PCD | PTE_PAT4K)) | PTE_PWT;
-    return 1ull << 12;
-}
-
-static int fb_pt_set_wc(UINT64 base, UINT64 size) {
-    UINT64 flags; __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    UINT64 cr0 = x_rdcr0();
-    x_wrcr0(cr0 & ~(1ull << 16));
-
-    int ok = 1;
-    UINT64 va = base & ~0xFFFull, end = base + size;
-    while (va < end) {
-        UINT64 pg = pte_set_wc(va);
-        if (!pg) { ok = 0; break; }
-        va = (va & ~(pg - 1)) + pg;
-    }
-
-    x_wrcr0(cr0);
-
-    UINT64 cr4 = x_rdcr4();
-    if (cr4 & (1ull << 7)) { x_wrcr4(cr4 & ~(1ull << 7)); x_wrcr4(cr4); }
-    else x_wrcr3(x_rdcr3());
-    if (flags & 0x200) __asm__ volatile("sti");
-    return ok;
-}
-
 #define FB_FAST_THRESHOLD_US 20000
 
 static void gui_fb_set_wc(gui_state_t *state) {
-    static EFI_GUID cpu_guid = { 0x26baccb1, 0x6f42, 0x11d4,
-        { 0xbc, 0xe7, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } };
     state->fb_fast = 0;
     if (!gui_has_linear_fb(state)) return;
     UINT64 base = (UINT64)state->gop->Mode->FrameBufferBase;
     UINT64 size = (UINT64)state->gop->Mode->FrameBufferSize;
     if (!base || !size) return;
 
-    const CHAR16 *method = L"none";
+    const CHAR16 *method = arch_fb_make_wc(base, size);
 
-    visor_cpu_arch_t *cpu = NULL;
-    if (!EFI_ERROR(BS->LocateProtocol(&cpu_guid, NULL, (void**)&cpu)) && cpu && cpu->SetMemoryAttributes
-        && !EFI_ERROR(cpu->SetMemoryAttributes(cpu, base, size, EFI_MEMORY_WC)))
-        method = L"cpu-arch";
-
-    int have_mtrr = mtrr_add_wc(base, size);
-
-    static int pat_ready = 0;
-    if (!pat_ready) { pat_set_slot1_wc(); pat_ready = 1; }
-    int have_pat = fb_pt_set_wc(base, size);
-
-    if (have_pat)       method = have_mtrr ? L"pat+mtrr" : L"pat";
-    else if (have_mtrr) method = L"mtrr";
-    if (method[0] == L'n' && cpu) method = L"cpu-arch";
-
-    fade_calibrate_clock();
-    UINT64 t0 = fade_now_us();
+    arch_clock_init();
+    UINT64 t0 = arch_now_us();
     blit_rows(state, 0, (INTN)state->screen_height);
-    UINT64 dt = fade_now_us() - t0;
+    UINT64 dt = arch_now_us() - t0;
     state->fb_fast = (dt < FB_FAST_THRESHOLD_US) ? 1 : 0;
 
     CHAR16 g[160];
@@ -626,7 +460,14 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->anim_frame = 0;
     state->anim_active = 0;
     state->anim_init = 0;
-    state->anim_power = 0;
+    state->hotplug_poll = NULL;
+    state->hotplug_ctx = NULL;
+    state->hp_last_ms = 0;
+    state->hp_anim = 0;
+    state->hp_frame = 0;
+    state->hp_first = 0;
+    state->hp_shift = 0;
+    state->hp_removal = 0;
     state->band_n = 0;
     for (int i = 0; i < 4; i++) { state->band_y[i] = 0; state->band_h[i] = 0; }
     state->prev_ul_y = 0;
@@ -666,6 +507,10 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->ver_fading = 0;
     state->ver_frame = 0;
     state->ver_dir = 0;
+    state->ver_what = 0;
+    state->ver_next = 0;
+    state->snap_mode = 0;
+    state->snap_scroll = 0;
 
     state->editor_enabled = 1;
     state->editing = 0;
@@ -824,10 +669,15 @@ static void fill_round_rect(gui_state_t *state, INTN x, INTN y, INTN w, INTN h,
 }
 
 static UINT32* icon_build_scaled(icon_t *icon, UINTN size) {
+    if (size == 0 || size > 4096) return NULL;
     if (icon->scaled && icon->scaled_size == size) return icon->scaled;
     if (icon->scaled) { efi_free_pool(icon->scaled); icon->scaled = NULL; icon->scaled_size = 0; }
 
-    UINT32 *out = efi_allocate_pool(size * size * sizeof(UINT32));
+    UINTN px, bytes;
+    if (mul_overflow_uintn(size, size, &px) ||
+        mul_overflow_uintn(px, sizeof(UINT32), &bytes))
+        return NULL;
+    UINT32 *out = efi_allocate_pool(bytes);
     if (!out) return NULL;
 
     UINTN iw = icon->width, ih = icon->height;
@@ -900,6 +750,35 @@ static void draw_image_sized_a(gui_state_t *state, icon_t *icon,
 static void draw_image_sized(gui_state_t *state, icon_t *icon,
                              UINTN x, UINTN y, UINTN size) {
     draw_image_sized_a(state, icon, x, y, size, 255);
+}
+
+static void draw_image_tinted_a(gui_state_t *state, icon_t *icon,
+                                UINTN x, UINTN y, UINTN size,
+                                color_t tint, INTN master) {
+    if (!icon || !icon->pixels || icon->width == 0 || icon->height == 0 || size == 0)
+        return;
+    if (master <= 0) return;
+    if (master > 255) master = 255;
+
+    UINT32 *sc = icon_build_scaled(icon, size);
+    if (!sc) return;
+
+    for (UINTN j = 0; j < size && (y + j) < state->screen_height; j++) {
+        for (UINTN i = 0; i < size && (x + i) < state->screen_width; i++) {
+            UINT32 p = sc[j * size + i];
+            UINTN cov = (p >> 24) & 0xFF;
+            cov = cov * (UINTN)master / 255;
+            if (cov == 0) continue;
+
+            UINT32 *dest = get_pixel(state, x + i, y + j);
+            if (!dest) continue;
+            UINT8 br = (*dest >> 16) & 0xFF, bg = (*dest >> 8) & 0xFF, bb = *dest & 0xFF;
+            UINT8 nr = (UINT8)((tint.r * cov + br * (255 - cov)) / 255);
+            UINT8 ng = (UINT8)((tint.g * cov + bg * (255 - cov)) / 255);
+            UINT8 nb = (UINT8)((tint.b * cov + bb * (255 - cov)) / 255);
+            *dest = (0xFFu << 24) | (nr << 16) | (ng << 8) | nb;
+        }
+    }
 }
 
 static UINT8 sharpen_cov(UINTN a) {
@@ -1070,13 +949,14 @@ icon_t* gui_load_image(CHAR16 *path) {
         return NULL;
     }
 
-    UINT32 width = *(UINT32*)(data + 18);
-    UINT32 height = *(UINT32*)(data + 22);
-    UINT16 bpp = *(UINT16*)(data + 28);
-    UINT32 compression = *(UINT32*)(data + 30);
-    UINT32 data_offset = *(UINT32*)(data + 10);
+    UINT32 width = rd32le(data + 18);
+    UINT32 height = rd32le(data + 22);
+    UINT16 bpp = rd16le(data + 28);
+    UINT32 compression = rd32le(data + 30);
+    UINT32 data_offset = rd32le(data + 10);
 
     if (width == 0 || height == 0 || width > 8192 || height > 8192 ||
+        (UINT64)width * height > 16u * 1024u * 1024u ||
         compression != 0 || (bpp != 24 && bpp != 32) || data_offset >= buf->size) {
         efi_log(L"  ERROR: unsupported or invalid BMP");
         efi_free_pool(buf->data);
@@ -1164,6 +1044,39 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
     }
 }
 
+void gui_apply_accent(gui_state_t *state) {
+    state->accent_valid = 0;
+    if (!state->accent_enabled) return;
+
+    if (!accent_generate(state->background, state->accent_variant, state->accent_roles)) {
+        efi_log(L"accent: no usable color in wallpaper - keeping configured colors");
+        return;
+    }
+    state->accent_primary   = state->accent_roles[ROLE_PRIMARY];
+    state->accent_secondary = state->accent_roles[ROLE_SECONDARY];
+    state->accent_tertiary  = state->accent_roles[ROLE_TERTIARY];
+    state->accent_valid = 1;
+    efi_log(L"accent: derived Material palette from wallpaper");
+
+    if (state->accent_underline) {
+        state->underline_color = state->accent_roles[ROLE_PRIMARY];
+        state->highlight_color = state->accent_roles[ROLE_PRIMARY];
+    }
+    if (state->accent_text) {
+        state->title_color = state->accent_roles[ROLE_PRIMARY];
+        state->name_color  = state->accent_roles[ROLE_ON_SURFACE];
+        state->fg_color    = state->accent_roles[ROLE_ON_SURFACE_VARIANT];
+    }
+    if (state->accent_icons) {
+        state->shutdown_color = state->accent_roles[ROLE_SECONDARY];
+        state->reboot_color   = state->accent_roles[ROLE_SECONDARY];
+        state->firmware_color = state->accent_roles[ROLE_TERTIARY_CONTAINER];
+    }
+    state->bg_color = state->accent_roles[ROLE_SURFACE];
+    if (!state->blur_color_set)
+        state->blur_color = state->accent_roles[ROLE_ON_PRIMARY_CONTAINER];
+}
+
 static void gui_draw_background(gui_state_t *state) {
     if (!state->background || !state->background->pixels) {
 
@@ -1239,7 +1152,7 @@ static void layout_power(gui_state_t *state) {
     state->pwr_y1 = top + (INTN)block_h;
 }
 
-static void draw_power_actions(gui_state_t *state, int focus_idx) {
+static void draw_power_actions(gui_state_t *state, int focus_idx, int live) {
     UINTN th = default_power_px(state);
     icon_t *icon[POWER_ACTION_COUNT] = {
         state->shutdown_icon, state->reboot_icon, state->firmware_icon
@@ -1248,13 +1161,21 @@ static void draw_power_actions(gui_state_t *state, int focus_idx) {
         state->shutdown_color, state->reboot_color, state->firmware_color
     };
     color_t dim = { 0xC0, 0xC0, 0xC8 };
+    if (state->accent_valid)
+        dim = state->accent_roles[ROLE_ON_SURFACE_VARIANT];
 
     for (UINTN i = 0; i < POWER_ACTION_COUNT; i++) {
         int focused = ((int)i == focus_idx);
         if (state->power_icons && icon[i]) {
-            draw_image_sized(state, icon[i], state->pwr_x[i], state->pwr_y[i],
-                             (UINTN)state->pwr_w[i]);
+            if (live && !(focused && state->blur)) continue;
+            if (state->accent_icons && state->accent_valid)
+                draw_image_tinted_a(state, icon[i], state->pwr_x[i], state->pwr_y[i],
+                                    (UINTN)state->pwr_w[i], key_color[i], 255);
+            else
+                draw_image_sized(state, icon[i], state->pwr_x[i], state->pwr_y[i],
+                                 (UINTN)state->pwr_w[i]);
         } else {
+            if (live && !focused) continue;
             CHAR16 *label = POWER_ACTIONS[i].label;
             INTN x = state->pwr_x[i], y = state->pwr_y[i];
 
@@ -1445,6 +1366,82 @@ static void calc_row_layout(gui_state_t *state, UINTN start, UINTN n,
     *total_w = x;
 }
 
+static UINTN visible_row_width(gui_state_t *state) {
+    UINTN per_page = state->per_page ? state->per_page : 3;
+    UINTN page_start = (state->selected / per_page) * per_page;
+    UINTN n = state->entry_count > page_start ? state->entry_count - page_start : 0;
+    if (n > per_page) n = per_page;
+    if (!n) return 0;
+    UINTN is  = state->icon_size    ? state->icon_size    : default_icon_size(state);
+    UINTN isp = state->icon_spacing ? state->icon_spacing : default_icon_spacing(state, is);
+    UINTN name_px = state->name_size ? state->name_size : default_name_px(state);
+    UINTN w = 0, sei = is;
+    INTN  sl = 0;
+    calc_row_layout(state, page_start, n, 0, is, isp, name_px, &w, &sl, &sei);
+    return w;
+}
+
+static void gui_entries_added(gui_state_t *state, boot_entry_t *head,
+                              UINTN count, UINTN first) {
+    UINTN old_count = state->entry_count;
+    state->entries = head;
+    state->entry_count = count;
+    state->hp_anim = 0;
+    state->hp_removal = 0;
+    if (state->selected >= count) state->selected = 0;
+
+    UINTN per_page = state->per_page ? state->per_page : 3;
+    UINTN page_start = (state->selected / per_page) * per_page;
+    UINTN old_n = (old_count > page_start) ? old_count - page_start : 0;
+    if (old_n > per_page) old_n = per_page;
+    UINTN new_n = count - page_start;
+    if (new_n > per_page) new_n = per_page;
+
+    if (!gui_animation_on(state) || new_n <= old_n || first < page_start)
+        return;
+
+    UINTN is  = state->icon_size    ? state->icon_size    : default_icon_size(state);
+    UINTN isp = state->icon_spacing ? state->icon_spacing : default_icon_spacing(state, is);
+    UINTN name_px = state->name_size ? state->name_size : default_name_px(state);
+    UINTN old_w = 0, new_w = 0, sei = is;
+    INTN  sl = 0;
+    if (old_n)
+        calc_row_layout(state, page_start, old_n, 0, is, isp, name_px,
+                        &old_w, &sl, &sei);
+    calc_row_layout(state, page_start, new_n, 0, is, isp, name_px,
+                    &new_w, &sl, &sei);
+
+    state->hp_first = first;
+    state->hp_frame = 0;
+    state->hp_anim  = 1;
+    state->hp_shift = old_n ? (INTN)(new_w - old_w) / 2 : 0;
+}
+
+static void gui_entries_removed(gui_state_t *state, boot_entry_t *head,
+                                UINTN count, UINTN gap, UINTN old_w) {
+    state->entries = head;
+    state->entry_count = count;
+    state->hp_anim = 0;
+    state->hp_removal = 0;
+    if (state->selected >= count && count) state->selected = count - 1;
+
+    if (!gui_animation_on(state) || !count) return;
+
+    UINTN per_page = state->per_page ? state->per_page : 3;
+    UINTN page_start = (state->selected / per_page) * per_page;
+
+    if (gap < page_start || gap >= page_start + per_page) return;
+
+    UINTN new_w = visible_row_width(state);
+    if (!new_w || new_w >= old_w) return;
+
+    state->hp_first   = gap;
+    state->hp_frame   = 0;
+    state->hp_anim    = 1;
+    state->hp_removal = 1;
+    state->hp_shift   = (INTN)(old_w - new_w) / 2;
+}
+
 static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
                       UINTN is, UINTN isp, UINTN max_ei, UINTN icon_cy,
                       UINTN name_px, UINTN ul_th, UINTN ul_len_cfg, INTN pad,
@@ -1493,7 +1490,10 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
         UINTN icon_x = x + (slot_w - ei) / 2;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
         if (e->icon) {
-            draw_image_sized_a(state, e->icon, icon_x, iy, ei, master);
+            if (state->accent_os_icons && state->accent_valid)
+                draw_image_tinted_a(state, e->icon, icon_x, iy, ei, state->accent_primary, master);
+            else
+                draw_image_sized_a(state, e->icon, icon_x, iy, ei, master);
         } else {
             color_t ph = e->type == 0 ? COLOR_GREEN : COLOR_RED;
             fill_round_rect(state, (INTN)icon_x, (INTN)iy, (INTN)ei, (INTN)ei,
@@ -1600,6 +1600,49 @@ static void apply_deploy(boot_entry_t *e) {
     e->cmdline     = e->deployments[s].cmdline;
 }
 
+static int v_cycle_next(gui_state_t *state) {
+    boot_entry_t *se = entry_at(state, state->selected);
+    if (!se) return 0;
+    int cur = state->version_mode ? 1 : (state->snap_mode ? 2 : 0);
+    int has_dep  = se->deploy_count > 1;
+    int has_snap = se->snap_count > 0;
+    for (int next = cur + 1; next <= 3; next++) {
+        int n = next % 3;
+        if (n == 1 && !has_dep) continue;
+        if (n == 2 && !has_snap) continue;
+        return n;
+    }
+    return 0;
+}
+
+static void v_cycle_engage(gui_state_t *state, int what) {
+    boot_entry_t *se = entry_at(state, state->selected);
+    int cur = state->version_mode ? 1 : (state->snap_mode ? 2 : 0);
+    if (what == cur) return;
+    int anim = gui_animation_on(state);
+
+    if (what == 1 && se) { se->deploy_sel = se->deploy_default; apply_deploy(se); }
+    if (what == 2 && se) { se->snap_sel = 0; state->snap_scroll = 0; }
+
+    if (!anim) {
+        state->version_mode = (what == 1);
+        state->snap_mode    = (what == 2);
+        state->ver_fading = 0; state->ver_next = 0;
+        return;
+    }
+    if (cur == 0) {
+        state->version_mode = (what == 1);
+        state->snap_mode    = (what == 2);
+        state->ver_what = what;
+        state->ver_dir = 1; state->ver_frame = 0; state->ver_fading = 1;
+        state->ver_next = 0;
+    } else {
+        state->ver_what = cur;
+        state->ver_dir = -1; state->ver_frame = 0; state->ver_fading = 1;
+        state->ver_next = what;
+    }
+}
+
 static const CHAR16* deploy_role_str(int role) {
     if (role == DEPLOY_CURRENT)  return L"current";
     if (role == DEPLOY_ROLLBACK) return L"rollback";
@@ -1644,6 +1687,102 @@ static void draw_version_info(gui_state_t *state, boot_entry_t *e,
     draw_text_px_a(state, line, cx - (INTN)lw / 2, (INTN)line_y, line_col, path_px, master);
 }
 
+static void snap_metrics(gui_state_t *state, boot_entry_t *e, UINTN name_px,
+                         INTN avail_top, UINTN *head_h, UINTN *row_h,
+                         UINTN *rows, INTN *bottom) {
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    *row_h  = path_px + 12;
+    *head_h = name_px + 14;
+    *bottom = (INTN)state->screen_height - 48;
+    INTN avail = *bottom - avail_top - (INTN)*head_h;
+    INTN fit = avail > (INTN)*row_h ? avail / (INTN)*row_h : 1;
+    UINTN r = (UINTN)fit;
+    if (e->snap_count < r) r = e->snap_count;
+    if (r > 8) r = 8;
+    if (r < 1) r = 1;
+    *rows = r;
+}
+
+static void chop_to_width(CHAR16 *s, UINTN px, UINTN maxw) {
+    if (text_width_px(s, px) <= maxw) return;
+    UINTN len = 0; while (s[len]) len++;
+    while (len > 3 && text_width_px(s, px) > maxw) {
+        s[len - 3] = '.'; s[len - 2] = '.'; s[len - 1] = 0;
+        len--;
+    }
+}
+
+static void draw_snap_info(gui_state_t *state, boot_entry_t *e,
+                           UINTN name_px, INTN master, INTN expand_pm,
+                           INTN avail_top) {
+    if (!e || e->snap_count == 0 || master <= 0) return;
+    if (master > 255) master = 255;
+    if (expand_pm < 0) expand_pm = 0;
+    if (expand_pm > 1000) expand_pm = 1000;
+
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    UINTN head_h, row_h, rows; INTN bottom;
+    snap_metrics(state, e, name_px, avail_top, &head_h, &row_h, &rows, &bottom);
+
+    if (e->snap_sel >= e->snap_count) e->snap_sel = e->snap_count - 1;
+    if (e->snap_sel < state->snap_scroll) state->snap_scroll = e->snap_sel;
+    if (e->snap_sel >= state->snap_scroll + rows)
+        state->snap_scroll = e->snap_sel - rows + 1;
+    if (state->snap_scroll + rows > e->snap_count)
+        state->snap_scroll = e->snap_count - rows;
+
+    UINTN list_h     = rows * row_h;
+    UINTN list_shown = (UINTN)((INT64)list_h * expand_pm / 1000);
+    UINTN block_h    = head_h + list_shown;
+    INTN  top        = bottom - (INTN)block_h;
+
+    UINTN maxw = state->screen_width * 8 / 10;
+    CHAR16 head[144], line[192];
+    SPrint(head, sizeof(head), L"%s   snapshot %d/%d",
+           e->name, (int)(e->snap_sel + 1), (int)e->snap_count);
+    chop_to_width(head, name_px, maxw);
+    UINTN block_w = text_width_px(head, name_px);
+    for (UINTN i = 0; i < rows && state->snap_scroll + i < e->snap_count; i++) {
+        snapshot_t *s = &e->snapshots[state->snap_scroll + i];
+        SPrint(line, sizeof(line), L"  #%s   %s   %s", s->id,
+               s->date ? s->date : L"", s->desc ? s->desc : L"");
+        chop_to_width(line, path_px, maxw);
+        UINTN w = text_width_px(line, path_px);
+        if (w > block_w) block_w = w;
+    }
+
+    INTN cx = (INTN)state->screen_width / 2;
+    if (state->blur) {
+        INTN fpad = 16;
+        draw_frost(state, cx - (INTN)block_w / 2 - fpad, top - fpad,
+                   (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, master);
+    }
+
+    color_t name_col = e->has_color ? e->color : state->name_color;
+    color_t dim = { state->name_color.r * 6 / 10,
+                    state->name_color.g * 6 / 10,
+                    state->name_color.b * 6 / 10 };
+    color_t sel_col = state->underline_color;
+
+    UINTN hw = text_width_px(head, name_px);
+    draw_text_px_a(state, head, cx - (INTN)hw / 2, top, name_col, name_px, master);
+
+    INTN lx = cx - (INTN)block_w / 2;
+    INTN y  = top + (INTN)head_h;
+    for (UINTN i = 0; i < rows && state->snap_scroll + i < e->snap_count; i++) {
+        if (y + (INTN)row_h > top + (INTN)block_h + 1) break;
+        UINTN gi = state->snap_scroll + i;
+        snapshot_t *s = &e->snapshots[gi];
+        int selr = (gi == e->snap_sel);
+        SPrint(line, sizeof(line), L"%s#%s   %s   %s",
+               selr ? L"> " : L"  ", s->id,
+               s->date ? s->date : L"", s->desc ? s->desc : L"");
+        chop_to_width(line, path_px, maxw);
+        draw_text_px_a(state, line, lx, y, selr ? sel_col : dim, path_px, master);
+        y += (INTN)row_h;
+    }
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -1673,7 +1812,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
             draw_text_px(state, title, (INTN)tx, (INTN)ty, state->title_color, title_px);
         }
 
-        draw_power_actions(state, -1);
+        draw_power_actions(state, -1, 0);
 
         if (state->scene_cache) {
             for (UINTN i = 0; i < px; i++) state->scene_cache[i] = state->backbuffer[i];
@@ -1691,7 +1830,10 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         UINTN msg_px = default_aux_text_px(state);
         draw_text_centered_px(state, msg, 0, state->screen_width,
                               (INTN)state->screen_height / 2, state->fg_color, msg_px);
-        draw_power_actions(state, state->focus == FOCUS_POWER ? (int)state->power_sel : -1);
+        if (!building && state->scene_valid)
+            scene_restore_band(state, state->pwr_y0 - 6,
+                               state->pwr_y1 - state->pwr_y0 + 12);
+        draw_power_actions(state, state->focus == FOCUS_POWER ? (int)state->power_sel : -1, 1);
         return;
     }
 
@@ -1734,15 +1876,28 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     UINTN ul_len  = state->underline_length ? state->underline_length
                                             : (sel_ei + 2 * pad - 20);
 
-    int ci_version = state->version_mode || state->ver_fading;
-    UINTN ci_block_h = ci_version ? (name_px + 6 + ((name_px * 4) / 5))
-                                  : center_info_block_h(state, name_px);
+    int ci_version = state->version_mode ||
+                     (state->ver_fading && state->ver_what == 1);
+    int ci_snap    = state->snap_mode ||
+                     (state->ver_fading && state->ver_what == 2);
+    boot_entry_t *ci_e = entry_at(state, state->selected);
+    INTN snap_avail_top = (INTN)(name_y + name_px) + pad;
+    UINTN ci_block_h;
+    if (ci_snap && ci_e && ci_e->snap_count > 0) {
+        UINTN sh_h, sr_h, sr; INTN sbot;
+        snap_metrics(state, ci_e, name_px, snap_avail_top, &sh_h, &sr_h, &sr, &sbot);
+        ci_block_h = sh_h + sr * sr_h;
+    } else if (ci_version) {
+        ci_block_h = name_px + 6 + ((name_px * 4) / 5);
+    } else {
+        ci_block_h = center_info_block_h(state, name_px);
+    }
     UINTN ci_margin  = 48;
     UINTN ci_top = (state->screen_height > ci_block_h + ci_margin)
                    ? state->screen_height - ci_margin - ci_block_h : name_y;
     INTN  ci_band_lo = (INTN)ci_top - pad - 2;
     INTN  ci_band_hi = (INTN)(ci_top + ci_block_h) + pad + 2;
-    int ci_active = state->center_info || ci_version;
+    int ci_active = state->center_info || ci_version || ci_snap;
 
     INTN sel_top  = (INTN)icon_cy - (INTN)sel_ei / 2;
     INTN ecard_top = sel_top - pad;
@@ -1786,6 +1941,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         state->page_frame = 0;
         state->page_old = state->prev_page;
         state->page_old_sel = state->prev_selected;
+        state->hp_anim = 0;
+        state->hp_removal = 0;
     }
 
     if (state->page_anim) {
@@ -1963,6 +2120,13 @@ void gui_draw_menu(gui_state_t *state, int partial) {
                         state->underline_color, 230);
     }
 
+    INTN hp_off = 0, hp_a = 255, hp_pm = 1000;
+    if (state->hp_anim) {
+        hp_pm  = ease_permille(state->hp_frame, N);
+        hp_off = state->hp_shift * (1000 - hp_pm) / 1000;
+        hp_a   = (INTN)ease_alpha(state->hp_frame, N);
+    }
+
     boot_entry_t *entry = entry_at(state, page_start);
     UINTN x = start_x;
     state->hit_n = 0;
@@ -1972,6 +2136,23 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         UINTN slot_w = entry_slot_width(state, entry, ei, name_px);
         UINTN icon_x = x + (slot_w - ei) / 2;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
+
+        int  hp_new = state->hp_anim && !state->hp_removal &&
+                      page_start + i >= state->hp_first;
+        INTN dx = 0;
+        if (state->hp_anim) {
+            if (state->hp_removal)
+                dx = (page_start + i < state->hp_first) ? -hp_off : hp_off;
+            else if (!hp_new)
+                dx = hp_off;
+        }
+        UINTN ei_d = ei;
+        INTN  ix = (INTN)icon_x + dx, iyy = (INTN)iy;
+        if (hp_new) {
+            ei_d = ei * (UINTN)(700 + 300 * hp_pm / 1000) / 1000;
+            ix  += (INTN)(ei - ei_d) / 2;
+            iyy += (INTN)(ei - ei_d) / 2;
+        }
 
         if (state->hit_n < 32) {
             int h = state->hit_n++;
@@ -1983,11 +2164,18 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         }
 
         if (entry->icon) {
-            draw_image_sized(state, entry->icon, icon_x, iy, ei);
+            if (state->accent_os_icons && state->accent_valid)
+                draw_image_tinted_a(state, entry->icon, ix, iyy, ei_d,
+                                    state->accent_primary, hp_new ? hp_a : 255);
+            else if (hp_new || dx)
+                draw_image_sized_a(state, entry->icon, ix, iyy, ei_d,
+                                   hp_new ? hp_a : 255);
+            else
+                draw_image_sized(state, entry->icon, icon_x, iy, ei);
         } else {
             color_t placeholder = entry->type == 0 ? COLOR_GREEN : COLOR_RED;
-            fill_round_rect(state, (INTN)icon_x, (INTN)iy, ei, ei,
-                            12, placeholder, 255);
+            fill_round_rect(state, ix, iyy, ei_d, ei_d,
+                            12, placeholder, (UINT8)(hp_new ? hp_a : 255));
         }
 
         if (state->show_names) {
@@ -2002,8 +2190,12 @@ void gui_draw_menu(gui_state_t *state, int partial) {
                                       state->name_color.b * 7 / 10 };
             }
             UINTN nw = text_width_px(entry->name, name_px);
-            INTN  nx = (INTN)x + (INTN)slot_w / 2 - (INTN)nw / 2;
-            draw_text_px(state, entry->name, nx, (INTN)name_y, name_col, name_px);
+            INTN  nx = (INTN)x + dx + (INTN)slot_w / 2 - (INTN)nw / 2;
+            if (hp_new)
+                draw_text_px_a(state, entry->name, nx, (INTN)name_y, name_col,
+                               name_px, hp_a);
+            else
+                draw_text_px(state, entry->name, nx, (INTN)name_y, name_col, name_px);
         }
 
         x += slot_w;
@@ -2012,18 +2204,20 @@ void gui_draw_menu(gui_state_t *state, int partial) {
 
     draw_chevrons(state, page, per_page, start_x, total_w, isp, max_ei, icon_cy, 255);
 
-    if (pfocus >= 0)
-        draw_power_actions(state, pfocus);
+    draw_power_actions(state, pfocus, 1);
 
     if (ci_active && state->entry_count > 0) {
-        boot_entry_t *se = entry_at(state, state->selected);
-        if (ci_version && se && se->deploy_count > 0) {
-            INTN vm = 255;
-            if (state->ver_fading) {
-                int N = state->anim_frames; if (N < 2) N = 2;
-                INTN f = ease_alpha(state->ver_frame, N); if (f > 255) f = 255;
-                vm = state->ver_dir > 0 ? f : 255 - f;
-            }
+        boot_entry_t *se = ci_e;
+        INTN vm = 255, xp = 1000;
+        if (state->ver_fading) {
+            int N = state->anim_frames; if (N < 2) N = 2;
+            INTN f = ease_alpha(state->ver_frame, N); if (f > 255) f = 255;
+            vm = state->ver_dir > 0 ? f : 255 - f;
+            xp = vm * 1000 / 255;
+        }
+        if (ci_snap && se && se->snap_count > 0) {
+            draw_snap_info(state, se, name_px, vm, xp, snap_avail_top);
+        } else if (ci_version && se && se->deploy_count > 0) {
             draw_version_info(state, se, ci_top, name_px, vm);
         } else if (state->center_info) {
             draw_center_info(state, se, ci_top, name_px, 255);
@@ -2181,8 +2375,10 @@ static void prompt_enter(gui_state_t *state, CHAR16 *title) {
 static int editor_key(gui_state_t *state, EFI_INPUT_KEY *key) {
     if (key->UnicodeChar == 0x0D) {
         state->edit_buf[state->edit_len] = 0;
-        if (!state->edit_secret)
+        if (!state->edit_secret) {
+            if (state->override_cmdline) efi_free_pool(state->override_cmdline);
             state->override_cmdline = efi_strdup(state->edit_buf);
+        }
         state->editing = 0;
         return 1;
     }
@@ -2267,9 +2463,14 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
     if (state->cursor_x >= (INTN)state->screen_width)  state->cursor_x = (INTN)state->screen_width - 1;
     if (state->cursor_y >= (INTN)state->screen_height) state->cursor_y = (INTN)state->screen_height - 1;
 
-    if (state->version_mode) {
+    if (state->version_mode || state->snap_mode) {
         boot_entry_t *se = entry_at(state, state->selected);
-        if (se && se->deploy_count > 1) {
+        if (state->snap_mode) {
+            if (se && se->snap_count > 0) {
+                if (scroll > 0 && se->snap_sel + 1 < se->snap_count) { se->snap_sel++; *menu_redraw = 1; }
+                else if (scroll < 0 && se->snap_sel > 0) { se->snap_sel--; *menu_redraw = 1; }
+            }
+        } else if (se && se->deploy_count > 1) {
             if (scroll > 0 && se->deploy_sel + 1 < se->deploy_count) { se->deploy_sel++; apply_deploy(se); *menu_redraw = 1; }
             else if (scroll < 0 && se->deploy_sel > 0) { se->deploy_sel--; apply_deploy(se); *menu_redraw = 1; }
         }
@@ -2378,7 +2579,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 if (ghost_y >= 0) gui_present_band(state, ghost_y, CUR_H);
             }
             if (state->editing) intro_fade = 0;
-            need_redraw = state->anim_active || state->page_anim;
+            need_redraw = state->anim_active || state->page_anim || state->hp_anim;
             full_redraw = 0;
             if (state->cursor_active && !state->editing)
                 cursor_overlay(state);
@@ -2404,25 +2605,49 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 continue;
             }
 
-            if (state->version_mode) {
+            if (state->version_mode || state->snap_mode) {
                 boot_entry_t *se = entry_at(state, state->selected);
+                int snap = state->snap_mode;
                 CHAR16 vu = key.UnicodeChar;
                 if (vu >= 'a' && vu <= 'z') vu -= 32;
-                if (key.UnicodeChar == 0x0D) {
+                if (vu == 'V') {
+                    v_cycle_engage(state, v_cycle_next(state));
+                    need_redraw = 1; full_redraw = 1;
+                } else if (key.UnicodeChar == 0x0D) {
+                    if (snap && se && se->snap_count > 0) {
+                        snapshot_t *s = &se->snapshots[se->snap_sel];
+                        state->override_cmdline = s->cmdline ? efi_strdup(s->cmdline) : NULL;
+                        if (s->kernel) state->override_kernel_path = efi_strdup(s->kernel);
+                        if (s->initrd) { state->override_initrd_path = efi_strdup(s->initrd);
+                                         state->override_initrd_set = 1; }
+                    }
                     state->running = 0;
                 } else if (key.UnicodeChar == 0x1B ||
                            (key.UnicodeChar == 0x00 && key.ScanCode == 0x17)) {
-                    if (se) { se->deploy_sel = se->deploy_default; apply_deploy(se); }
+                    if (!snap && se) { se->deploy_sel = se->deploy_default; apply_deploy(se); }
                     if (state->center_info || !gui_animation_on(state)) {
-                        state->version_mode = 0; state->ver_fading = 0;
+                        state->version_mode = 0; state->snap_mode = 0;
+                        state->ver_fading = 0; state->ver_next = 0;
                     } else {
+                        state->ver_what = snap ? 2 : 1;
                         state->ver_dir = -1; state->ver_frame = 0; state->ver_fading = 1;
+                        state->ver_next = 0;
                     }
                     need_redraw = 1; full_redraw = 1;
-                } else if (key.UnicodeChar == 0x00 && key.ScanCode == 0x04) {
-                    if (se && se->deploy_sel > 0) { se->deploy_sel--; apply_deploy(se); need_redraw = 1; full_redraw = 1; }
-                } else if (key.UnicodeChar == 0x00 && key.ScanCode == 0x03) {
-                    if (se && se->deploy_sel + 1 < se->deploy_count) { se->deploy_sel++; apply_deploy(se); need_redraw = 1; full_redraw = 1; }
+                } else if (key.UnicodeChar == 0x00 &&
+                           (key.ScanCode == 0x04 || (snap && key.ScanCode == 0x01))) {
+                    if (snap) {
+                        if (se && se->snap_sel > 0) { se->snap_sel--; need_redraw = 1; full_redraw = 1; }
+                    } else if (se && se->deploy_sel > 0) {
+                        se->deploy_sel--; apply_deploy(se); need_redraw = 1; full_redraw = 1;
+                    }
+                } else if (key.UnicodeChar == 0x00 &&
+                           (key.ScanCode == 0x03 || (snap && key.ScanCode == 0x02))) {
+                    if (snap) {
+                        if (se && se->snap_sel + 1 < se->snap_count) { se->snap_sel++; need_redraw = 1; full_redraw = 1; }
+                    } else if (se && se->deploy_sel + 1 < se->deploy_count) {
+                        se->deploy_sel++; apply_deploy(se); need_redraw = 1; full_redraw = 1;
+                    }
                 } else if (vu == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
                 else if (vu == 'R') { state->action = VISOR_ACTION_REBOOT; state->running = 0; }
                 else if (vu == 'F') { state->action = VISOR_ACTION_FIRMWARE; state->running = 0; }
@@ -2434,15 +2659,9 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
             if (uc == 'V') {
                 boot_entry_t *se = entry_at(state, state->selected);
-                if (state->focus == FOCUS_ENTRIES && se && se->deploy_count > 1) {
-                    state->version_mode = 1;
-                    se->deploy_sel = se->deploy_default;
-                    apply_deploy(se);
-                    if (!state->center_info && gui_animation_on(state)) {
-                        state->ver_dir = 1; state->ver_frame = 0; state->ver_fading = 1;
-                    } else {
-                        state->ver_fading = 0;
-                    }
+                if (state->focus == FOCUS_ENTRIES && se &&
+                    (se->deploy_count > 1 || se->snap_count > 0)) {
+                    v_cycle_engage(state, v_cycle_next(state));
                     need_redraw = 1; full_redraw = 1;
                 }
             }
@@ -2467,14 +2686,18 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 switch (key.ScanCode) {
                     case 0x04:
                         state->focus = FOCUS_ENTRIES;
-                        if (state->selected > 0) state->selected--;
-                        else state->selected = state->entry_count - 1;
+                        if (state->entry_count) {
+                            if (state->selected > 0) state->selected--;
+                            else state->selected = state->entry_count - 1;
+                        }
                         need_redraw = 1;
                         break;
                     case 0x03:
                         state->focus = FOCUS_ENTRIES;
-                        if (state->selected < state->entry_count - 1) state->selected++;
-                        else state->selected = 0;
+                        if (state->entry_count) {
+                            if (state->selected + 1 < state->entry_count) state->selected++;
+                            else state->selected = 0;
+                        }
                         need_redraw = 1;
                         break;
                     case 0x02:
@@ -2533,7 +2756,61 @@ boot_entry_t* gui_run(gui_state_t *state) {
             if (state->ver_frame >= N) {
                 state->ver_fading = 0;
                 state->ver_frame = 0;
-                if (state->ver_dir < 0) state->version_mode = 0;
+                if (state->ver_dir < 0) {
+                    state->version_mode = 0;
+                    state->snap_mode = 0;
+                    if (state->ver_next) {
+                        int nx = state->ver_next;
+                        state->ver_next = 0;
+                        state->version_mode = (nx == 1);
+                        state->snap_mode    = (nx == 2);
+                        state->ver_what = nx;
+                        state->ver_dir = 1; state->ver_fading = 1;
+                    }
+                }
+            }
+        }
+
+        if (state->hp_anim) {
+            int N = state->anim_frames; if (N < 2) N = 2;
+            state->hp_frame++;
+            need_redraw = 1;
+            if (state->hp_frame >= N) {
+                state->hp_anim = 0;
+                state->hp_frame = 0;
+                state->hp_removal = 0;
+            }
+        }
+
+        if (state->hotplug_poll && !state->editing &&
+            !state->page_anim && !state->hp_anim && !state->anim_active) {
+            UINT64 now = efi_get_tick();
+            if (!state->hp_last_ms) state->hp_last_ms = now;
+            if (now - state->hp_last_ms >= 1200) {
+                state->hp_last_ms = now;
+                UINTN pre_w = visible_row_width(state);
+                boot_entry_t *head = state->entries;
+                UINTN cnt = state->entry_count;
+                UINTN first = state->entry_count;
+                int mask = state->hotplug_poll(state->hotplug_ctx,
+                                               &head, &cnt, &first);
+                if (mask == 1 && cnt > state->entry_count) {
+                    gui_entries_added(state, head, cnt, first);
+                } else if (mask == 2) {
+                    gui_entries_removed(state, head, cnt, first, pre_w);
+                } else if (mask) {
+
+                    state->entries = head;
+                    state->entry_count = cnt;
+                    state->hp_anim = 0;
+                    state->hp_removal = 0;
+                    if (state->selected >= cnt && cnt)
+                        state->selected = cnt - 1;
+                }
+                if (mask) {
+                    need_redraw = 1;
+                    full_redraw = 1;
+                }
             }
         }
 
@@ -2549,7 +2826,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
-        efi_sleep((state->anim_active || state->page_anim || state->ver_fading) ? 6
+        efi_sleep((state->anim_active || state->page_anim ||
+                   state->ver_fading || state->hp_anim) ? 6
                   : (state->cursor_active ? 12 : 30));
     }
 

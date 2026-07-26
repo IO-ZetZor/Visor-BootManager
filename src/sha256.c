@@ -1,4 +1,3 @@
-
 #include "sha256.h"
 
 #define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))

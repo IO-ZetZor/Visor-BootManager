@@ -23,6 +23,7 @@ typedef struct {
     UINTN box_radius;
     int   remember_last;
     int   recovery_entries;
+    int   snapshots_mode;
     int   mouse;
     int   editor;
     int   autoboot;
@@ -61,16 +62,27 @@ typedef struct {
     int     blur_title;
     color_t blur_color;
     int     has_blur_color;
+    int     accent_enabled;
+    int     accent_icons;
+    int     accent_underline;
+    int     accent_text;
+    int     accent_os_icons;
+    int     accent_variant;
     int     animation;
     int     anim_speed;
     int     fade_speed;
     UINTN   entries_per_page;
+    int     hotplug;
     boot_entry_t *entries;
     boot_entry_t *tail;
     UINTN entry_count;
 } config_t;
 
 EFI_STATUS config_parse(config_t *config);
+
+void config_hotplug_arm(config_t *config);
+
+int config_hotplug_poll(config_t *config, UINTN *first_new);
 
 void config_free(config_t *config);
 

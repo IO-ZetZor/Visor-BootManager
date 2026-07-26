@@ -1,4 +1,3 @@
-
 #include "linux_boot.h"
 #include "windows_boot.h"
 #include "efi_helpers.h"
@@ -11,28 +10,24 @@ extern EFI_BOOT_SERVICES *BS;
 extern EFI_SYSTEM_TABLE *ST;
 extern EFI_HANDLE IH;
 
-#define LINUX_SETUP_HEADER_OFFSET  0x1F1u
-#define LINUX_BOOT_FLAG_MAGIC      0xAA55u
-#define LINUX_SETUP_SECTOR_SIZE    0x200u
-#define LINUX_INITRD_BASE          0x10000000u
-#define LINUX_LOADFLAG_KEEP_SEGS   0x80u
 #define LUKS_DEFAULT_KEY_PATH      L"/crypto_keyfile.bin"
 #define CPIO_NEWC_HEADER_SIZE      110u
-
-typedef struct {
-    EFI_HANDLE            image_handle;
-    EFI_SYSTEM_TABLE     *system_table;
-    EFI_MEMORY_DESCRIPTOR*memory_map;
-    UINTN                 memory_map_size;
-    UINTN                 memory_map_key;
-    UINTN                 desc_size;
-    UINT32                desc_version;
-} linux_efi_handover_t;
 
 static UINTN strlen16(CHAR16 *s) {
     UINTN len = 0;
     while (s[len]) len++;
     return len;
+}
+
+static int linux_is_pe_image(const UINT8 *data, UINTN size) {
+    if (!data || size < 0x40 || data[0] != 'M' || data[1] != 'Z') return 0;
+    UINT32 pe_offset = (UINT32)data[0x3C] |
+                       ((UINT32)data[0x3D] << 8) |
+                       ((UINT32)data[0x3E] << 16) |
+                       ((UINT32)data[0x3F] << 24);
+    return pe_offset <= size - 4 && data[pe_offset] == 'P' &&
+           data[pe_offset + 1] == 'E' && data[pe_offset + 2] == 0 &&
+           data[pe_offset + 3] == 0;
 }
 
 #define LINUX_EFI_INITRD_MEDIA_GUID \
@@ -106,6 +101,282 @@ static void initrd_unregister(EFI_HANDLE h) {
     g_initrd_size = 0;
 }
 
+#if defined(__x86_64__)
+
+static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive);
+static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
+                                           int encrypted, CHAR16 *password);
+static void clear_entry_password(boot_entry_t *entry);
+static EFI_STATUS luks_append_keyfile(boot_entry_t *entry,
+                                      efi_file_buffer_t **buf_io);
+
+#define LINUX_MAX_RAW_INIT_SIZE (1024ULL * 1024ULL * 1024ULL)
+#define LINUX_MAX_RAW_CMDLINE   (1024ULL * 1024ULL)
+
+static int linux_power_of_two(UINT64 value) {
+    return value && !(value & (value - 1));
+}
+
+static EFI_STATUS linux_alloc_below_4g(EFI_MEMORY_TYPE type, UINTN pages,
+                                       EFI_PHYSICAL_ADDRESS *address) {
+    if (!pages || !address) return EFI_INVALID_PARAMETER;
+    *address = 0xFFFFFFFFULL;
+    return BS->AllocatePages(AllocateMaxAddress, type, pages, address);
+}
+
+static EFI_STATUS linux_alloc_raw_image(UINTN kernel_size,
+                                        const setup_header_t *source,
+                                        EFI_PHYSICAL_ADDRESS *allocation,
+                                        UINTN *allocation_pages,
+                                        EFI_PHYSICAL_ADDRESS *image) {
+    UINT64 alignment = source->kernel_alignment;
+    UINT64 required = source->init_size;
+    UINT64 pref = source->pref_address;
+    UINT64 total;
+
+    if (!source->relocatable_kernel && !pref)
+        return EFI_INVALID_PARAMETER;
+    if (!linux_power_of_two(alignment) || alignment < 0x1000 ||
+        alignment > 0x40000000ULL)
+        return EFI_INVALID_PARAMETER;
+    if (source->min_alignment < 31 &&
+        (1ULL << source->min_alignment) > alignment)
+        alignment = 1ULL << source->min_alignment;
+    if (required < kernel_size) required = kernel_size;
+    if (!required || required > LINUX_MAX_RAW_INIT_SIZE ||
+        required > (UINT64)(~(UINTN)0))
+        return EFI_INVALID_PARAMETER;
+    if (required > ~(UINT64)0 - (alignment - 1)) return EFI_INVALID_PARAMETER;
+    total = required + alignment - 1;
+    if (total > ~(UINT64)0 - 0xFFF) return EFI_INVALID_PARAMETER;
+
+    UINTN pages = EFI_SIZE_TO_PAGES((UINTN)total);
+    EFI_PHYSICAL_ADDRESS base = 0;
+    EFI_STATUS status;
+
+    if (source->relocatable_kernel && pref &&
+        !(pref & (alignment - 1)) &&
+        pref <= 0xFFFFFFFFULL &&
+        pref + required <= 0x100000000ULL) {
+        base = (EFI_PHYSICAL_ADDRESS)pref;
+        status = BS->AllocatePages(AllocateAddress, EfiLoaderCode, pages, &base);
+        if (!EFI_ERROR(status)) {
+            *allocation = base;
+            *allocation_pages = pages;
+            *image = base;
+            return EFI_SUCCESS;
+        }
+    }
+
+    status = linux_alloc_below_4g(EfiLoaderCode, pages, &base);
+    if (EFI_ERROR(status)) return status;
+
+    EFI_PHYSICAL_ADDRESS aligned = (base + alignment - 1) & ~(alignment - 1);
+    UINT64 end = (UINT64)aligned + required;
+    if (aligned < base || end < aligned || end > (UINT64)base +
+        (UINT64)pages * EFI_PAGE_SIZE || aligned < pref || end > 0x100000000ULL) {
+        BS->FreePages(base, pages);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    *allocation = base;
+    *allocation_pages = pages;
+    *image = aligned;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS linux_place_raw_initrd(efi_file_buffer_t *buf,
+                                         const setup_header_t *source,
+                                         UINT32 *address, UINT32 *size,
+                                         EFI_PHYSICAL_ADDRESS *pages_addr,
+                                         UINTN *pages) {
+    if (!buf || !buf->data || !buf->size || !source || !address || !size ||
+        !pages_addr || !pages || buf->size > 0xFFFFFFFFULL)
+        return EFI_INVALID_PARAMETER;
+
+    UINTN npages = EFI_SIZE_TO_PAGES(buf->size);
+    EFI_PHYSICAL_ADDRESS max = source->initrd_addr_max
+        ? source->initrd_addr_max : 0xFFFFFFFFULL;
+    EFI_PHYSICAL_ADDRESS addr = max;
+    EFI_STATUS status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                           npages, &addr);
+    if (EFI_ERROR(status)) return status;
+
+    UINT64 end = (UINT64)addr + buf->size;
+    if (addr > 0xFFFFFFFFULL || end < addr || end > 0x100000000ULL ||
+        end - 1 > max) {
+        BS->FreePages(addr, npages);
+        return EFI_OUT_OF_RESOURCES;
+    }
+    CopyMem((void *)(UINTN)addr, buf->data, buf->size);
+    *address = (UINT32)addr;
+    *size = (UINT32)buf->size;
+    *pages_addr = addr;
+    *pages = npages;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS linux_make_cmdline(CHAR16 *cmdline, UINT32 max_size,
+                                     UINT32 *address, EFI_PHYSICAL_ADDRESS *pages_addr,
+                                     UINTN *pages) {
+    if (!address || !pages_addr || !pages) return EFI_INVALID_PARAMETER;
+    *address = 0;
+    *pages_addr = 0;
+    *pages = 0;
+    if (!cmdline || !cmdline[0]) return EFI_SUCCESS;
+
+    UINTN len = strlen16(cmdline);
+    if (len > LINUX_MAX_RAW_CMDLINE || (max_size && len > max_size))
+        return EFI_INVALID_PARAMETER;
+    if (len == ~(UINTN)0) return EFI_INVALID_PARAMETER;
+
+    UINTN npages = EFI_SIZE_TO_PAGES(len + 1);
+    EFI_PHYSICAL_ADDRESS addr;
+    EFI_STATUS status = linux_alloc_below_4g(EfiLoaderData, npages, &addr);
+    if (EFI_ERROR(status)) return status;
+    CHAR8 *out = (CHAR8 *)(UINTN)addr;
+    for (UINTN i = 0; i < len; i++) {
+        if (cmdline[i] > 0x7F) {
+            BS->FreePages(addr, npages);
+            return EFI_INVALID_PARAMETER;
+        }
+        out[i] = (CHAR8)cmdline[i];
+    }
+    out[len] = 0;
+    *address = (UINT32)addr;
+    *pages_addr = addr;
+    *pages = npages;
+    return EFI_SUCCESS;
+}
+
+typedef EFI_STATUS (*linux_handover_t)(EFI_HANDLE image_handle,
+                                       EFI_SYSTEM_TABLE *system_table,
+                                       VOID *boot_params);
+
+static EFI_STATUS linux_raw_handover(boot_entry_t *entry, EFI_SYSTEM_TABLE *st,
+                                     efi_file_buffer_t *kernel_buf,
+                                     CHAR16 *boot_cmdline,
+                                     EFI_STATUS *status_out) {
+    UINT8 *source_data = (UINT8 *)kernel_buf->data;
+    UINTN source_size = kernel_buf->size;
+    if (source_size < LINUX_SETUP_HEADER_OFFSET + sizeof(setup_header_t) ||
+        source_size < 0x268)
+        return EFI_INVALID_PARAMETER;
+
+    setup_header_t source;
+    CopyMem(&source, source_data + LINUX_SETUP_HEADER_OFFSET, sizeof(source));
+    if (source.boot_flag != LINUX_BOOT_FLAG_MAGIC ||
+        source.header != LINUX_SIGNATURE || source.version < 0x020B ||
+        !(source.xloadflags & LINUX_XLF_HANDOVER_64) ||
+        !source.handover_offset)
+        return EFI_UNSUPPORTED;
+    UINTN setup_sects = source.setup_sects ? source.setup_sects : 4;
+    if (setup_sects > (UINTN)(~(UINTN)0) / 0x200 - 1)
+        return EFI_INVALID_PARAMETER;
+    UINTN startup_offset = (setup_sects + 1) * 0x200;
+    if (startup_offset > source_size ||
+        source.handover_offset < startup_offset ||
+        source.handover_offset >= source_size)
+        return EFI_INVALID_PARAMETER;
+
+    EFI_PHYSICAL_ADDRESS image_alloc = 0, image = 0;
+    UINTN image_pages = 0;
+    EFI_STATUS status = linux_alloc_raw_image(source_size, &source,
+                                              &image_alloc, &image_pages, &image);
+    if (EFI_ERROR(status)) return status;
+    CopyMem((void *)(UINTN)image, source_data, source_size);
+
+    EFI_PHYSICAL_ADDRESS bp_addr = 0;
+    status = linux_alloc_below_4g(EfiLoaderData,
+                                  EFI_SIZE_TO_PAGES(LINUX_BOOT_PARAMS_SIZE),
+                                  &bp_addr);
+    if (EFI_ERROR(status)) {
+        BS->FreePages(image_alloc, image_pages);
+        return status;
+    }
+    SetMem((void *)(UINTN)bp_addr, LINUX_BOOT_PARAMS_SIZE, 0);
+
+    UINT32 initrd_addr = 0, initrd_size = 0;
+    EFI_PHYSICAL_ADDRESS initrd_pages_addr = 0;
+    UINTN initrd_pages = 0;
+    efi_file_buffer_t *initrd_buf = NULL;
+    if (entry->initrd_path) {
+        efi_log(L"linux: loading initrd for raw handover");
+        efi_log(entry->initrd_path);
+        initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
+                                     entry->initrd_encrypted,
+                                     entry->decrypt_password);
+        if (!initrd_buf) {
+            status = (entry->initrd_encrypted || entry->luks)
+                ? EFI_SECURITY_VIOLATION : EFI_NOT_FOUND;
+        } else {
+            status = luks_append_keyfile(entry, &initrd_buf);
+            if (!EFI_ERROR(status))
+                status = linux_place_raw_initrd(initrd_buf, &source,
+                                                &initrd_addr, &initrd_size,
+                                                &initrd_pages_addr, &initrd_pages);
+        }
+        free_file_buffer_maybe_wipe(initrd_buf,
+                                    entry->initrd_encrypted || entry->luks);
+        initrd_buf = NULL;
+        if (EFI_ERROR(status)) {
+            if (initrd_pages_addr) BS->FreePages(initrd_pages_addr, initrd_pages);
+            BS->FreePages(bp_addr, EFI_SIZE_TO_PAGES(LINUX_BOOT_PARAMS_SIZE));
+            BS->FreePages(image_alloc, image_pages);
+            return status;
+        }
+    } else if (entry->luks) {
+        BS->FreePages(bp_addr, EFI_SIZE_TO_PAGES(LINUX_BOOT_PARAMS_SIZE));
+        BS->FreePages(image_alloc, image_pages);
+        efi_log(L"ERROR: raw kernel luks=1 requires initrd=");
+        return EFI_INVALID_PARAMETER;
+    }
+
+    UINT32 cmdline_addr = 0;
+    EFI_PHYSICAL_ADDRESS cmdline_pages_addr = 0;
+    UINTN cmdline_pages = 0;
+    status = linux_make_cmdline(boot_cmdline, source.cmdline_size,
+                                &cmdline_addr, &cmdline_pages_addr,
+                                &cmdline_pages);
+    if (EFI_ERROR(status)) {
+        if (initrd_pages_addr) BS->FreePages(initrd_pages_addr, initrd_pages);
+        BS->FreePages(bp_addr, EFI_SIZE_TO_PAGES(LINUX_BOOT_PARAMS_SIZE));
+        BS->FreePages(image_alloc, image_pages);
+        return status;
+    }
+
+    setup_header_t *bp_hdr = (setup_header_t *)((UINT8 *)(UINTN)bp_addr +
+                                                LINUX_SETUP_HEADER_OFFSET);
+    bp_hdr->type_of_loader = 0xFF;
+    bp_hdr->loadflags |= 0x80;
+    bp_hdr->heap_end_ptr = 0xe000 - 0x200;
+    bp_hdr->code32_start = (UINT32)((UINTN)image + startup_offset);
+    if (cmdline_addr) bp_hdr->cmd_line_ptr = cmdline_addr;
+    if (initrd_addr) {
+        bp_hdr->ramdisk_image = initrd_addr;
+        bp_hdr->ramdisk_size = initrd_size;
+    }
+
+    efi_log(L"linux: raw handover prepared; entering kernel EFI stub");
+    efi_log_close();
+    clear_entry_password(entry);
+
+    UINTN entry_offset = source.handover_offset + 0x200;
+    linux_handover_t handover = (linux_handover_t)((UINT8 *)(UINTN)image +
+                                                    entry_offset);
+    status = handover(IH, st, (VOID *)(UINTN)bp_addr);
+    (void)status;
+
+    if (cmdline_pages_addr) BS->FreePages(cmdline_pages_addr, cmdline_pages);
+    if (initrd_pages_addr) BS->FreePages(initrd_pages_addr, initrd_pages);
+    BS->FreePages(bp_addr, EFI_SIZE_TO_PAGES(LINUX_BOOT_PARAMS_SIZE));
+    BS->FreePages(image_alloc, image_pages);
+    if (status_out) *status_out = EFI_LOAD_ERROR;
+    return EFI_LOAD_ERROR;
+}
+
+#endif
+
 static void free_file_buffer(efi_file_buffer_t *buf) {
     if (!buf) return;
     if (buf->data) efi_free_pool(buf->data);
@@ -128,9 +399,14 @@ static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive) {
     else free_file_buffer(buf);
 }
 
-static efi_file_buffer_t* load_entry_file(CHAR16 *path, int encrypted,
-                                          CHAR16 *password) {
-    efi_file_buffer_t *buf = efi_load_file(path);
+static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
+                                          int encrypted, CHAR16 *password) {
+
+    efi_file_buffer_t *buf = efi_load_file_uuid(path, uuid);
+    if (!buf && uuid && uuid[0]) {
+        efi_log(L"WARN: file not found on partition uuid= - searching all volumes");
+        buf = efi_load_file(path);
+    }
     if (!buf) return NULL;
     if (!encrypted) return buf;
 
@@ -491,141 +767,6 @@ static EFI_STATUS luks_effective_cmdline(boot_entry_t *entry,
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS linux_place_initrd_buffer(efi_file_buffer_t *buf,
-                                            UINT32 *addr, UINT32 *size) {
-    if (!buf || !buf->data || !buf->size) return EFI_INVALID_PARAMETER;
-    if (buf->size > 0xFFFFFFFFULL) return EFI_INVALID_PARAMETER;
-
-    EFI_PHYSICAL_ADDRESS initrd_addr = LINUX_INITRD_BASE;
-    EFI_STATUS status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
-                                          EFI_SIZE_TO_PAGES(buf->size), &initrd_addr);
-    if (EFI_ERROR(status)) {
-        initrd_addr = 0xFFFFFFFFULL;
-        status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
-                                   EFI_SIZE_TO_PAGES(buf->size), &initrd_addr);
-    }
-    if (EFI_ERROR(status)) return status;
-    if (initrd_addr > 0xFFFFFFFFULL) {
-        BS->FreePages(initrd_addr, EFI_SIZE_TO_PAGES(buf->size));
-        return EFI_OUT_OF_RESOURCES;
-    }
-
-    CopyMem((void*)(UINTN)initrd_addr, buf->data, buf->size);
-    *addr = (UINT32)initrd_addr;
-    *size = (UINT32)buf->size;
-    return EFI_SUCCESS;
-}
-
-static EFI_STATUS get_map_and_exit(EFI_MEMORY_DESCRIPTOR **map_out,
-                                   UINTN *map_size_out,
-                                   UINTN *map_key_out,
-                                   UINTN *desc_size_out,
-                                   UINT32 *desc_ver_out) {
-    if (!map_out || !map_size_out || !map_key_out || !desc_size_out || !desc_ver_out)
-        return EFI_INVALID_PARAMETER;
-
-    *map_out = NULL;
-    *map_size_out = 0;
-    *map_key_out = 0;
-    *desc_size_out = 0;
-    *desc_ver_out = 0;
-
-    EFI_STATUS last = EFI_ABORTED;
-
-    for (UINTN attempt = 0; attempt < 3; attempt++) {
-        UINTN  map_size = 0;
-        UINTN  map_key = 0;
-        UINTN  desc_size = 0;
-        UINT32 desc_ver = 0;
-
-        EFI_STATUS status = BS->GetMemoryMap(&map_size, NULL, &map_key,
-                                             &desc_size, &desc_ver);
-        if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0) {
-            last = EFI_ERROR(status) ? status : EFI_DEVICE_ERROR;
-            break;
-        }
-
-        map_size += 4 * desc_size;
-        EFI_MEMORY_DESCRIPTOR *map = efi_allocate_pool(map_size);
-        if (!map) return EFI_OUT_OF_RESOURCES;
-
-        status = BS->GetMemoryMap(&map_size, map, &map_key, &desc_size, &desc_ver);
-        if (EFI_ERROR(status)) {
-            efi_free_pool(map);
-            last = status;
-            continue;
-        }
-
-        status = BS->ExitBootServices(IH, map_key);
-        if (!EFI_ERROR(status)) {
-            *map_out       = map;
-            *map_size_out  = map_size;
-            *map_key_out   = map_key;
-            *desc_size_out = desc_size;
-            *desc_ver_out  = desc_ver;
-            return EFI_SUCCESS;
-        }
-
-        efi_free_pool(map);
-        last = status;
-    }
-
-    return last;
-}
-
-static EFI_STATUS linux_setup_boot_params(void *kernel_data, UINTN kernel_size,
-                                           UINT32 initrd_addr, UINT32 initrd_size,
-                                           CHAR16 *cmdline,
-                                           EFI_PHYSICAL_ADDRESS *cmdline_addr_out,
-                                           UINTN *cmdline_pages_out) {
-    if (cmdline_addr_out) *cmdline_addr_out = 0;
-    if (cmdline_pages_out) *cmdline_pages_out = 0;
-    if (kernel_size < LINUX_SETUP_HEADER_OFFSET + sizeof(setup_header_t))
-        return EFI_INVALID_PARAMETER;
-
-    UINT8 *kernel = (UINT8*)kernel_data;
-
-    UINT16 boot_flag = *(UINT16*)(kernel + 0x1FEu);
-    if (boot_flag != LINUX_BOOT_FLAG_MAGIC) {
-        if (kernel[0] == 'M' && kernel[1] == 'Z') return EFI_SUCCESS;
-        return EFI_INVALID_PARAMETER;
-    }
-
-    setup_header_t *hdr = (setup_header_t*)(kernel + LINUX_SETUP_HEADER_OFFSET);
-
-    if (!(hdr->loadflags & HANDOVER_MASK)) return EFI_UNSUPPORTED;
-
-    hdr->loadflags    |= LINUX_LOADFLAG_KEEP_SEGS;
-    hdr->ramdisk_image = initrd_addr;
-    hdr->ramdisk_size  = initrd_size;
-
-    if (cmdline) {
-        UINTN  cmdlen = strlen16(cmdline);
-        UINTN  cmdbytes = cmdlen + 1;
-        if (cmdbytes == 0 || cmdbytes > 0x10000)
-            return EFI_INVALID_PARAMETER;
-
-        EFI_PHYSICAL_ADDRESS cmd_addr = 0xFFFFFFFFULL;
-        UINTN cmd_pages = EFI_SIZE_TO_PAGES(cmdbytes);
-        EFI_STATUS status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
-                                              cmd_pages, &cmd_addr);
-        if (EFI_ERROR(status)) return status;
-
-        CHAR8 *cmd = (CHAR8*)(UINTN)cmd_addr;
-        for (UINTN j = 0; j < cmdlen; j++) cmd[j] = (CHAR8)cmdline[j];
-        cmd[cmdlen] = '\0';
-        hdr->cmd_line_ptr = (UINT32)cmd_addr;
-        if (cmdline_addr_out) *cmdline_addr_out = cmd_addr;
-        if (cmdline_pages_out) *cmdline_pages_out = cmd_pages;
-    }
-
-    return EFI_SUCCESS;
-}
-
-static void linux_free_cmdline_pages(EFI_PHYSICAL_ADDRESS addr, UINTN pages) {
-    if (addr && pages) BS->FreePages(addr, pages);
-}
-
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     EFI_STATUS status;
     UINTN kernel_size = 0;
@@ -647,7 +788,11 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         status = BS->LoadImage(FALSE, IH, bootmgr_dp, NULL, 0, &bh);
         efi_free_pool(bootmgr_dp);
         if (EFI_ERROR(status)) {
-            efi_log(L"ERROR: LoadImage failed for bootmgfw.efi");
+            { CHAR16 m[96]; SPrint(m, sizeof(m),
+                  L"ERROR: LoadImage failed for bootmgfw.efi (status=0x%lx)",
+                  (long)status); efi_log(m); }
+            if (status == EFI_SECURITY_VIOLATION || status == EFI_ACCESS_DENIED)
+                efi_print(L"Secure Boot rejected bootmgfw.efi\r\n");
             efi_print(L"LoadImage failed\r\n");
             return status;
         }
@@ -659,6 +804,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     efi_log(L"boot: loading kernel/image file");
     efi_log(entry->kernel_path);
     efi_file_buffer_t *kernel_buf = load_entry_file(entry->kernel_path,
+                                                    entry->uuid,
                                                     entry->encrypted,
                                                     entry->decrypt_password);
     if (!kernel_buf) {
@@ -698,7 +844,23 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
     UINT8 *kernel = (UINT8*)kernel_data;
 
-    if (kernel[0] == 'M' && kernel[1] == 'Z') {
+    { CHAR16 d[128]; SPrint(d, sizeof(d), L"boot: is_pe=%d size=%d kernel=%s",
+           linux_is_pe_image(kernel, kernel_size), (int)kernel_size,
+           entry->kernel_path ? entry->kernel_path : L"(null)"); efi_log(d); }
+    if (boot_cmdline) {
+        CHAR16 d[256]; SPrint(d, sizeof(d), L"boot: cmdline=[%s]", boot_cmdline); efi_log(d);
+    } else {
+        efi_log(L"boot: cmdline=(null)");
+    }
+    if (entry->initrd_path) {
+        efi_log(L"boot: initrd_path:");
+        efi_log(entry->initrd_path);
+    } else {
+        efi_log(L"boot: initrd_path=(null)");
+    }
+
+    int is_pe = linux_is_pe_image(kernel, kernel_size);
+    if (is_pe) {
         EFI_HANDLE kernel_handle;
 
         efi_log(L"boot: PE image (Windows/UKI/EFI-stub), LoadImage()");
@@ -707,18 +869,46 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         if (kernel_dp) {
             status = BS->LoadImage(FALSE, IH, kernel_dp, NULL, 0, &kernel_handle);
             efi_free_pool(kernel_dp);
+            if (EFI_ERROR(status) && status != EFI_SECURITY_VIOLATION &&
+                status != EFI_ACCESS_DENIED) {
+
+                CHAR16 m[96];
+                SPrint(m, sizeof(m),
+                       L"WARN: LoadImage(devpath) failed (status=0x%lx) - retrying from buffer",
+                       (long)status);
+                efi_log(m);
+                status = BS->LoadImage(FALSE, IH, NULL, kernel_data, kernel_size,
+                                       &kernel_handle);
+            }
         } else {
             efi_log(L"WARN: could not build device path - loading from source buffer");
             status = BS->LoadImage(FALSE, IH, NULL, kernel_data, kernel_size, &kernel_handle);
         }
-        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         if (EFI_ERROR(status)) {
-            efi_log(L"ERROR: LoadImage failed (not a valid EFI image?)");
+            { CHAR16 m[96]; SPrint(m, sizeof(m),
+                  L"ERROR: LoadImage failed (status=0x%lx)", (long)status); efi_log(m); }
+            if (status == EFI_SECURITY_VIOLATION || status == EFI_ACCESS_DENIED) {
+                efi_log(L"ERROR: Secure Boot rejected the image (unsigned or not enrolled)");
+                efi_print(L"Secure Boot rejected this image.\r\n"
+                          L"Sign or enroll it (sbctl, MokManager) or disable Secure Boot.\r\n");
+            }
+#if defined(__x86_64__)
+            if (!(sb && shim != 1)) {
+                efi_log(L"boot: LoadImage failed - trying raw Linux EFI handover fallback");
+                EFI_STATUS rs = linux_raw_handover(entry, st, kernel_buf,
+                                                   boot_cmdline, NULL);
+
+                efi_log(L"boot: raw handover fallback did not boot");
+                status = rs;
+            }
+#endif
             efi_print(L"LoadImage failed\r\n");
+            free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
             if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
             clear_entry_password(entry);
             return status;
         }
+        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
 
         if (boot_cmdline) {
             EFI_LOADED_IMAGE *loaded;
@@ -735,7 +925,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         if (entry->initrd_path) {
             efi_log(L"linux: loading initrd for stub (LINUX_EFI_INITRD_MEDIA)");
             efi_log(entry->initrd_path);
-            initrd_buf = load_entry_file(entry->initrd_path,
+            initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
                                          entry->initrd_encrypted,
                                          entry->decrypt_password);
             if (initrd_buf && initrd_buf->data && initrd_buf->size) {
@@ -749,11 +939,11 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
                 initrd_handle = initrd_register(initrd_buf->data, initrd_buf->size);
                 if (initrd_handle) {
                     CHAR16 m[72];
-                    SPrint(m, sizeof(m), L"linux: initrd ready, %d bytes via LoadFile2 media path",
+                    SPrint(m, sizeof(m), L"linux: initrd registered OK, %d bytes",
                            (int)initrd_buf->size);
                     efi_log(m);
                 } else {
-                    efi_log(L"WARN: could not install initrd LoadFile2 protocol");
+                    efi_log(L"ERROR: initrd LoadFile2 registration FAILED");
                     if (entry->luks) {
                         efi_log(L"ERROR: luks=1 requires initrd LoadFile2 registration");
                         efi_print(L"LUKS initrd setup failed\r\n");
@@ -772,6 +962,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
                     return EFI_SECURITY_VIOLATION;
                 }
                 efi_log(L"WARN: initrd load failed - continuing without it");
+                efi_log(entry->initrd_path ? entry->initrd_path : L"(null path)");
                 efi_print(L"Warning: Could not load initrd\r\n");
             }
         } else if (entry->luks) {
@@ -794,18 +985,27 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             efi_log(L"luks: supplemental keyfile initrd ready");
         }
 
+        { CHAR16 m[80]; SPrint(m, sizeof(m),
+            L"linux: about to StartImage, initrd_handle=%d, initrd_size=%d",
+            initrd_handle ? 1 : 0,
+            initrd_buf ? (int)initrd_buf->size : 0);
+          efi_log(m); }
         efi_log(L"linux: StartImage() - handing control to kernel stub");
         efi_log_close();
         clear_entry_password(entry);
         status = BS->StartImage(kernel_handle, NULL, NULL);
 
-        efi_log(L"ERROR: kernel StartImage returned - boot failed");
+        { CHAR16 m[80]; SPrint(m, sizeof(m), L"linux: StartImage returned 0x%lx", (long)status);
+          efi_log(m); }
+        efi_print(L"ERROR: kernel StartImage returned - boot failed\r\n");
         if (initrd_handle) initrd_unregister(initrd_handle);
+        BS->UnloadImage(kernel_handle);
         free_file_buffer_maybe_wipe(initrd_buf, entry->initrd_encrypted || entry->luks);
         if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
         return status;
     }
 
+ #if defined(__x86_64__)
     if (sb && shim != 1) {
         efi_log(L"ERROR: Secure Boot on but raw kernel is unverifiable (no SHIM_LOCK) - refusing");
         efi_print(L"Secure Boot: refusing unverified kernel\r\n");
@@ -815,101 +1015,20 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         return EFI_SECURITY_VIOLATION;
     }
 
-    if (entry->luks && !entry->initrd_path) {
-        efi_log(L"ERROR: raw kernel luks=1 requires a separate initrd=");
-        efi_print(L"LUKS boot requires an initrd\r\n");
-        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
-        if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
-        clear_entry_password(entry);
-        return EFI_INVALID_PARAMETER;
-    }
-
-    UINT32 initrd_addr = 0, initrd_size = 0;
-    if (entry->initrd_path) {
-        efi_log(L"linux: loading initrd (boot-params ramdisk)");
-        efi_file_buffer_t *ib = load_entry_file(entry->initrd_path,
-                                                entry->initrd_encrypted,
-                                                entry->decrypt_password);
-        if (ib) {
-            status = luks_append_keyfile(entry, &ib);
-            if (!EFI_ERROR(status))
-                status = linux_place_initrd_buffer(ib, &initrd_addr, &initrd_size);
-            free_file_buffer_maybe_wipe(ib, entry->initrd_encrypted || entry->luks);
-        } else {
-            status = entry->initrd_encrypted ? EFI_SECURITY_VIOLATION : EFI_NOT_FOUND;
-        }
-        if (EFI_ERROR(status)) {
-            if (entry->initrd_encrypted || entry->luks) {
-                efi_log(L"ERROR: required initrd failed - refusing to boot");
-                free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
-                if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
-                clear_entry_password(entry);
-                return EFI_SECURITY_VIOLATION;
-            }
-            efi_log(L"WARN: initrd load failed - continuing without it");
-            efi_print(L"Warning: Could not load initrd\r\n");
-        }
-    }
-
-    EFI_PHYSICAL_ADDRESS raw_cmdline_addr = 0;
-    UINTN raw_cmdline_pages = 0;
-    status = linux_setup_boot_params(kernel_data, kernel_size,
-                                     initrd_addr, initrd_size, boot_cmdline,
-                                     &raw_cmdline_addr, &raw_cmdline_pages);
-    if (EFI_ERROR(status)) {
-        efi_print(L"Setup failed\r\n");
-        linux_free_cmdline_pages(raw_cmdline_addr, raw_cmdline_pages);
-        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
-        if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
-        clear_entry_password(entry);
-        return status;
-    }
-
-    setup_header_t *hdr = (setup_header_t*)(kernel + LINUX_SETUP_HEADER_OFFSET);
-    UINT32 handover_offset = hdr->handover_offset;
-
-    if ((UINTN)LINUX_SETUP_SECTOR_SIZE + handover_offset >= kernel_size) {
-        efi_log(L"ERROR: kernel handover offset out of range - refusing to jump");
-        efi_print(L"Bad kernel (handover offset)\r\n");
-        linux_free_cmdline_pages(raw_cmdline_addr, raw_cmdline_pages);
-        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
-        if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
-        clear_entry_password(entry);
-        return EFI_INVALID_PARAMETER;
-    }
-
-    linux_efi_handover_t handover_info;
-    handover_info.image_handle  = IH;
-    handover_info.system_table  = st;
-
-    EFI_MEMORY_DESCRIPTOR *map = NULL;
-    UINTN map_size = 0, map_key = 0, desc_size = 0;
-    UINT32 desc_ver = 0;
-
-    efi_log(L"linux: closing boot log and exiting boot services");
-    efi_log_close();
+    status = linux_raw_handover(entry, st, kernel_buf, boot_cmdline, NULL);
+    if (!visor_boot_services_active) return status;
+    efi_print(L"Raw kernel handover failed\r\n");
+    free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
+    if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
     clear_entry_password(entry);
-    status = get_map_and_exit(&map, &map_size, &map_key, &desc_size, &desc_ver);
-    if (EFI_ERROR(status)) {
-        efi_log(L"ERROR: ExitBootServices failed before kernel handoff");
-        if (map) efi_free_pool(map);
-        linux_free_cmdline_pages(raw_cmdline_addr, raw_cmdline_pages);
-        free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
-        if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
-        return status;
-    }
-    visor_boot_services_active = 0;
-
-    handover_info.memory_map      = map;
-    handover_info.memory_map_size = map_size;
-    handover_info.memory_map_key  = map_key;
-    handover_info.desc_size       = desc_size;
-    handover_info.desc_version    = desc_ver;
-
-    typedef EFI_STATUS (EFIAPI *kernel_entry_t)(EFI_HANDLE, EFI_SYSTEM_TABLE*, linux_efi_handover_t*);
-    kernel_entry_t kernel_entry = (kernel_entry_t)(kernel + LINUX_SETUP_SECTOR_SIZE + handover_offset);
-
-    status = kernel_entry(IH, st, &handover_info);
-
     return status;
+ #else
+    (void)sb; (void)st;
+    efi_log(L"ERROR: image is not an EFI application; only EFI-stub kernels/UKIs are supported");
+    efi_print(L"Not an EFI-stub kernel (use a UKI or stub kernel)\r\n");
+    free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
+    if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
+    clear_entry_password(entry);
+    return EFI_UNSUPPORTED;
+ #endif
 }

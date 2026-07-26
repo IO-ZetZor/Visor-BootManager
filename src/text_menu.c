@@ -1,4 +1,3 @@
-
 #include <efi.h>
 #include <efilib.h>
 #include "text_menu.h"
@@ -215,7 +214,29 @@ boot_entry_t* text_menu_run(gui_state_t *state) {
         if (need_redraw) { draw(state, cols, rows, cursor, remaining); need_redraw = 0; }
 
         status = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
-        if (EFI_ERROR(status)) { efi_sleep(30); continue; }
+        if (EFI_ERROR(status)) {
+
+            if (state->hotplug_poll) {
+                UINT64 now = efi_get_tick();
+                if (!state->hp_last_ms) state->hp_last_ms = now;
+                if (now - state->hp_last_ms >= 1200) {
+                    state->hp_last_ms = now;
+                    boot_entry_t *head = state->entries;
+                    UINTN cnt = state->entry_count;
+                    UINTN first = state->entry_count;
+                    if (state->hotplug_poll(state->hotplug_ctx, &head, &cnt, &first)) {
+                        state->entries = head;
+                        state->entry_count = cnt;
+                        n = cnt;
+                        if (state->selected >= n && n) state->selected = n - 1;
+                        ST->ConOut->ClearScreen(ST->ConOut);
+                        need_redraw = 1;
+                    }
+                }
+            }
+            efi_sleep(30);
+            continue;
+        }
 
         if (state->timeout_active) { state->timeout_active = 0; need_redraw = 1; }
 
@@ -573,7 +594,9 @@ static int parse_uint(CHAR16 *s, UINTN *out) {
     UINTN v = 0;
     for (UINTN i = 0; s[i]; i++) {
         if (s[i] < L'0' || s[i] > L'9') return 0;
-        v = v * 10 + (UINTN)(s[i] - L'0');
+        UINTN digit = (UINTN)(s[i] - L'0');
+        if (v > (~(UINTN)0 - digit) / 10) return 0;
+        v = v * 10 + digit;
     }
     *out = v;
     return 1;

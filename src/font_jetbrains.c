@@ -1,4 +1,3 @@
-
 #include "font.h"
 
 static const unsigned char jetbrains_pixels[] = {

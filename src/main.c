@@ -1,4 +1,3 @@
-
 #include <efi.h>
 #include <efilib.h>
 #include "gui.h"
@@ -10,12 +9,20 @@
 
 EFI_HANDLE IH;
 
-/* natsukisubaruwashere */
-
 static boot_entry_t* main_entry_at(gui_state_t *state, UINTN idx) {
     boot_entry_t *e = state ? state->entries : NULL;
     for (UINTN i = 0; i < idx && e; i++) e = e->next;
     return e;
+}
+
+static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
+                           UINTN *first_new) {
+    config_t *cfg = (config_t*)ctx;
+    int mask = config_hotplug_poll(cfg, first_new);
+    if (!mask) return 0;
+    *head  = cfg->entries;
+    *count = cfg->entry_count;
+    return mask;
 }
 
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
@@ -85,6 +92,12 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.entries         = config.entries;
     gui.entry_count     = config.entry_count;
     gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
+    if (config.hotplug) {
+        config_hotplug_arm(&config);
+        gui.hotplug_poll = hotplug_poll_cb;
+        gui.hotplug_ctx  = &config;
+        efi_log(L"main: hotplug volume watch armed");
+    }
     gui.timeout         = config.timeout;
     gui.bg_color        = config.bg_color;
     gui.fg_color        = config.fg_color;
@@ -118,14 +131,13 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.blur            = config.blur;
     gui.blur_title      = config.blur_title;
     gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
-    /* accent disabled for this build
+    gui.blur_color_set  = config.has_blur_color;
     gui.accent_enabled   = config.accent_enabled;
     gui.accent_icons     = config.accent_icons;
     gui.accent_underline = config.accent_underline;
     gui.accent_text      = config.accent_text;
     gui.accent_os_icons  = config.accent_os_icons;
     gui.accent_variant   = config.accent_variant;
-    */
     gui.animation       = config.animation;
     gui.anim_speed      = config.anim_speed;
     gui.fade_speed      = config.fade_speed;
@@ -210,6 +222,8 @@ select_entry:
     }
 
     if (!autobooted && !retry_selected) {
+
+        ST->ConIn->Reset(ST->ConIn, FALSE);
         if (!text_mode && !gui_closed && config.background && !gui.background) {
             efi_log(L"main: loading background image");
             gui_set_background(&gui, config.background);
@@ -217,8 +231,7 @@ select_entry:
                 efi_log(L"WARN: background failed to load/decode - using solid colour");
             else
                 efi_log(L"main: background loaded");
-            /* accent disabled for this build */
-            /* gui_apply_accent(&gui); */
+            gui_apply_accent(&gui);
         }
 
         efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");

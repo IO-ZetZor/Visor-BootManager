@@ -74,10 +74,24 @@ quiet=0
 # "systemd.unit=rescue.target nomodeset" to its cmdline. 0 = off. (alias: recovery)
 #recovery_entries=0
 
+# Filesystem snapshot booting.
+#    1         auto (default): load \EFI\visor\snapshots.conf if present, else
+#              auto-detect snapper/Timeshift/plain btrfs snapshots
+#    manifest  use only \EFI\visor\snapshots.conf (no auto-detection)
+#    0         disable snapshot loading entirely
+#snapshots=1
+
 # Mouse / touchpad / touchscreen support in the graphical menu. A cursor appears
 # when a pointer device is present; a single click on an icon boots it, and clicks
 # on the power icons trigger them. 1 = on (default), 0 = off. (alias: pointer)
 #mouse=1
+
+# Live hotplug: while the menu is up, Visor watches for volumes that appear
+# (a USB stick plugged in), scans them for bootable content (Windows, UKIs,
+# kernels, distro loaders, \EFI\BOOT\BOOTX64.EFI) and pops matching entries
+# into the menu - the new icon fades in and the row slides over to make room.
+# Entries are pinned to the stick's partition GUID. 1 = on (default), 0 = off.
+#hotplug=1
 
 # Allow editing an entry's kernel command line at the menu: select an entry and
 # press 'e', edit, Enter boots with the change (one-shot, not saved). Set 0 to
@@ -193,12 +207,97 @@ quiet=0
 # Full-screen background image (PNG, RGB or RGBA). Omit for a solid backdrop.
 background=\EFI\visor\backgrounds\default.png
 
+# --- Dynamic accent (palette from wallpaper) --------------------------------
+# Derive a Material You palette from the background image and apply it to the
+# UI - the same pipeline the caelestia shell uses for the desktop: the
+# wallpaper is quantized (Wu box-cut, 128 colors), a seed color is picked with
+# Material's "Score" algorithm (hue-population x chroma scoring), and the full
+# set of Material dynamic-color roles (primary/secondary/tertiary, surface
+# tones, onSurface text tones, outline) is generated from it for a dark scheme.
+# Elements each get their own role, like a themed desktop app:
+#   primary            selection underline + highlight ("the" accent)
+#   secondary          shutdown / reboot power actions
+#   tertiary           firmware power action (companion accent hue)
+#   onSurface          entry names       (accent_text=1)
+#   onSurfaceVariant   countdown, hints, dim labels
+#   surface            fallback background tint; onPrimaryContainer frost tint
+# Needs a background image; with a solid backdrop it does nothing and the
+# configured colors are kept.
+#   accent            master switch (default 0 = off).
+# When accent=1, these pick which roles are applied:
+#   accent_underline  underline + highlight use primary    (default 1)
+#   accent_icons      power icons/labels use sec/tertiary  (default 1)
+#   accent_text       title/names/dim text use the on* roles (default 0)
+#   accent_os_icons   flatten the per-OS icons to the primary color too
+#                     (default 0; discards brand colors like Ubuntu orange).
+#   accent_variant    scheme variant, same names as caelestia. One of:
+#                       tonal       balanced and subtle (caelestia's default)
+#                       neutral     nearly grey, the most restrained
+#                       content     chroma follows the wallpaper's own
+#                       fidelity    like content, stays true to a vivid seed
+#                       vibrant     stronger, more colourful
+#                       expressive  vivid, with a large hue shift between roles
+#                       monochrome  greyscale, no hue
+# Any color still set explicitly above (underline_color, name_color, ...) is
+# overridden by the accent for whichever roles are enabled here.
+#accent=1
+#accent_underline=1
+#accent_icons=1
+#accent_text=0
+#accent_os_icons=0
+#accent_variant=tonal
+
+# --- Snapshots (boot into btrfs/snapper snapshots) --------------------------
+# Two sources, in priority order:
+#
+# 1. Manifest (recommended): a Linux-side hook mirrors the snapshot list to
+#    the ESP:  \EFI\visor\snapshots.conf  (see tools/visor-snapshot-sync; run
+#    it from a pacman hook or a systemd path unit watching /.snapshots).
+#    Works on any firmware, exact cmdlines from the running system.
+#
+# 2. Auto-detect (zero-config fallback): when no manifest exists and a btrfs
+#    EFI driver is loaded from \EFI\visor\drivers ('visor drivers' installs
+#    one), Visor detects snapshots itself, trying in order:
+#      - snapper:   <root-subvol>/.snapshots/N/snapshot, the root subvol
+#                   taken from the entry's rootflags=subvol= (@, root,
+#                   @rootfs, custom...), else top level / @ (openSUSE-style
+#                   default-subvol setups); date/desc from info.xml
+#      - Timeshift: timeshift-btrfs/snapshots/<tag>/@ (btrfs mode only);
+#                   date from the tag, desc from info.json
+#      - plain:     subvolumes under /.snapshots, /snapshots or /@snapshots
+#    Each cmdline is the entry's own cmdline with rootflags=subvol=...
+#    rewritten to the snapshot path (other rootflags kept). Needs exactly
+#    one Linux entry with a root= cmdline (multi-distro setups should use
+#    the manifest), newest 12 snapshots, booted with the entry's current
+#    kernel.
+#
+# Each snapshot in the manifest carries id / date / description and the full
+# kernel command line for booting that snapshot (rootflags=subvol=... baked
+# in), plus optional per-snapshot kernel/initrd overrides:
+#
+#   snapshot {
+#       os      = Arch Linux         # boot entry to attach to (name substring)
+#       id      = 42
+#       date    = 2026-07-18 14:22
+#       desc    = pacman -Syu linux
+#       cmdline = root=UUID=... rootflags=subvol=@/.snapshots/42/snapshot ro
+#   }
+#
+# In the menu, press V on an entry to cycle its bottom panel:
+#   entry info -> deployments (BLS/ostree, if several) -> snapshots -> back
+# The snapshot panel unfolds the center info into a browsing list sized to
+# the free space under the icon row. Up/Down (or the mouse wheel) select,
+# Enter boots the selected snapshot (one-shot - nothing is persisted),
+# Esc backs out. Booting a read-only snapper snapshot needs the same distro
+# support (overlayfs initramfs hook / snapper rollback) as grub-btrfs.
+
 # ============================================================================
 #  Menu keys
 #    Left/Right                move between boot entries
 #    Down                      enter the power column (Shutdown), then move down
 #    Up                        move up the power column; from the top, back to entries
 #    Enter                     boot the focused entry / run the focused power action
+#    V                         cycle entry info / deployments / snapshots panel
 #    1-9                       boot entry N directly
 #    S / R / F                 Shutdown / Reboot / Firmware setup (from anywhere)
 #    Esc                       boot the default entry

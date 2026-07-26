@@ -1,4 +1,3 @@
-
 #include "gui.h"
 #include "efi_helpers.h"
 #include <efi.h>
@@ -11,10 +10,6 @@ typedef struct {
     UINTN input_size;
     UINTN bit_pos;
 } bit_reader_t;
-
-#define MAX_CODE_LENGTH 16
-#define LITERALS  288
-#define DISTANCES  32
 
 static const UINT16 length_base[29] = {
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
@@ -131,7 +126,7 @@ static EFI_STATUS png_decompress(UINT8 *input, UINTN input_size,
 
         if (btype == 0) {
 
-            br.bit_pos = (br.bit_pos + 7) & ~7u;
+            br.bit_pos = (br.bit_pos + 7) & ~(UINTN)7;
             UINTN byte = br.bit_pos / 8;
             if (byte + 4 > input_size) { status = EFI_INVALID_PARAMETER; break; }
             UINTN len = input[byte] | (input[byte + 1] << 8);
@@ -366,6 +361,11 @@ icon_t* png_load(UINT8 *data, UINTN size) {
         for (INTN i = 0; i < 4; i++) type[i] = (char)data[offset + 4 + i];
 
         if (type[0] == 'I' && type[1] == 'H' && type[2] == 'D' && type[3] == 'R') {
+            if (chunk_len < 13) {
+                efi_log(L"  ERROR: PNG IHDR chunk too short");
+                if (idat_data) efi_free_pool(idat_data);
+                return NULL;
+            }
             width      = ((UINT32)data[offset + 8]  << 24) | ((UINT32)data[offset + 9]  << 16) |
                          ((UINT32)data[offset + 10] <<  8) |          data[offset + 11];
             height     = ((UINT32)data[offset + 12] << 24) | ((UINT32)data[offset + 13] << 16) |
@@ -413,8 +413,9 @@ icon_t* png_load(UINT8 *data, UINTN size) {
         return NULL;
     }
 
-    if (width > 8192 || height > 8192) {
-        efi_log(L"  ERROR: PNG dimensions exceed 8192x8192 - refusing");
+    if (width > 8192 || height > 8192 ||
+        (UINT64)width * height > 16u * 1024u * 1024u) {
+        efi_log(L"  ERROR: PNG dimensions exceed limits - refusing");
         efi_free_pool(idat_data);
         return NULL;
     }

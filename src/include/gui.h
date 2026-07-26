@@ -4,6 +4,8 @@
 #include <efi.h>
 #include <efilib.h>
 
+#define GUI_ACCENT_ROLES 13
+
 #define ICON_SIZE 64
 #define ICON_SPACING 20
 #define PADDING 30
@@ -63,6 +65,15 @@ typedef struct deployment {
     int     tries_done;
 } deployment_t;
 
+typedef struct snapshot {
+    CHAR16 *id;
+    CHAR16 *date;
+    CHAR16 *desc;
+    CHAR16 *kernel;
+    CHAR16 *initrd;
+    CHAR16 *cmdline;
+} snapshot_t;
+
 typedef struct boot_entry {
     struct boot_entry *next;
     CHAR16 *name;
@@ -91,6 +102,12 @@ typedef struct boot_entry {
     UINTN   deploy_count;
     UINTN   deploy_default;
     UINTN   deploy_sel;
+
+    snapshot_t *snapshots;
+    UINTN   snap_count;
+    UINTN   snap_sel;
+
+    EFI_HANDLE hp_volume;
 } boot_entry_t;
 
 typedef struct {
@@ -137,7 +154,6 @@ typedef struct {
     INTN  anim_frame;
     int   anim_active;
     int   anim_init;
-    int   anim_power;
     int   anim_cross;
     int   anim_frames;
 
@@ -189,9 +205,22 @@ typedef struct {
     int     blur;
     int     blur_title;
     color_t blur_color;
+    int     blur_color_set;
     int     animation;
     int     anim_speed;
     int     fade_speed;
+
+    int     accent_enabled;
+    int     accent_icons;
+    int     accent_underline;
+    int     accent_text;
+    int     accent_os_icons;
+    int     accent_variant;
+    color_t accent_roles[GUI_ACCENT_ROLES];
+    color_t accent_primary;
+    color_t accent_secondary;
+    color_t accent_tertiary;
+    int     accent_valid;
 
     icon_t *background;
     CHAR16 *background_path;
@@ -200,6 +229,10 @@ typedef struct {
     int     ver_fading;
     int     ver_frame;
     int     ver_dir;
+    int     ver_what;
+    int     ver_next;
+    int     snap_mode;
+    UINTN   snap_scroll;
 
     int     editor_enabled;
     int     editing;
@@ -212,6 +245,16 @@ typedef struct {
     CHAR16 *override_kernel_path;
     CHAR16 *override_initrd_path;
     int     override_initrd_set;
+
+    int   (*hotplug_poll)(void *ctx, boot_entry_t **head, UINTN *count,
+                          UINTN *first_new);
+    void   *hotplug_ctx;
+    UINT64  hp_last_ms;
+    int     hp_anim;
+    int     hp_frame;
+    UINTN   hp_first;
+    INTN    hp_shift;
+    int     hp_removal;
 
     int     mouse_enabled;
     void   *spp;
@@ -250,6 +293,8 @@ EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out);
 void gui_shutdown(gui_state_t *state);
 
 void gui_set_background(gui_state_t *state, CHAR16 *path);
+
+void gui_apply_accent(gui_state_t *state);
 
 void gui_set_font(const char *name);
 

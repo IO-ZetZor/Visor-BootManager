@@ -134,6 +134,45 @@ int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid)
     return 0;
 }
 
+CHAR16* efi_handle_partition_uuid(EFI_HANDLE handle) {
+    EFI_DEVICE_PATH *dp = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(handle, &gEfiDevicePathProtocolGuid, (void**)&dp)) || !dp)
+        return NULL;
+
+    for (EFI_DEVICE_PATH *node = dp; !IsDevicePathEnd(node);
+         node = (EFI_DEVICE_PATH*)((UINT8*)node + DevicePathNodeLength(node))) {
+        if (DevicePathType(node) != MEDIA_DEVICE_PATH ||
+            DevicePathSubType(node) != MEDIA_HARDDRIVE_DP)
+            continue;
+        HARDDRIVE_DEVICE_PATH *hd = (HARDDRIVE_DEVICE_PATH*)node;
+        if (hd->SignatureType != SIGNATURE_TYPE_GUID) continue;
+
+        EFI_GUID g;
+        CopyMem(&g, hd->Signature, sizeof(g));
+        UINT8 b[16] = {
+            (UINT8)(g.Data1 >> 24), (UINT8)(g.Data1 >> 16),
+            (UINT8)(g.Data1 >> 8),  (UINT8)g.Data1,
+            (UINT8)(g.Data2 >> 8),  (UINT8)g.Data2,
+            (UINT8)(g.Data3 >> 8),  (UINT8)g.Data3,
+            g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+            g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7],
+        };
+
+        CHAR16 *s = efi_allocate_pool(37 * sizeof(CHAR16));
+        if (!s) return NULL;
+        static const CHAR16 hexd[] = L"0123456789abcdef";
+        UINTN o = 0;
+        for (UINTN i = 0; i < 16; i++) {
+            if (i == 4 || i == 6 || i == 8 || i == 10) s[o++] = '-';
+            s[o++] = hexd[b[i] >> 4];
+            s[o++] = hexd[b[i] & 0xF];
+        }
+        s[o] = 0;
+        return s;
+    }
+    return NULL;
+}
+
 #define NORM_PATH_MAX 512
 static CHAR16* collapse_backslashes(CHAR16 *path, CHAR16 *buf, UINTN cap) {
     if (!path) return path;
@@ -159,6 +198,11 @@ EFI_DEVICE_PATH* efi_make_file_path(EFI_HANDLE handle, CHAR16 *filename) {
     UINTN fp_size   = sizeof(FILEPATH_DEVICE_PATH) + fname_len;
     UINTN end_size  = sizeof(EFI_DEVICE_PATH_PROTOCOL);
     UINTN total_len = dp_len + fp_size + end_size;
+
+    if (fp_size > 0xFFFF) {
+        efi_log(L"ERROR: file path too long for a device-path node");
+        return NULL;
+    }
 
     UINT8 *new_dp = efi_allocate_pool(total_len);
     if (!new_dp) return NULL;
@@ -220,22 +264,22 @@ EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid) {
     return dp;
 }
 
-efi_file_t* efi_fopen(CHAR16 *path) {
-    CHAR16 nbuf[NORM_PATH_MAX];
-    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
-
+static efi_file_t* efi_fopen_inner(CHAR16 *path, CHAR16 *uuid) {
     efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
     if (!file) return NULL;
     file->root = NULL;
     file->handle = NULL;
 
-    EFI_FILE_PROTOCOL *root = efi_boot_volume_root();
-    if (root) {
-        if (!EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
-            file->root = root;
-            return file;
+    EFI_HANDLE boot_handle = boot_device_handle();
+    if (efi_handle_matches_partition_uuid(boot_handle, uuid)) {
+        EFI_FILE_PROTOCOL *root = open_root_on_handle(boot_handle);
+        if (root) {
+            if (!EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
+                file->root = root;
+                return file;
+            }
+            root->Close(root);
         }
-        root->Close(root);
     }
 
     UINTN count = 0;
@@ -243,6 +287,8 @@ efi_file_t* efi_fopen(CHAR16 *path) {
         &gEfiSimpleFileSystemProtocolGuid, &count);
     if (handles) {
         for (UINTN i = 0; i < count; i++) {
+            if (!efi_handle_matches_partition_uuid(handles[i], uuid))
+                continue;
             EFI_FILE_IO_INTERFACE *io = NULL;
             if (EFI_ERROR(BS->HandleProtocol(handles[i],
                     &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
@@ -262,6 +308,34 @@ efi_file_t* efi_fopen(CHAR16 *path) {
 
     efi_free_pool(file);
     return NULL;
+}
+
+#define MAX_DEFERRED_DRIVERS 8
+static EFI_HANDLE g_deferred_drivers[MAX_DEFERRED_DRIVERS];
+static int g_deferred_count;
+static int g_deferred_started;
+
+int efi_fs_drivers_deferred(void) {
+    return g_deferred_count > 0 && !g_deferred_started;
+}
+
+efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid) {
+    CHAR16 nbuf[NORM_PATH_MAX];
+    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
+
+    efi_file_t *file = efi_fopen_inner(path, uuid);
+    if (file) return file;
+
+    if (!g_deferred_started && g_deferred_count > 0) {
+        efi_start_deferred_drivers();
+        return efi_fopen_inner(path, uuid);
+    }
+
+    return NULL;
+}
+
+efi_file_t* efi_fopen(CHAR16 *path) {
+    return efi_fopen_uuid(path, NULL);
 }
 
 void efi_fclose(efi_file_t *file) {
@@ -302,48 +376,58 @@ EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
     return d;
 }
 
-int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) {
-    if (!dir || !name_out || name_cap == 0) return 0;
-    UINT8 buf[1024] __attribute__((aligned(8)));
+static int read_dirent_core(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out,
+                            UINTN name_cap, int *is_dir) {
+    UINT8 sbuf[1024] __attribute__((aligned(8)));
     for (;;) {
-        UINTN size = sizeof(buf);
+        UINT8 *buf = sbuf;
+        UINT8 *heap = NULL;
+        UINTN size = sizeof(sbuf);
         EFI_STATUS s = dir->Read(dir, &size, buf);
-        if (EFI_ERROR(s) || size == 0) return 0;
+        if (s == EFI_BUFFER_TOO_SMALL && size > sizeof(sbuf)) {
+            heap = efi_allocate_pool(size);
+            if (!heap) return 0;
+            buf = heap;
+            s = dir->Read(dir, &size, buf);
+        }
+        if (EFI_ERROR(s) || size == 0) {
+            if (heap) efi_free_pool(heap);
+            return 0;
+        }
+
+        if (size < SIZE_OF_EFI_FILE_INFO + sizeof(CHAR16)) {
+            if (heap) efi_free_pool(heap);
+            continue;
+        }
         EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
         CHAR16 *fn = info->FileName;
-        if (fn[0] == '.' && (fn[1] == '\0' || (fn[1] == '.' && fn[2] == '\0')))
+        UINTN fn_max = (size - SIZE_OF_EFI_FILE_INFO) / sizeof(CHAR16);
+
+        if (fn_max >= 2 && fn[0] == '.' &&
+            (fn[1] == '\0' || (fn_max >= 3 && fn[1] == '.' && fn[2] == '\0'))) {
+            if (heap) efi_free_pool(heap);
             continue;
+        }
         UINTN i = 0;
-        while (fn[i] && i < name_cap - 1) { name_out[i] = fn[i]; i++; }
+        while (i < fn_max && fn[i] && i < name_cap - 1) {
+            name_out[i] = fn[i];
+            i++;
+        }
         name_out[i] = '\0';
         if (is_dir) *is_dir = (info->Attribute & EFI_FILE_DIRECTORY) != 0;
+        if (heap) efi_free_pool(heap);
         return 1;
     }
 }
 
+int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) {
+    if (!dir || !name_out || name_cap == 0) return 0;
+    return read_dirent_core(dir, name_out, name_cap, is_dir);
+}
+
 int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir) {
     if (!dir || !dir->handle || !name_out || name_cap == 0) return 0;
-
-    UINT8 buf[1024] __attribute__((aligned(8)));
-    for (;;) {
-        UINTN size = sizeof(buf);
-        EFI_STATUS s = dir->handle->Read(dir->handle, &size, buf);
-        if (EFI_ERROR(s) || size == 0) return 0;
-
-        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
-        CHAR16 *fn = info->FileName;
-
-        if (fn[0] == '.' && (fn[1] == '\0' || (fn[1] == '.' && fn[2] == '\0')))
-            continue;
-
-        UINTN i = 0;
-        while (fn[i] && i < name_cap - 1) { name_out[i] = fn[i]; i++; }
-        name_out[i] = '\0';
-
-        if (is_dir)
-            *is_dir = (info->Attribute & EFI_FILE_DIRECTORY) != 0;
-        return 1;
-    }
+    return read_dirent_core(dir->handle, name_out, name_cap, is_dir);
 }
 
 UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
@@ -355,7 +439,8 @@ UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
         EFI_FILE_INFO *info = efi_allocate_pool(info_size);
         if (info) {
             s = fh->GetInfo(fh, &gEfiFileInfoGuid, &info_size, info);
-            if (!EFI_ERROR(s)) {
+
+            if (!EFI_ERROR(s) && info->FileSize > 0) {
                 UINT64 size = info->FileSize;
                 efi_free_pool(info);
                 return size;
@@ -371,8 +456,8 @@ UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
     return size;
 }
 
-efi_file_buffer_t* efi_load_file(CHAR16 *path) {
-    efi_file_t *file = efi_fopen(path);
+efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
+    efi_file_t *file = efi_fopen_uuid(path, uuid);
     if (!file) return NULL;
 
     UINT64 size = efi_file_size(file->handle);
@@ -415,6 +500,10 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
 
     buf->size = total;
     return buf;
+}
+
+efi_file_buffer_t* efi_load_file(CHAR16 *path) {
+    return efi_load_file_uuid(path, NULL);
 }
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
@@ -472,6 +561,40 @@ static int has_efi_suffix(CHAR16 *name) {
     return c[0] == '.' && c[1] == 'e' && c[2] == 'f' && c[3] == 'i';
 }
 
+void efi_start_deferred_drivers(void) {
+    if (g_deferred_started) return;
+    if (g_deferred_count == 0) { g_deferred_started = 1; return; }
+
+    efi_log(L"drivers: starting deferred filesystem drivers");
+    int started = 0;
+    for (int i = 0; i < g_deferred_count; i++) {
+        if (!EFI_ERROR(BS->StartImage(g_deferred_drivers[i], NULL, NULL)))
+            started++;
+        else
+            BS->UnloadImage(g_deferred_drivers[i]);
+        g_deferred_drivers[i] = NULL;
+    }
+    g_deferred_count = 0;
+
+    CHAR16 msg[64];
+    SPrint(msg, sizeof(msg), L"drivers: started %d, connecting controllers", started);
+    efi_log(msg);
+
+    UINTN nh = 0;
+    EFI_HANDLE *handles = NULL;
+
+    if (!EFI_ERROR(BS->LocateHandleBuffer(ByProtocol, &gEfiBlockIoProtocolGuid,
+                                          NULL, &nh, &handles)) && handles) {
+        for (UINTN i = 0; i < nh; i++)
+            BS->ConnectController(handles[i], NULL, NULL, TRUE);
+        efi_free_pool(handles);
+    }
+    g_deferred_started = 1;
+    { CHAR16 m[64]; SPrint(m, sizeof(m),
+        L"drivers: deferred start complete (%d block device(s))", (int)nh);
+      efi_log(m); }
+}
+
 void efi_load_fs_drivers(void) {
     EFI_FILE_PROTOCOL *root = efi_boot_volume_root();
     if (!root) return;
@@ -480,7 +603,6 @@ void efi_load_fs_drivers(void) {
     if (!dir) { root->Close(root); return; }
 
     int sb = efi_secure_boot_enabled();
-    int started = 0;
     CHAR16 name[128];
     int is_dir;
     while (efi_read_dirent(dir, name, 128, &is_dir)) {
@@ -497,8 +619,10 @@ void efi_load_fs_drivers(void) {
             } else {
                 EFI_HANDLE drv = NULL;
                 if (!EFI_ERROR(BS->LoadImage(FALSE, IH, NULL, buf->data, buf->size, &drv)) && drv) {
-                    if (!EFI_ERROR(BS->StartImage(drv, NULL, NULL))) started++;
-                    else BS->UnloadImage(drv);
+                    if (g_deferred_count < MAX_DEFERRED_DRIVERS)
+                        g_deferred_drivers[g_deferred_count++] = drv;
+                    else
+                        BS->UnloadImage(drv);
                 }
             }
             efi_free_pool(buf->data);
@@ -508,19 +632,11 @@ void efi_load_fs_drivers(void) {
     dir->Close(dir);
     root->Close(root);
 
-    if (!started) { efi_log(L"drivers: none started"); return; }
+    if (g_deferred_count == 0) { efi_log(L"drivers: none loaded"); return; }
 
     CHAR16 msg[64];
-    SPrint(msg, sizeof(msg), L"drivers: started %d, connecting controllers", started);
+    SPrint(msg, sizeof(msg), L"drivers: loaded %d (deferred start)", g_deferred_count);
     efi_log(msg);
-
-    UINTN nh = 0;
-    EFI_HANDLE *handles = NULL;
-    if (!EFI_ERROR(BS->LocateHandleBuffer(AllHandles, NULL, NULL, &nh, &handles)) && handles) {
-        for (UINTN i = 0; i < nh; i++)
-            BS->ConnectController(handles[i], NULL, NULL, TRUE);
-        efi_free_pool(handles);
-    }
 }
 
 int visor_quiet = 0;
