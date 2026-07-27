@@ -104,6 +104,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.highlight_color = config.highlight_color;
     gui.title           = config.title;
     gui.show_title      = !config.no_title;
+    gui.logo_mode       = config.no_logo ? LOGO_MODE_OFF : config.logo_mode;
+    gui.logo_size       = config.logo_size;
+    gui.logo_gap        = config.logo_gap;
+    gui.accent_logo     = config.has_accent_logo ? config.accent_logo
+                                                 : config.accent_text;
     gui.show_names      = config.show_names;
     gui.center_info     = config.center_info;
     gui.box_radius      = config.box_radius;
@@ -232,6 +237,11 @@ select_entry:
             else
                 efi_log(L"main: background loaded");
             gui_apply_accent(&gui);
+        }
+
+        if (!text_mode && !gui_closed && gui.logo_mode != LOGO_MODE_OFF && !gui.logo) {
+            efi_log(L"main: loading logo image");
+            gui_set_logo(&gui, config.logo);
         }
 
         efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");
