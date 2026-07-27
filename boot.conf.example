@@ -411,12 +411,45 @@ background=\EFI\visor\backgrounds\default.png
 # password, appends it as a temporary keyfile into the initramfs path, and your
 # initramfs/cryptsetup setup unlocks the LUKS device. The keyfile is present in
 # the initrd memory handed to Linux.
+#
+# ---- CRITICAL: mapper-name consistency ----
+# The mapper device name in your kernel cmdline must match what /etc/fstab and
+# /etc/crypttab expect. A mismatch can cause confusing multi-stage boot failures
+# (kernel panic, hung mounts, emergency mode). Follow this checklist:
+#
+# 1. Kernel cmdline (the cmdline= field below):
+#    Use  rd.luks.name=<UUID>=<name>  to force the mapper device to a specific
+#    name.  Do NOT use rd.luks.uuid=<UUID> alone -- that auto-generates the name
+#    "luks-<UUID>", which WILL NOT match a custom root= value.
+#
+#    Example:
+#      rd.luks.name=XXX=cryptroot
+#      root=/dev/mapper/cryptroot
+#
+# 2. /etc/crypttab:
+#    If root decryption is handled entirely via the kernel cmdline (as it is
+#    here), you should REMOVE the root's crypttab entry entirely. Keeping it
+#    causes systemd-cryptsetup to generate a competing service for the same
+#    device, which will fail with "already mapped or mounted" and drag
+#    dependent targets into emergency mode -- even though root itself unlocks
+#    fine.
+#
+# 3. /etc/fstab:
+#    EVERY mount on the LUKS device must use the SAME mapper name as root=.
+#    If you have subvolumes (/, /home, /var, ...), each fstab entry must
+#    reference  /dev/mapper/<name>  -- never the auto-generated luks-<UUID>
+#    or any other name. A single fstab entry with the wrong name will cause
+#    the boot to hang/time out waiting for that device.
+#
+# In short: pick one mapper name, use it consistently in rd.luks.name=, root=,
+# and every fstab mount -- and drop the root's crypttab line.
+# ----
 #entry {
 #    name      = "Arch LUKS"
 #    icon      = \EFI\visor\icons\arch.png
 #    kernel    = \vmlinuz-linux
 #    initrd    = \initramfs-linux.img
-#    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+#    cmdline   = "rd.luks.name=XXX=cryptroot root=/dev/mapper/cryptroot rw quiet"
 #    luks      = 1
 #    luks_key_path = /crypto_keyfile.bin
 #    luks_preset = mkinitcpio
@@ -426,11 +459,14 @@ background=\EFI\visor\backgrounds\default.png
 # UKI + LUKS example. The UKI is left unchanged; Visor provides a supplemental
 # keyfile-only initrd through the Linux EFI initrd protocol. Your UKI's embedded
 # initramfs must support the generated or manual keyfile option.
+#
+# See the LUKS root example above for the mapper-name consistency checklist
+# (rd.luks.name= / root= / fstab / crypttab must all agree).
 #entry {
 #    name      = "Arch UKI LUKS"
 #    icon      = \EFI\visor\icons\arch.png
 #    kernel    = \EFI\Linux\arch-linux.efi
-#    cmdline   = "root=/dev/mapper/cryptroot rw quiet"
+#    cmdline   = "rd.luks.name=XXX=cryptroot root=/dev/mapper/cryptroot rw quiet"
 #    luks      = 1
 #    luks_key_path = /crypto_keyfile.bin
 #    luks_preset = mkinitcpio
