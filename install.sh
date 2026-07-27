@@ -282,6 +282,9 @@ fi
 if [ -d assets/backgrounds ]; then
     cp -f assets/backgrounds/*.png "$DEST/backgrounds/" 2>/dev/null || true
 fi
+if [ -f assets/logo.png ]; then
+    install -m 0644 assets/logo.png "$DEST/logo.png" 2>/dev/null || true
+fi
 
 if [ "$INSTALL_CLI" -eq 1 ] && [ -f "$CLI_NAME" ]; then
     if mkdir -p "$CLI_DIR" 2>/dev/null && install -m 0755 "$CLI_NAME" "$CLI_DIR/$CLI_NAME" 2>/dev/null; then
