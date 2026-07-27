@@ -104,12 +104,42 @@ quiet=0
 #   anything else    -> shown verbatim
 #title=My Rig
 
+# --- Logo --------------------------------------------------------------------
+# An image drawn in the header, next to the title or on its own. The bundled
+# Visor logo (\EFI\visor\logo.png) is used by default, so you get one without
+# configuring anything. PNG or BMP; transparency is respected, and a square
+# image looks best (it is scaled to a square).
+#   (absent / default) -> the bundled logo
+#   none / off         -> no logo, title only
+#   <path>             -> your own image, e.g. \EFI\visor\mylogo.png
+#logo=\EFI\visor\logo.png
+#
+# How the logo and the title share the header:
+#   title  logo to the left of the title, vertically centred (default)
+#   only   logo alone - the title text is not drawn
+#   above  logo centred above the title
+#   none   no logo (same as logo=none)
+#logo_mode=title
+#
+# Logo edge length in pixels. 0 / absent scales with the title: 1.5x the title
+# height beside it, 2x when standalone or stacked. Capped so the header can
+# never grow into the entry row.
+#logo_size=96
+#
+# Space between logo and title in pixels. Default is half the title height.
+#logo_gap=24
+#
+# Tint the logo with the wallpaper accent color instead of drawing its own
+# colors. Useful for single-color logos like the bundled one. Needs accent=1;
+# defaults to whatever accent_text is set to.
+#accent_logo=1
+
 # Text font. Currently only "jetbrains" is bundled. Empty = default.
 #font=jetbrains
 
 # Theme. If set, Visor loads \EFI\visor\themes\<name>.conf and the UI values in
 # that file OVERRIDE the ones below. A theme file may contain any of the UI keys
-# in this file (colors, sizes, icons, underline, power, background, title...).
+# in this file (colors, sizes, icons, underline, power, background, title, logo...).
 # Boot entries always stay here in boot.conf - themes are UI-only.
 #   <name>   load \EFI\visor\themes\<name>.conf
 #   random   pick a random theme from \EFI\visor\themes\ on each boot
