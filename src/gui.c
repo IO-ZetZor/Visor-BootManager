@@ -1052,7 +1052,11 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
 #define DEFAULT_LOGO_PATH L"\\EFI\\visor\\logo.png"
 
 void gui_set_logo(gui_state_t *state, CHAR16 *path) {
-    free_icon(state->logo);
+    if (state->logo && state->logo->pixels) {
+        if (state->logo->scaled) efi_free_pool(state->logo->scaled);
+        efi_free_pool(state->logo->pixels);
+        efi_free_pool(state->logo);
+    }
     state->logo = NULL;
 
     CHAR16 *want = (path && path[0]) ? path : DEFAULT_LOGO_PATH;
