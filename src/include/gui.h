@@ -41,6 +41,11 @@ typedef struct {
 #define VISOR_ACTION_RETRY     4
 #define VISOR_ACTION_MENU      5
 
+#define LOGO_MODE_OFF    0
+#define LOGO_MODE_TITLE  1
+#define LOGO_MODE_ONLY   2
+#define LOGO_MODE_ABOVE  3
+
 #define POWER_POS_BOTTOMRIGHT  0
 #define POWER_POS_BOTTOMLEFT   1
 #define POWER_POS_TOPRIGHT     2
@@ -171,6 +176,11 @@ typedef struct {
 
     CHAR16 *title;
     int     show_title;
+    icon_t *logo;
+    int     logo_mode;
+    UINTN   logo_size;
+    UINTN   logo_gap;
+    int     accent_logo;
     int     show_names;
     int     center_info;
     UINTN   box_radius;
@@ -293,6 +303,8 @@ EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out);
 void gui_shutdown(gui_state_t *state);
 
 void gui_set_background(gui_state_t *state, CHAR16 *path);
+
+void gui_set_logo(gui_state_t *state, CHAR16 *path);
 
 void gui_apply_accent(gui_state_t *state);
 
