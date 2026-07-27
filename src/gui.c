@@ -473,6 +473,11 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->prev_ul_y = 0;
     state->title = NULL;
     state->show_title = 1;
+    state->logo = NULL;
+    state->logo_mode = LOGO_MODE_TITLE;
+    state->logo_size = 0;
+    state->logo_gap = 0;
+    state->accent_logo = 0;
     state->show_names = 1;
     state->center_info = 0;
     state->box_radius = 0;
@@ -1042,6 +1047,27 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
         else
             efi_log(L"  WARN: default background missing too - using solid colour");
     }
+}
+
+#define DEFAULT_LOGO_PATH L"\\EFI\\visor\\logo.png"
+
+void gui_set_logo(gui_state_t *state, CHAR16 *path) {
+    if (state->logo && state->logo->pixels) {
+        if (state->logo->scaled) efi_free_pool(state->logo->scaled);
+        efi_free_pool(state->logo->pixels);
+        efi_free_pool(state->logo);
+    }
+    state->logo = NULL;
+
+    CHAR16 *want = (path && path[0]) ? path : DEFAULT_LOGO_PATH;
+    state->logo = gui_load_image(want);
+
+    if (!state->logo && efi_strcmp(want, DEFAULT_LOGO_PATH) != 0) {
+        efi_log(L"  WARN: logo unusable - falling back to default logo");
+        state->logo = gui_load_image(DEFAULT_LOGO_PATH);
+    }
+    if (!state->logo)
+        efi_log(L"  WARN: no logo image - drawing the title alone");
 }
 
 void gui_apply_accent(gui_state_t *state) {
@@ -1783,6 +1809,90 @@ static void draw_snap_info(gui_state_t *state, boot_entry_t *e,
     }
 }
 
+static void draw_header(gui_state_t *state) {
+    int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
+    int with_logo = (mode != LOGO_MODE_OFF);
+    int with_text = state->show_title && mode != LOGO_MODE_ONLY;
+    if (!with_logo && !with_text) return;
+
+    CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
+    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
+    UINTN tw = with_text ? text_width_px(title, title_px) : 0;
+
+    UINTN lsz = 0, gap = 0;
+    if (with_logo) {
+        if (state->logo_size) {
+            lsz = state->logo_size;
+        } else if (mode == LOGO_MODE_TITLE && with_text) {
+            lsz = title_px * 3 / 2;
+        } else {
+            lsz = title_px * 2;
+        }
+        gap = state->logo_gap ? state->logo_gap : title_px / 2;
+
+        UINTN room = state->screen_height / 3;
+        UINTN over = (mode == LOGO_MODE_ABOVE && with_text) ? gap + title_px : 0;
+        if (lsz + over > room) lsz = (room > over) ? room - over : title_px;
+        if (lsz > state->screen_width / 3) lsz = state->screen_width / 3;
+        if (lsz < 8) lsz = 8;
+    }
+
+    UINTN bw, bh;
+    if (with_logo && with_text && mode == LOGO_MODE_ABOVE) {
+        bw = (lsz > tw) ? lsz : tw;
+        bh = lsz + gap + title_px;
+    } else if (with_logo && with_text) {
+        bw = lsz + gap + tw;
+        bh = (lsz > title_px) ? lsz : title_px;
+    } else if (with_logo) {
+        bw = lsz;
+        bh = lsz;
+    } else {
+        bw = tw;
+        bh = title_px;
+    }
+
+    INTN bx = (bw < state->screen_width) ? (INTN)(state->screen_width - bw) / 2 : 0;
+    INTN by = (INTN)(state->screen_height / 14);
+
+    if (state->blur_title) {
+        INTN pad = 18;
+        draw_frost(state, bx - pad, by - pad,
+                   (INTN)bw + 2 * pad, (INTN)bh + 2 * pad, 255);
+    }
+
+    if (with_logo) {
+        INTN lx, ly;
+        if (with_text && mode == LOGO_MODE_ABOVE) {
+            lx = bx + (INTN)(bw - lsz) / 2;
+            ly = by;
+        } else {
+            lx = bx;
+            ly = by + (INTN)(bh - lsz) / 2;
+        }
+        if (state->accent_logo && state->accent_valid)
+            draw_image_tinted_a(state, state->logo, (UINTN)lx, (UINTN)ly, lsz,
+                                state->accent_primary, 255);
+        else
+            draw_image_sized(state, state->logo, (UINTN)lx, (UINTN)ly, lsz);
+    }
+
+    if (with_text) {
+        INTN tx, ty;
+        if (with_logo && mode == LOGO_MODE_ABOVE) {
+            tx = bx + (INTN)(bw - tw) / 2;
+            ty = by + (INTN)(lsz + gap);
+        } else if (with_logo) {
+            tx = bx + (INTN)(lsz + gap);
+            ty = by + (INTN)(bh - title_px) / 2;
+        } else {
+            tx = bx;
+            ty = by;
+        }
+        draw_text_px(state, title, tx, ty, state->title_color, title_px);
+    }
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -1797,20 +1907,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         if (state->blur || state->blur_title)
             build_blur_cache(state);
 
-        if (state->show_title) {
-            CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
-            UINTN title_px = state->title_size ? state->title_size
-                                               : default_title_px(state);
-            UINTN tw = text_width_px(title, title_px);
-            UINTN tx = (tw < state->screen_width) ? (state->screen_width - tw) / 2 : 0;
-            UINTN ty = state->screen_height / 14;
-            if (state->blur_title) {
-                INTN pad = 18;
-                draw_frost(state, (INTN)tx - pad, (INTN)ty - pad,
-                           (INTN)tw + 2 * pad, (INTN)title_px + 2 * pad, 255);
-            }
-            draw_text_px(state, title, (INTN)tx, (INTN)ty, state->title_color, title_px);
-        }
+        draw_header(state);
 
         draw_power_actions(state, -1, 0);
 
@@ -2899,6 +2996,8 @@ void gui_shutdown(gui_state_t *state) {
 
     free_icon(state->background);
     state->background = NULL;
+    free_icon(state->logo);
+    state->logo = NULL;
     free_icon(state->shutdown_icon);
     state->shutdown_icon = NULL;
     free_icon(state->reboot_icon);
