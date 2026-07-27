@@ -1579,6 +1579,34 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
             config->no_title = 0;
             config->title = efi_strdup(value);
         }
+    } else if (efi_strcmp(key, L"logo") == 0) {
+        if (config->logo) efi_free_pool(config->logo);
+        config->logo = NULL;
+        if (efi_strcmp(value, L"none") == 0 || efi_strcmp(value, L"off") == 0) {
+            config->no_logo = 1;
+        } else {
+            config->no_logo = 0;
+            if (value[0] != '\0' && efi_strcmp(value, L"default") != 0)
+                config->logo = dup_path(value);
+        }
+    } else if (efi_strcmp(key, L"logo_mode") == 0) {
+        if (efi_strcmp(value, L"title") == 0 || efi_strcmp(value, L"beside") == 0)
+            config->logo_mode = LOGO_MODE_TITLE;
+        else if (efi_strcmp(value, L"only") == 0 || efi_strcmp(value, L"standalone") == 0)
+            config->logo_mode = LOGO_MODE_ONLY;
+        else if (efi_strcmp(value, L"above") == 0 || efi_strcmp(value, L"stacked") == 0)
+            config->logo_mode = LOGO_MODE_ABOVE;
+        else if (efi_strcmp(value, L"none") == 0 || efi_strcmp(value, L"off") == 0)
+            config->logo_mode = LOGO_MODE_OFF;
+        else
+            efi_log(L"WARN: invalid logo_mode (title/only/above/none)");
+    } else if (efi_strcmp(key, L"logo_size") == 0) {
+        config->logo_size = parse_uint(value);
+    } else if (efi_strcmp(key, L"logo_gap") == 0) {
+        config->logo_gap = parse_uint(value);
+    } else if (efi_strcmp(key, L"accent_logo") == 0) {
+        config->accent_logo = (*value == '1' || *value == 't' || *value == 'y');
+        config->has_accent_logo = 1;
     } else if (efi_strcmp(key, L"font") == 0) {
         if (config->font) efi_free_pool(config->font);
         config->font = (value[0] == '\0') ? NULL : efi_strdup(value);
@@ -2409,6 +2437,13 @@ EFI_STATUS config_parse(config_t *config) {
     config->theme = NULL;
     config->title = NULL;
     config->no_title = 0;
+    config->logo = NULL;
+    config->no_logo = 0;
+    config->logo_mode = LOGO_MODE_TITLE;
+    config->logo_size = 0;
+    config->logo_gap = 0;
+    config->accent_logo = 0;
+    config->has_accent_logo = 0;
     config->font = NULL;
     config->background = NULL;
     config->bg_color = (color_t){0x1a, 0x1a, 0x2e};
@@ -2660,6 +2695,7 @@ void config_free(config_t *config) {
     if (config->background)    efi_free_pool(config->background);
     if (config->theme)         efi_free_pool(config->theme);
     if (config->title)         efi_free_pool(config->title);
+    if (config->logo)          efi_free_pool(config->logo);
     if (config->font)          efi_free_pool(config->font);
     if (config->def_cmdline)   efi_free_pool(config->def_cmdline);
     if (config->shutdown_icon) efi_free_pool(config->shutdown_icon);
@@ -2668,6 +2704,7 @@ void config_free(config_t *config) {
     config->background = NULL;
     config->theme = NULL;
     config->title = NULL;
+    config->logo = NULL;
     config->font = NULL;
     config->def_cmdline = NULL;
     config->shutdown_icon = NULL;

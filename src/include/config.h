@@ -30,6 +30,13 @@ typedef struct {
     CHAR16 *theme;
     CHAR16 *title;
     int   no_title;
+    CHAR16 *logo;
+    int    no_logo;
+    int    logo_mode;
+    UINTN  logo_size;
+    UINTN  logo_gap;
+    int    accent_logo;
+    int    has_accent_logo;
     CHAR16 *font;
     CHAR16 *background;
     color_t bg_color;
