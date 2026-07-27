@@ -56,8 +56,7 @@ Afterwards, edit `<ESP>/EFI/visor/boot.conf` to point at your real kernels — o
 delete it and let auto-detection do the work. `visor update` pulls and
 reinstalls the latest version at any time.
 
-Full install guide, installer flags, and the configuration reference:
-**[visor-bootmanager.vercel.app/install](https://visor-bootmanager.vercel.app/install)**
+Full install guide, installer flags, and the configuration reference: **[here](https://visor-bootmanager.vercel.app/install)**
 
 ## How it compares
 
@@ -88,9 +87,7 @@ hide the weak spots.
 
 Everything else — configuration reference, themes, encryption and LUKS, Secure
 Boot, snapshots and OSTree, filesystem drivers, the `visor` CLI, architecture
-notes, and troubleshooting — is in the wiki:
-
-### **[visor-bootmanager.vercel.app](https://visor-bootmanager.vercel.app)**
+notes, and troubleshooting — is in the **[Wiki](https://visor-bootmanager.vercel.app)**.
 
 A fully commented config reference also ships in
 [`boot.conf.example`](boot.conf.example).
