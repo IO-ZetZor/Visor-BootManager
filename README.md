@@ -56,6 +56,24 @@ Afterwards, edit `<ESP>/EFI/visor/boot.conf` to point at your real kernels — o
 delete it and let auto-detection do the work. `visor update` pulls and
 reinstalls the latest version at any time.
 
+### Arch Linux (AUR)
+
+Visor is available on the AUR. Install it with your favourite AUR helper:
+
+```sh
+yay -S visor
+```
+
+Or with any other AUR helper, for example `paru`:
+
+```sh
+paru -S visor
+```
+
+The AUR package builds Visor from source, installs the EFI binary to
+`/usr/lib/visor/` and the `visor` CLI to `/usr/bin/visor`. After installing,
+run `visor install` to deploy to your ESP.
+
 Full install guide, installer flags, and the configuration reference: **[here](https://visor-bootmanager.vercel.app/install)**
 
 ## How it compares
