@@ -4,7 +4,7 @@
   <img src="assets/logo.png" alt="Visor" width="140">
 </p>
 
-A minimal, fast, graphical UEFI boot manager written in C.
+A minimal, fast, graphical UEFI boot manager that actually looks of this decade.
 
 <p align="center">
   <img src="docs/ss2.png" width="49%">
