@@ -3,15 +3,17 @@
 #  Location on the EFI System Partition (ESP):  \EFI\visor\boot.conf
 #
 #  Notes on paths:
-#    - All file paths are RELATIVE TO THE ROOT OF THE ESP and use back-slashes,
-#      e.g.  \EFI\visor\icons\arch.png
+#    - File paths are relative to the root of the filesystem containing the
+#      target and use back-slashes. Assets normally live on the ESP, e.g.
+#      \EFI\visor\icons\arch.png.
 #    - Colors are hex in the form  #RRGGBB  (e.g. #7AA2F7).
 #    - Lines starting with '#' are comments. Whitespace around '=' is ignored.
 #    - Kernels/initrds on a non-FAT /boot (btrfs, ext4, ...) are unreadable by
-#      UEFI unless you drop an efifs driver into \EFI\visor\drivers\ - then the
-#      path is relative to that filesystem's root, e.g. \boot\vmlinuz-...
-#      (see "Booting from non-FAT filesystems" in the README). A UKI on the ESP
-#      under \EFI\Linux\*.efi always works without a driver.
+#      UEFI unless you drop an efifs driver into \EFI\visor\drivers\. For a
+#      separate /boot filesystem use \vmlinuz-...; use \boot\vmlinuz-... only
+#      when /boot is a directory inside the root filesystem. Visor also accepts
+#      the older mount-prefixed form when the exact path is absent. A UKI on the
+#      ESP under \EFI\Linux\*.efi always works without a driver.
 # ============================================================================
 
 # --- Global settings --------------------------------------------------------
@@ -70,6 +72,19 @@ quiet=0
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
 #remember_last=0
 
+# Write diagnostics to \EFI\visor\boot.log. Logging is append-only; the file is
+# trimmed to the last few sessions only once it grows past ~128 KiB, and only
+# after the config is parsed, so a boot that hangs early never destroys the
+# previous boot's log. Set this to 0 if Visor stops after "Visor loading..." on
+# firmware with a broken ESP write path. This key is read before any log write.
+# Aliases: boot_log, file_log. Inverse alias: no_log=1.
+#log=1
+
+# Pressing Esc at the boot menu opens the options / rescue console (the same
+# console Visor drops into after a failed boot): list and pick entries, edit the
+# kernel options for one boot, read boot.log, reboot or enter firmware setup.
+# Esc there returns to the menu.
+
 # Auto-generate a "<name> (recovery)" entry for each Linux entry, appending
 # "systemd.unit=rescue.target nomodeset" to its cmdline. 0 = off. (alias: recovery)
 #recovery_entries=0
@@ -86,12 +101,25 @@ quiet=0
 # on the power icons trigger them. 1 = on (default), 0 = off. (alias: pointer)
 #mouse=1
 
+# Relative mouse/touchpad movement multiplier. 1 = slowest, 20 = fastest,
+# 4 = default. Absolute touchscreens are mapped directly and ignore this key.
+# Alias: pointer_speed.
+#mouse_speed=4
+
 # Live hotplug: while the menu is up, Visor watches for volumes that appear
 # (a USB stick plugged in), scans them for bootable content (Windows, UKIs,
 # kernels, distro loaders, \EFI\BOOT\BOOTX64.EFI) and pops matching entries
 # into the menu - the new icon fades in and the row slides over to make room.
-# Entries are pinned to the stick's partition GUID. 1 = on (default), 0 = off.
+# Entries are pinned to the volume they were found on. 1 = on (default), 0 = off.
 #hotplug=1
+
+# Also sweep media that was ALREADY plugged in when Visor started. Scanning
+# volumes costs time (and, with a filesystem driver installed, a probe of every
+# partition), so by default this happens only when Visor auto-detected the
+# entries: if boot.conf lists entries, Visor trusts them and only watches for
+# media that appears later. Set to 1 to sweep anyway - it runs after the menu is
+# already on screen, one volume at a time. Alias: hotplug_scan_existing.
+#scan_existing=0
 
 # Allow editing an entry's kernel command line at the menu: select an entry and
 # press 'e', edit, Enter boots with the change (one-shot, not saved). Set 0 to
@@ -277,13 +305,21 @@ background=\EFI\visor\backgrounds\default.png
 #accent_os_icons=0
 #accent_variant=tonal
 
-# --- Snapshots (boot into btrfs/snapper snapshots) --------------------------
+# --- Snapshots (boot into btrfs snapshots) ----------------------------------
 # Two sources, in priority order:
 #
 # 1. Manifest (recommended): a Linux-side hook mirrors the snapshot list to
 #    the ESP:  \EFI\visor\snapshots.conf  (see tools/visor-snapshot-sync; run
 #    it from a pacman hook or a systemd path unit watching /.snapshots).
-#    Works on any firmware, exact cmdlines from the running system.
+#    The manifest format is snapshot-manager agnostic: each block only needs
+#    an id, a target entry and a complete cmdline. The bundled sync helper uses
+#    Snapper when available and otherwise understands a plain /.snapshots
+#    Snapper-style directory; Timeshift or custom tools can generate the same
+#    manifest format directly. Works on any firmware.
+#
+#    Target an entry with  entry = <exact menu name>  (preferred; os = <text>
+#    stays as a fuzzy fallback). The file is \EFI\visor\snapshots.conf - plural;
+#    the singular snapshot.conf is accepted but logs a warning.
 #
 # 2. Auto-detect (zero-config fallback): when no manifest exists and a btrfs
 #    EFI driver is loaded from \EFI\visor\drivers ('visor drivers' installs
@@ -337,7 +373,11 @@ background=\EFI\visor\backgrounds\default.png
 #  Boot entry format
 #    entry {                                    (one block type for everything)
 #        name      = "Display Name"
-#        icon      = \path\to\icon.png
+#        icon      = \path\to\icon.png        (optional - when omitted Visor
+#                                               derives it from the entry name:
+#                                               "Arch Linux" -> icons\arch.png,
+#                                               a Windows image -> windows.png,
+#                                               anything else -> linux.png)
 #        icon_size = 128                       (optional - overrides global icon_size)
 #        kernel    = \path\to\kernel-or-efi
 #        initrd    = \path\to\initrd          (optional - Linux stub kernels)
@@ -359,7 +399,23 @@ background=\EFI\visor\backgrounds\default.png
 #                                               systemd)
 #        luks_cmdline = "..."                  (optional - manual keyfile option;
 #                                               overrides luks_preset)
+#        luks_confirm = 1                      (optional - ask for the passphrase
+#                                               twice and compare, see below)
+#        luks_verbose = 1                      (optional - drop quiet/splash from
+#                                               this entry's cmdline, see below)
 #    }
+#
+#  About luks=1 and wrong passphrases: Visor cannot verify the passphrase - it
+#  hands it to the initramfs as a keyfile, and the initramfs is what unlocks the
+#  volume. If the keyfile is rejected the initramfs asks for the passphrase
+#  itself, but with "quiet splash" on the cmdline that prompt is hidden and the
+#  boot looks like a silent hang. Two mitigations:
+#      luks_confirm = 1   type the passphrase twice at the prompt; a mismatch
+#                         reprompts instead of booting with a typo
+#      luks_verbose = 1   remove quiet and splash from this entry's cmdline so
+#                         the initramfs retry prompt is actually visible
+#  At the passphrase prompt, F2 toggles showing what you typed - use it to check
+#  your keyboard layout before pressing Enter.
 #
 #  There is no longer a separate "linux"/"windows" block or a "type=" key:
 #  Visor auto-detects how to boot each entry from the image itself -
