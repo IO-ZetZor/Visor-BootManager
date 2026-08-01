@@ -1,17 +1,15 @@
-# Visor
-
 <p align="center">
   <img src="assets/logo.png" alt="Visor" width="140">
 </p>
 
+<p align="center">
 A minimal, fast, graphical UEFI boot manager that actually looks of this decade.
+</p>
 
 <p align="center">
   <img src="docs/ss2.png" width="49%">
   <img src="docs/ss1.png" width="49%">
 </p>
-
-## What Visor is
 
 Visor draws an icon-based boot menu that combines the speed and efficiency of
 GRUB with the looks of rEFInd. It boots **Linux** (EFI-stub kernels / Unified
