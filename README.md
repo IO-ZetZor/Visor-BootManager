@@ -1,5 +1,9 @@
 # Visor
 
+<p align="center">
+  <img src="assets/logo.png" alt="Visor" width="140">
+</p>
+
 A minimal, fast, graphical UEFI boot manager written in C.
 
 <p align="center">
