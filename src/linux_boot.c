@@ -3,6 +3,7 @@
 #include "efi_helpers.h"
 #include "hash_verify.h"
 #include "crypto.h"
+#include "path_compat.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -105,7 +106,9 @@ static void initrd_unregister(EFI_HANDLE h) {
 
 static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive);
 static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
-                                           int encrypted, CHAR16 *password);
+                                           EFI_HANDLE volume,
+                                           int encrypted, CHAR16 *password,
+                                           CHAR16 **resolved_path);
 static void clear_entry_password(boot_entry_t *entry);
 static EFI_STATUS luks_append_keyfile(boot_entry_t *entry,
                                       efi_file_buffer_t **buf_io);
@@ -304,8 +307,9 @@ static EFI_STATUS linux_raw_handover(boot_entry_t *entry, EFI_SYSTEM_TABLE *st,
         efi_log(L"linux: loading initrd for raw handover");
         efi_log(entry->initrd_path);
         initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
+                                     entry->hp_volume,
                                      entry->initrd_encrypted,
-                                     entry->decrypt_password);
+                                     entry->decrypt_password, NULL);
         if (!initrd_buf) {
             status = (entry->initrd_encrypted || entry->luks)
                 ? EFI_SECURITY_VIOLATION : EFI_NOT_FOUND;
@@ -399,14 +403,64 @@ static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive) {
     else free_file_buffer(buf);
 }
 
-static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
-                                          int encrypted, CHAR16 *password) {
+static int entry_file_path_exists(CHAR16 *path, CHAR16 *uuid) {
+    efi_file_t *file = efi_fopen_uuid(path, uuid);
+    if (!file) return 0;
+    efi_fclose(file);
+    return 1;
+}
 
-    efi_file_buffer_t *buf = efi_load_file_uuid(path, uuid);
+static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
+                                          EFI_HANDLE volume,
+                                          int encrypted, CHAR16 *password,
+                                          CHAR16 **resolved_path) {
+
+    if (resolved_path) *resolved_path = path;
+    CHAR16 *root_path = visor_path_without_boot_mount(path);
+
+    efi_file_buffer_t *buf = NULL;
+    if (volume) {
+        buf = efi_load_file_on_handle(volume, path);
+        if (!buf && root_path) {
+            buf = efi_load_file_on_handle(volume, root_path);
+            if (buf) {
+                if (resolved_path) *resolved_path = root_path;
+                efi_log(L"boot: resolved path after removing host /boot mount prefix");
+                efi_log(root_path);
+            }
+        }
+        if (buf) {
+            efi_log(L"boot: file loaded from the volume this entry was detected on");
+            goto have_buffer;
+        }
+        efi_log(L"WARN: file not found on the entry's own volume - searching by path");
+    }
+
+    buf = efi_load_file_uuid(path, uuid);
+
+    if (!buf && root_path && !entry_file_path_exists(path, uuid)) {
+        buf = efi_load_file_uuid(root_path, uuid);
+        if (buf) {
+            if (resolved_path) *resolved_path = root_path;
+            efi_log(L"boot: resolved path after removing host /boot mount prefix");
+            efi_log(root_path);
+        }
+    }
+
     if (!buf && uuid && uuid[0]) {
         efi_log(L"WARN: file not found on partition uuid= - searching all volumes");
         buf = efi_load_file(path);
+        if (!buf && root_path && !entry_file_path_exists(path, NULL)) {
+            buf = efi_load_file(root_path);
+            if (buf) {
+                if (resolved_path) *resolved_path = root_path;
+                efi_log(L"boot: resolved path after removing host /boot mount prefix");
+                efi_log(root_path);
+            }
+        }
     }
+
+have_buffer:
     if (!buf) return NULL;
     if (!encrypted) return buf;
 
@@ -737,6 +791,58 @@ static EFI_STATUS luks_append_keyfile(boot_entry_t *entry, efi_file_buffer_t **b
     return EFI_SUCCESS;
 }
 
+int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word) {
+    if (!cmdline || !word) return 0;
+    UINTN wl = strlen16(word);
+    if (!wl) return 0;
+
+    UINTN i = 0;
+    while (cmdline[i]) {
+        while (cmdline[i] == L' ') i++;
+        UINTN start = i;
+        while (cmdline[i] && cmdline[i] != L' ') i++;
+        if (i - start == wl) {
+            UINTN k = 0;
+            while (k < wl && cmdline[start + k] == word[k]) k++;
+            if (k == wl) return 1;
+        }
+    }
+    return 0;
+}
+
+
+
+
+
+
+static void luks_strip_quiet(CHAR16 *cmdline) {
+    if (!cmdline) return;
+    static const CHAR16 *hide[] = { L"quiet", L"splash", NULL };
+
+    UINTN i = 0;
+    while (cmdline[i]) {
+        while (cmdline[i] == L' ') i++;
+        UINTN start = i;
+        while (cmdline[i] && cmdline[i] != L' ') i++;
+        UINTN len = i - start;
+        for (int h = 0; hide[h]; h++) {
+            UINTN hl = strlen16((CHAR16*)hide[h]);
+            if (hl != len) continue;
+            UINTN k = 0;
+            while (k < len && cmdline[start + k] == hide[h][k]) k++;
+            if (k == len) {
+                UINTN dst = start, src = start + len;
+                while (cmdline[src] == L' ') src++;
+                if (dst > 0 && cmdline[dst - 1] == L' ' && cmdline[src] == 0) dst--;
+                while (cmdline[src]) cmdline[dst++] = cmdline[src++];
+                cmdline[dst] = 0;
+                i = start;
+                break;
+            }
+        }
+    }
+}
+
 static EFI_STATUS luks_effective_cmdline(boot_entry_t *entry,
                                          CHAR16 **cmdline_out,
                                          int *owned_out) {
@@ -748,6 +854,11 @@ static EFI_STATUS luks_effective_cmdline(boot_entry_t *entry,
         efi_log(L"WARN: luks=1 without luks_cmdline; initramfs may still prompt");
         return EFI_SUCCESS;
     }
+    if (!entry->luks_verbose && entry->cmdline &&
+        (visor_cmdline_has_word(entry->cmdline, L"quiet") ||
+         visor_cmdline_has_word(entry->cmdline, L"splash")))
+        efi_log(L"WARN: luks=1 with quiet/splash - a rejected passphrase will "
+                L"reprompt invisibly; set luks_verbose=1");
 
     UINTN base_len = entry->cmdline ? strlen16(entry->cmdline) : 0;
     UINTN extra_len = strlen16(entry->luks_cmdline);
@@ -760,6 +871,12 @@ static EFI_STATUS luks_effective_cmdline(boot_entry_t *entry,
     if (sep) out[k++] = L' ';
     for (UINTN i = 0; i < extra_len; i++) out[k++] = entry->luks_cmdline[i];
     out[k] = 0;
+
+    if (entry->luks_verbose) {
+        luks_strip_quiet(out);
+        efi_log(L"luks: luks_verbose=1 - removed quiet/splash so the initramfs "
+                L"can prompt if the passphrase is rejected");
+    }
 
     *cmdline_out = out;
     *owned_out = 1;
@@ -803,10 +920,13 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
     efi_log(L"boot: loading kernel/image file");
     efi_log(entry->kernel_path);
+    CHAR16 *kernel_load_path = entry->kernel_path;
     efi_file_buffer_t *kernel_buf = load_entry_file(entry->kernel_path,
                                                     entry->uuid,
+                                                    entry->hp_volume,
                                                     entry->encrypted,
-                                                    entry->decrypt_password);
+                                                    entry->decrypt_password,
+                                                    &kernel_load_path);
     if (!kernel_buf) {
         efi_log(L"ERROR: kernel file not found or unreadable");
         efi_print(L"Failed to load kernel\r\n");
@@ -846,7 +966,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
     { CHAR16 d[128]; SPrint(d, sizeof(d), L"boot: is_pe=%d size=%d kernel=%s",
            linux_is_pe_image(kernel, kernel_size), (int)kernel_size,
-           entry->kernel_path ? entry->kernel_path : L"(null)"); efi_log(d); }
+           kernel_load_path ? kernel_load_path : L"(null)"); efi_log(d); }
     if (boot_cmdline) {
         CHAR16 d[256]; SPrint(d, sizeof(d), L"boot: cmdline=[%s]", boot_cmdline); efi_log(d);
     } else {
@@ -864,8 +984,21 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         EFI_HANDLE kernel_handle;
 
         efi_log(L"boot: PE image (Windows/UKI/EFI-stub), LoadImage()");
-        EFI_DEVICE_PATH *kernel_dp = entry->encrypted ? NULL
-            : efi_file_device_path(entry->kernel_path, entry->uuid);
+        EFI_DEVICE_PATH *kernel_dp = NULL;
+        if (!entry->encrypted) {
+            if (entry->hp_volume) {
+                kernel_dp = efi_file_device_path_on_handle(entry->hp_volume,
+                                                           kernel_load_path);
+                if (kernel_dp)
+                    efi_log(L"boot: LoadImage() pinned to the entry's own volume");
+            }
+            if (!kernel_dp) {
+                kernel_dp = efi_file_device_path(kernel_load_path, entry->uuid);
+                if (kernel_dp && entry->hp_volume)
+                    efi_log(L"WARN: LoadImage() falling back to a path search - "
+                            L"another volume may answer first");
+            }
+        }
         if (kernel_dp) {
             status = BS->LoadImage(FALSE, IH, kernel_dp, NULL, 0, &kernel_handle);
             efi_free_pool(kernel_dp);
@@ -926,8 +1059,9 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             efi_log(L"linux: loading initrd for stub (LINUX_EFI_INITRD_MEDIA)");
             efi_log(entry->initrd_path);
             initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
+                                         entry->hp_volume,
                                          entry->initrd_encrypted,
-                                         entry->decrypt_password);
+                                         entry->decrypt_password, NULL);
             if (initrd_buf && initrd_buf->data && initrd_buf->size) {
                 status = luks_append_keyfile(entry, &initrd_buf);
                 if (EFI_ERROR(status)) {

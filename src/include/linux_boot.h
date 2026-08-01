@@ -74,4 +74,6 @@ typedef struct {
 
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st);
 
+int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word);
+
 #endif

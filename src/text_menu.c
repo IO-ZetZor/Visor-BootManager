@@ -243,9 +243,25 @@ boot_entry_t* text_menu_run(gui_state_t *state) {
         CHAR16 uc = key.UnicodeChar;
         if (uc >= 'a' && uc <= 'z') uc -= 32;
 
-        if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
+        if (uc == 'V') {
+            boot_entry_t *e = entry_at(state, cursor);
+            CHAR16 line[160];
+            SPrint(line, sizeof(line),
+                   L"input: V pressed in text menu selected=%d deployments=%d snapshots=%d",
+                   (int)cursor, e ? (int)e->deploy_count : 0,
+                   e ? (int)e->snap_count : 0);
+            efi_log(line);
+            if (e && e->name) efi_log(e->name);
+            efi_log(L"input: V panels are unavailable in the text menu");
+        }
+        else if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
         else if (uc == 'R') { state->action = VISOR_ACTION_REBOOT; state->running = 0; }
         else if (uc == 'F') { state->action = VISOR_ACTION_FIRMWARE; state->running = 0; }
+        else if (key.UnicodeChar == 0x1B) {
+            efi_log(L"input: Esc pressed at the menu - opening options/rescue console");
+            state->action = VISOR_ACTION_RESCUE;
+            state->running = 0;
+        }
         else if (key.UnicodeChar == 0x0D) {
             if (cursor >= n) state->action = VISOR_ACTION_SHUTDOWN + (int)(cursor - n);
             else state->selected = cursor;
@@ -266,6 +282,8 @@ boot_entry_t* text_menu_run(gui_state_t *state) {
                     need_redraw = 1;
                     break;
                 case 0x17:
+                    efi_log(L"input: Esc pressed at the menu - opening options/rescue console");
+                    state->action = VISOR_ACTION_RESCUE;
                     state->running = 0;
                     break;
             }
@@ -481,14 +499,21 @@ static void shell_clear(UINTN rows, UINTN cols, boot_entry_t *selected,
     ST->ConOut->ClearScreen(ST->ConOut);
 
     CHAR16 title[180];
-    SPrint(title, sizeof(title), L"Visor rescue shell - failed: %s",
-           failed && failed->name ? failed->name : L"unknown entry");
+    if (failed)
+        SPrint(title, sizeof(title), L"Visor rescue shell - failed: %s",
+               failed->name ? failed->name : L"unknown entry");
+    else
+        SPrint(title, sizeof(title), L"Visor options / rescue console");
     left_line(0, cols, VT_TITLE, title);
 
     CHAR16 stat[180];
-    SPrint(stat, sizeof(stat), L"Status 0x%x    selected: %s",
-           (unsigned int)status,
-           selected && selected->name ? selected->name : L"(none)");
+    if (failed)
+        SPrint(stat, sizeof(stat), L"Status 0x%x    selected: %s",
+               (unsigned int)status,
+               selected && selected->name ? selected->name : L"(none)");
+    else
+        SPrint(stat, sizeof(stat), L"selected: %s",
+               selected && selected->name ? selected->name : L"(none)");
     left_line(1, cols, VT_DIM, stat);
 
     left_line(2, cols, VT_NORMAL,
@@ -967,7 +992,8 @@ int text_recovery_run(gui_state_t *state, boot_entry_t *failed,
                       EFI_STATUS status, int quiet_boot) {
     EFI_INPUT_KEY key;
 
-    efi_log(L"recovery: entering failure recovery console");
+    efi_log(failed ? L"recovery: entering failure recovery console"
+                   : L"recovery: entering options/rescue console from the menu");
     efi_log_close();
     visor_quiet = 0;
     efi_log_set_console(0);

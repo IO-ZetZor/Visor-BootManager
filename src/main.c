@@ -25,6 +25,64 @@ static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
     return mask;
 }
 
+static void wipe_password(CHAR16 **pw) {
+    if (!pw || !*pw) return;
+    volatile CHAR16 *p = (volatile CHAR16*)*pw;
+    while (*p) *p++ = 0;
+    efi_free_pool(*pw);
+    *pw = NULL;
+}
+
+
+static CHAR16* text_prompt_password(CHAR16 *label) {
+    CHAR16 buf[512];
+    UINTN len = 0;
+    int reveal = 0;
+    EFI_INPUT_KEY key;
+
+    for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+    efi_print(label);
+    efi_print(L"   (F2 shows what you typed)\r\n");
+    efi_print(label);
+
+    for (;;) {
+        EFI_STATUS ks = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
+        if (EFI_ERROR(ks)) { BS->Stall(30000); continue; }
+
+        if (key.UnicodeChar == 0x0D) break;
+        if (key.UnicodeChar == 0x1B) {
+            for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+            return NULL;
+        }
+        if (key.UnicodeChar == 0x00 && key.ScanCode == 0x0C) {
+            reveal = !reveal;
+        } else if (key.UnicodeChar == 0x08) {
+            if (len) len--;
+        } else if (key.UnicodeChar >= 0x20 && len < 511) {
+            buf[len++] = key.UnicodeChar;
+        } else {
+            continue;
+        }
+
+        buf[len] = 0;
+        CHAR16 echo[520];
+        UINTN k = 0;
+        echo[k++] = L'\r';
+        for (UINTN i = 0; label[i] && k < 500; i++) echo[k++] = label[i];
+        for (UINTN i = 0; i < len && k < 515; i++) echo[k++] = reveal ? buf[i] : L'*';
+        echo[k++] = L' ';
+        echo[k] = 0;
+        efi_print(echo);
+    }
+
+    buf[len] = 0;
+    efi_print(L"\r\n");
+    CHAR16 *out = efi_strdup(buf);
+    for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+    if (!out) efi_log(L"ERROR: out of memory copying encrypted boot password");
+    return out;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     InitializeLib(image_handle, system_table);
 
@@ -33,13 +91,17 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     RT = system_table->RuntimeServices;
     IH = image_handle;
 
-    ST->ConOut->ClearScreen(ST->ConOut);
-    ST->ConOut->EnableCursor(ST->ConOut, FALSE);
-
     efi_print(L"Visor loading...\r\n");
 
-    efi_log_begin();
+    efi_log_set_file(0);
+    int early_file_log = config_early_file_log_enabled();
+    efi_log_set_file(early_file_log);
+    if (early_file_log) efi_log_begin();
+    else efi_print(L"Visor: boot logging disabled by config\r\n");
     efi_log(L"main: efi_main entered, services initialised");
+
+    ST->ConOut->ClearScreen(ST->ConOut);
+    ST->ConOut->EnableCursor(ST->ConOut, FALSE);
 
     efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
     gui_state_t gui = {0};
@@ -60,7 +122,13 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
     config_t config;
+    
+
+
+    efi_fs_drivers_set_lazy(0);
     status = config_parse(&config);
+    efi_log_set_file(config.file_log);
+    efi_log_rotate();
     if (EFI_ERROR(status)) {
         efi_log(L"WARN: config_parse returned error - using auto-detected entries");
         efi_print(L"Warning: Config parse failed, using auto-detect\r\n");
@@ -89,15 +157,15 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         gui_set_mode(&gui, config.res_w, config.res_h, config.res_max);
     }
 
-    gui.entries         = config.entries;
-    gui.entry_count     = config.entry_count;
-    gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
     if (config.hotplug) {
         config_hotplug_arm(&config);
         gui.hotplug_poll = hotplug_poll_cb;
         gui.hotplug_ctx  = &config;
         efi_log(L"main: hotplug volume watch armed");
     }
+    gui.entries         = config.entries;
+    gui.entry_count     = config.entry_count;
+    gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
     gui.timeout         = config.timeout;
     gui.bg_color        = config.bg_color;
     gui.fg_color        = config.fg_color;
@@ -176,6 +244,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     gui.editor_enabled = config.editor;
     gui.mouse_enabled  = config.mouse;
+    gui.pointer_speed  = config.pointer_speed;
 
     if (config.remember_last) {
         CHAR16 *last = efi_get_var_str(L"VisorLastEntry");
@@ -252,6 +321,31 @@ select_entry:
     }
     retry_selected = 0;
 
+    if (action == VISOR_ACTION_RESCUE) {
+        efi_log(L"main: options/rescue console requested from the menu");
+        if (!text_mode && !gui_closed) {
+            gui_fade_out(&gui);
+            gui_shutdown(&gui);
+            gui_closed = 1;
+            text_mode = 1;
+        }
+        efi_fs_drivers_set_lazy(1);
+        action = text_recovery_run(&gui, NULL, EFI_SUCCESS, config.quiet);
+        if (action == VISOR_ACTION_RETRY) {
+            boot_entry_t *pick = main_entry_at(&gui, gui.selected);
+            if (pick) {
+                selected = pick;
+                retry_selected = 1;
+                goto boot_selected;
+            }
+            action = VISOR_ACTION_MENU;
+        }
+        if (action == VISOR_ACTION_MENU || action == VISOR_ACTION_BOOT) {
+            force_menu = 1;
+            goto select_entry;
+        }
+    }
+
     if (action == VISOR_ACTION_SHUTDOWN) {
         if (!text_mode) {
             gui_fade_out(&gui);
@@ -306,6 +400,9 @@ select_entry:
     }
 
 boot_selected:
+    
+
+    efi_fs_drivers_set_lazy(1);
     saved_cmdline = NULL;
     saved_kernel_path = NULL;
     saved_initrd_path = NULL;
@@ -348,56 +445,103 @@ boot_selected:
 
     if (selected->encrypted || selected->initrd_encrypted || selected->luks) {
         CHAR16 *pw = NULL;
+        int splash_hides_prompt =
+            selected->luks && !selected->luks_verbose &&
+            (visor_cmdline_has_word(selected->cmdline, L"quiet") ||
+             visor_cmdline_has_word(selected->cmdline, L"splash"));
         CHAR16 *prompt = selected->luks
             ? L"LUKS Password   (Enter = boot, Esc = cancel)"
             : L"Password   (Enter = boot, Esc = cancel)";
+        CHAR16 *hint = splash_hides_prompt
+            ? L"F2 shows what you typed. Visor cannot check the passphrase - if it "
+              L"is wrong, splash hides the initramfs retry prompt (luks_verbose=1)"
+            : L"F2 shows what you typed - use it to check your keyboard layout";
+        if (splash_hides_prompt)
+            efi_log(L"WARN: luks=1 entry uses quiet/splash - see luks_verbose in boot.conf");
+
         if (selected->decrypt_password) {
             volatile CHAR16 *p = (volatile CHAR16*)selected->decrypt_password;
             while (*p) *p++ = 0;
             efi_free_pool(selected->decrypt_password);
             selected->decrypt_password = NULL;
         }
-        if (!text_mode && !gui_closed) {
-            EFI_STATUS ps = gui_prompt_password(&gui, prompt, &pw);
-            if (EFI_ERROR(ps)) {
-                efi_log(L"main: encrypted/LUKS boot cancelled at password prompt");
-                efi_print(L"Encrypted boot cancelled\r\n");
-                goto boot_cleanup_return;
-            }
-        } else {
-            CHAR16 buf[512];
-            UINTN len = 0;
-            EFI_INPUT_KEY key;
-            for (UINTN i = 0; i < 512; i++) buf[i] = 0;
-            efi_print(L"Password: ");
-            for (;;) {
-                EFI_STATUS ks = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
-                if (EFI_ERROR(ks)) { BS->Stall(30000); continue; }
-                if (key.UnicodeChar == 0x0D) break;
-                if (key.UnicodeChar == 0x1B) {
-                    for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+
+        int confirm = selected->luks_confirm;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            CHAR16 *again = NULL;
+
+            if (!text_mode && !gui_closed) {
+                EFI_STATUS ps = gui_prompt_password(&gui, prompt, hint, &pw);
+                if (EFI_ERROR(ps)) {
+                    efi_log(L"main: encrypted/LUKS boot cancelled at password prompt");
+                    efi_print(L"Encrypted boot cancelled\r\n");
+                    goto boot_cleanup_return;
+                }
+                if (confirm) {
+                    ps = gui_prompt_password(&gui,
+                            L"Repeat passphrase   (Enter = boot, Esc = cancel)",
+                            L"Typed twice because Visor cannot verify it before handing over",
+                            &again);
+                    if (EFI_ERROR(ps)) {
+                        wipe_password(&pw);
+                        efi_log(L"main: encrypted/LUKS boot cancelled at confirmation prompt");
+                        efi_print(L"Encrypted boot cancelled\r\n");
+                        goto boot_cleanup_return;
+                    }
+                }
+            } else {
+                pw = text_prompt_password(L"Password: ");
+                if (!pw) {
                     efi_print(L"\r\nEncrypted boot cancelled\r\n");
+                    efi_log(L"main: encrypted/LUKS boot cancelled at password prompt");
                     visor_quiet = 0;
                     efi_log_set_console(0);
                     goto boot_cleanup_return;
                 }
-                if (key.UnicodeChar == 0x08) {
-                    if (len) len--;
-                    continue;
+                if (confirm) {
+                    again = text_prompt_password(L"Repeat passphrase: ");
+                    if (!again) {
+                        wipe_password(&pw);
+                        efi_print(L"\r\nEncrypted boot cancelled\r\n");
+                        efi_log(L"main: encrypted/LUKS boot cancelled at confirmation prompt");
+                        visor_quiet = 0;
+                        efi_log_set_console(0);
+                        goto boot_cleanup_return;
+                    }
                 }
-                if (key.UnicodeChar >= 0x20 && len < 511)
-                    buf[len++] = key.UnicodeChar;
             }
-            buf[len] = 0;
-            efi_print(L"\r\n");
-            pw = efi_strdup(buf);
-            for (UINTN i = 0; i < 512; i++) buf[i] = 0;
-            if (!pw) {
-                efi_log(L"ERROR: out of memory copying encrypted boot password");
-                cleanup_status = EFI_OUT_OF_RESOURCES;
-                goto boot_cleanup_return;
+
+            if (pw && !pw[0]) {
+                wipe_password(&pw);
+                wipe_password(&again);
+                efi_log(L"WARN: empty passphrase entered - reprompting");
+                prompt = selected->luks
+                    ? L"Passphrase was empty - LUKS Password   (Esc = cancel)"
+                    : L"Passphrase was empty - Password   (Esc = cancel)";
+                continue;
             }
+
+            if (!confirm) break;
+
+            if (pw && again && efi_strcmp(pw, again) == 0) {
+                wipe_password(&again);
+                break;
+            }
+
+            wipe_password(&again);
+            wipe_password(&pw);
+            efi_log(L"WARN: passphrase confirmation did not match - reprompting");
+            prompt = selected->luks
+                ? L"Passphrases did not match - LUKS Password   (Esc = cancel)"
+                : L"Passphrases did not match - Password   (Esc = cancel)";
         }
+
+        if (!pw) {
+            efi_log(L"ERROR: no usable passphrase captured after 3 attempts");
+            efi_print(L"Passphrase confirmation failed\r\n");
+            goto boot_cleanup_return;
+        }
+
         selected->decrypt_password = pw;
         efi_log(L"main: password captured for encrypted/LUKS boot entry");
     }
@@ -464,6 +608,7 @@ boot_selected:
     efi_log_set_console(0);
 
     efi_print(L"Boot failed - entering recovery\r\n");
+    efi_fs_drivers_set_lazy(1);
 
     action = text_recovery_run(&gui, selected, status, config.quiet);
 

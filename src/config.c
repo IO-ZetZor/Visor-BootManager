@@ -1,6 +1,7 @@
 #include "config.h"
 #include "efi_helpers.h"
 #include "accent.h"
+#include "path_compat.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -231,6 +232,8 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
     int encrypted = 0, kernel_encrypted_set = 0, initrd_encrypted_set = 0;
     int kernel_encrypted = 0, initrd_encrypted = 0;
     int luks = 0;
+    int luks_confirm = 0;
+    int luks_verbose = 0;
     CHAR16 *luks_key_path = NULL;
     CHAR16 *luks_cmdline = NULL;
     CHAR16 *luks_preset = NULL;
@@ -280,6 +283,12 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
             } else if (efi_strcmp(key, L"luks") == 0 ||
                        efi_strcmp(key, L"luks_password") == 0) {
                 luks = (*value == '1' || *value == 't' || *value == 'y');
+            } else if (efi_strcmp(key, L"luks_confirm") == 0 ||
+                       efi_strcmp(key, L"luks_verify") == 0) {
+                luks_confirm = (*value == '1' || *value == 't' || *value == 'y');
+            } else if (efi_strcmp(key, L"luks_verbose") == 0 ||
+                       efi_strcmp(key, L"luks_show_prompt") == 0) {
+                luks_verbose = (*value == '1' || *value == 't' || *value == 'y');
             } else if (efi_strcmp(key, L"luks_key_path") == 0) {
                 luks_key_path = efi_strdup(value);
             } else if (efi_strcmp(key, L"luks_cmdline") == 0 ||
@@ -308,6 +317,8 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
         if (e) {
             entry_added = 1;
             e->luks = luks;
+            e->luks_confirm = luks_confirm;
+            e->luks_verbose = luks_verbose;
             e->luks_key_path = luks_key_path;
             e->luks_cmdline = luks_cmdline;
             e->luks_preset = luks_preset;
@@ -375,6 +386,7 @@ static CHAR16* distro_icon(CHAR16 *hint) {
         { L"suse",       L"opensuse.png" },
         { L"pop",        L"pop.png" },
         { L"ubuntu",     L"ubuntu.png" },
+        { L"void",       L"void.png" },
         { NULL, NULL }
     };
     if (!hint) return icon_path_for(L"linux.png");
@@ -445,6 +457,27 @@ static int is_kernel_name(CHAR16 *name) {
     if (contains_ci(name, L"bzimage")) return 1;
     return 0;
 }
+
+
+
+
+static int entry_takes_default_cmdline(CHAR16 *kernel_path, int type) {
+    static const CHAR16 *loaders[] = {
+        L"grubx64.efi", L"grubaa64.efi", L"shimx64.efi", L"shimaa64.efi",
+        L"bootmgfw.efi", L"refind_x64.efi", L"refind_aa64.efi",
+        L"systemd-bootx64.efi", L"systemd-bootaa64.efi", NULL
+    };
+    if (!kernel_path || type != 0) return 0;
+    if (looks_windows(kernel_path)) return 0;
+    if (contains_ci(kernel_path, L"\\EFI\\BOOT\\")) return 0;
+    for (int i = 0; loaders[i]; i++)
+        if (ends_with_ci(kernel_path, loaders[i])) return 0;
+    return 1;
+}
+
+
+
+static int dc_foreign_volume;
 
 static CHAR16* find_initrd(EFI_FILE_PROTOCOL *root, CHAR16 *dir, CHAR16 *kernel_name) {
     CHAR16 *suffix = efi_strchr(kernel_name, '-');
@@ -587,6 +620,99 @@ static CHAR16* dc_from_uki(EFI_FILE_PROTOCOL *root) {
     return out;
 }
 
+static int dc_ascii_key_is(const UINT8 *s, UINTN n, const char *key) {
+    UINTN i = 0;
+    while (key[i] && i < n) {
+        UINT8 c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (UINT8)(c + 32);
+        if (c != (UINT8)key[i]) return 0;
+        i++;
+    }
+    return key[i] == 0 && i == n;
+}
+
+static int dc_basename_eq(CHAR16 *path_value, CHAR16 *kernel_name) {
+    if (!path_value || !kernel_name) return 0;
+    UINTN len = 0;
+    while (path_value[len]) len++;
+    UINTN start = len;
+    while (start > 0 && path_value[start - 1] != '/' && path_value[start - 1] != '\\')
+        start--;
+    return str_eq_ci(path_value + start, kernel_name);
+}
+
+
+
+static CHAR16* dc_from_loader_entries(EFI_FILE_PROTOCOL *root, CHAR16 *kernel_name) {
+    static CHAR16 *dirs[] = { L"\\loader\\entries", L"\\boot\\loader\\entries", NULL };
+    if (!kernel_name || !kernel_name[0]) return NULL;
+
+    for (int di = 0; dirs[di]; di++) {
+        EFI_FILE_PROTOCOL *d = efi_open_dir(root, dirs[di]);
+        if (!d) continue;
+
+        CHAR16 name[160];
+        int is_dir;
+        CHAR16 *out = NULL;
+        while (!out && efi_read_dirent(d, name, 160, &is_dir)) {
+            if (is_dir || !ends_with_ci(name, L".conf")) continue;
+
+            CHAR16 path[MAX_PATH];
+            SPrint(path, sizeof(path), L"%s\\%s", dirs[di], name);
+            UINTN len = 0;
+            UINT8 *data = dc_read_file(root, path, 16384, &len);
+            if (!data) continue;
+
+            int kernel_match = 0;
+            CHAR16 opts[512];
+            opts[0] = 0;
+
+            UINTN i = 0;
+            while (i < len) {
+                UINTN ls = i;
+                while (i < len && data[i] != '\n') i++;
+                UINTN le = i;
+                if (i < len) i++;
+                while (le > ls && (data[le - 1] == '\r' || data[le - 1] == ' ' ||
+                                   data[le - 1] == '\t')) le--;
+                while (ls < le && (data[ls] == ' ' || data[ls] == '\t')) ls++;
+
+                UINTN ke = ls;
+                while (ke < le && data[ke] != ' ' && data[ke] != '\t') ke++;
+                UINTN vs = ke;
+                while (vs < le && (data[vs] == ' ' || data[vs] == '\t')) vs++;
+
+                if (dc_ascii_key_is(data + ls, ke - ls, "linux")) {
+                    CHAR16 val[256];
+                    UINTN w = 0;
+                    for (UINTN k = vs; k < le && w + 1 < 256; k++)
+                        val[w++] = (CHAR16)data[k];
+                    val[w] = 0;
+                    if (dc_basename_eq(val, kernel_name)) kernel_match = 1;
+                } else if (dc_ascii_key_is(data + ls, ke - ls, "options")) {
+                    UINTN w = 0;
+                    for (UINTN k = vs; k < le && w + 1 < 512; k++)
+                        opts[w++] = (data[k] == '\t') ? L' ' : (CHAR16)data[k];
+                    opts[w] = 0;
+                }
+            }
+            efi_free_pool(data);
+
+            if (kernel_match && opts[0]) {
+                out = efi_strdup(opts);
+                if (out) {
+                    efi_log(L"config: cmdline taken from this kernel's loader entry");
+                    efi_log(path);
+                    efi_log(out);
+                }
+            }
+        }
+        d->Close(d);
+        if (out) return out;
+    }
+    return NULL;
+}
+
 static CHAR16* dc_from_fstab(EFI_FILE_PROTOCOL *root) {
     static CHAR16 *paths[] = { L"\\etc\\fstab", L"\\@\\etc\\fstab", NULL };
     for (int pi = 0; paths[pi]; pi++) {
@@ -649,7 +775,7 @@ static CHAR16* dc_from_fstab(EFI_FILE_PROTOCOL *root) {
     return NULL;
 }
 
-static CHAR16* dc_from_gpt(void) {
+static CHAR16* dc_from_gpt(EFI_HANDLE prefer_volume) {
 #if defined(__aarch64__)
     static const EFI_GUID root_type =
         { 0xb921b045, 0x1df0, 0x41c3, { 0xaf,0x44,0x4c,0x6f,0x28,0x0d,0x3f,0xae } };
@@ -661,12 +787,16 @@ static CHAR16* dc_from_gpt(void) {
     EFI_HANDLE *hs = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nh);
     if (!hs) return NULL;
     CHAR16 *out = NULL;
+    int candidates = 0;
+    for (UINTN pass = 0; pass < 2 && !out; pass++)
     for (UINTN h = 0; h < nh && !out; h++) {
         EFI_BLOCK_IO *bio = NULL;
         if (EFI_ERROR(BS->HandleProtocol(hs[h], &gEfiBlockIoProtocolGuid,
                                          (void**)&bio)) || !bio || !bio->Media)
             continue;
         if (bio->Media->LogicalPartition || !bio->Media->MediaPresent) continue;
+        int same_disk = prefer_volume && efi_handles_same_disk(hs[h], prefer_volume);
+        if (pass == 0 ? !same_disk : same_disk) continue;
         UINT32 bs = bio->Media->BlockSize;
         if (bs < 512 || bs > 4096) continue;
         UINTN align = bio->Media->IoAlign > 1 ? bio->Media->IoAlign : 1;
@@ -696,9 +826,11 @@ static CHAR16* dc_from_gpt(void) {
             efi_free_pool(raw);
             continue;
         }
-        for (UINT32 i = 0; i < num && !out; i++) {
+        for (UINT32 i = 0; i < num; i++) {
             UINT8 *e = ents + (UINTN)i * esz;
             if (CompareMem(e, (void*)&root_type, 16) != 0) continue;
+            candidates++;
+            if (out) continue;
             EFI_GUID g;
             CopyMem(&g, e + 16, sizeof(g));
             UINT8 b[16] = {
@@ -722,40 +854,55 @@ static CHAR16* dc_from_gpt(void) {
             SPrint(cmd, sizeof(cmd), L"root=PARTUUID=%s rw", u);
             out = efi_strdup(cmd);
             if (out) {
-                efi_log(L"config: cmdline derived from GPT root partition");
+                efi_log(pass == 0
+                    ? L"config: cmdline derived from a GPT root partition on the kernel's own disk"
+                    : L"WARN: cmdline derived from a GPT root partition on another disk - verify root=");
                 efi_log(out);
             }
         }
         efi_free_pool(raw);
     }
     efi_free_pool(hs);
+    if (candidates > 1)
+        efi_log(L"WARN: this disk has more than one Linux root partition - "
+                L"set root= explicitly in boot.conf if the guess is wrong");
     return out;
 }
 
-static CHAR16* dc_derive_cmdline(EFI_FILE_PROTOCOL *root, int global_src) {
-    CHAR16 *cmd = dc_from_uki(root);
+static CHAR16* dc_derive_cmdline(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume,
+                                CHAR16 *kernel_name, int global_src) {
+    CHAR16 *cmd = dc_from_loader_entries(root, kernel_name);
+    if (!cmd) cmd = dc_from_uki(root);
     if (!cmd) cmd = dc_from_fstab(root);
-    if (!cmd && global_src) {
 
+    for (int pass = 0; pass < 2 && !cmd && global_src; pass++) {
         UINTN n = 0;
         EFI_HANDLE *hs = efi_locate_handle_buffer(
             &gEfiSimpleFileSystemProtocolGuid, &n);
-        if (hs) {
-            for (UINTN i = 0; i < n && !cmd; i++) {
-                EFI_FILE_PROTOCOL *r = root_from_handle(hs[i]);
-                if (!r) continue;
-                cmd = dc_from_fstab(r);
-                r->Close(r);
-            }
-            efi_free_pool(hs);
+        if (!hs) break;
+        for (UINTN i = 0; i < n && !cmd; i++) {
+            if (hs[i] == volume) continue;
+            int same_disk = efi_handles_same_disk(hs[i], volume);
+            if (pass == 0 ? !same_disk : same_disk) continue;
+
+            EFI_FILE_PROTOCOL *r = root_from_handle(hs[i]);
+            if (!r) continue;
+            cmd = dc_from_fstab(r);
+            r->Close(r);
+            if (cmd)
+                efi_log(pass == 0
+                    ? L"config: cmdline derived from another volume on the same disk"
+                    : L"WARN: cmdline derived from an fstab on a different disk - verify root=");
         }
+        efi_free_pool(hs);
     }
-    if (!cmd && global_src) cmd = dc_from_gpt();
+
+    if (!cmd && global_src) cmd = dc_from_gpt(volume);
     return cmd;
 }
 
 static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root,
-                           CHAR16 *dir, int global_cmdline) {
+                           EFI_HANDLE volume, CHAR16 *dir, int global_cmdline) {
     EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
     if (!d) return 0;
 
@@ -776,15 +923,18 @@ static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root,
         efi_log(path);
         if (initrd) efi_log(initrd);
 
-        if (!auto_tried) {
-            auto_tried = 1;
-            auto_cmd = dc_derive_cmdline(root, global_cmdline);
+        CHAR16 *entry_cmd = dc_from_loader_entries(root, name);
+        if (!entry_cmd) {
+            if (!auto_tried) {
+                auto_tried = 1;
+                auto_cmd = dc_derive_cmdline(root, volume, NULL, global_cmdline);
+            }
+            entry_cmd = auto_cmd ? efi_strdup(auto_cmd) : NULL;
         }
 
         CHAR16 *entry_name = efi_strdup(name);
-        CHAR16 *entry_icon = icon_path_for(L"unknown.png");
+        CHAR16 *entry_icon = distro_icon(name);
         CHAR16 *entry_path = efi_strdup(path);
-        CHAR16 *entry_cmd  = auto_cmd ? efi_strdup(auto_cmd) : NULL;
         if (!entry_name || !entry_path) {
             free_char16(&entry_name);
             free_char16(&entry_icon);
@@ -877,6 +1027,7 @@ static int scan_vendor_loaders(config_t *config, EFI_FILE_PROTOCOL *root) {
 typedef struct {
     CHAR16 *title, *version, *kernel, *initrd, *options, *machine, *conf;
     int tries_left, tries_done, ot_idx;
+    EFI_HANDLE volume;
 } bls_rec_t;
 
 static CHAR16* read_text_from_root(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
@@ -958,6 +1109,7 @@ static int bls_ostree_idx(CHAR16 *t) {
 }
 
 static int bls_same_group(bls_rec_t *a, bls_rec_t *b) {
+    if (a->volume != b->volume) return 0;
     if (a->machine && b->machine) return efi_strcmp(a->machine, b->machine) == 0;
     CHAR16 *ba = base_title_dup(a->title), *bb = base_title_dup(b->title);
     int eq = (ba && bb && efi_strcmp(ba, bb) == 0);
@@ -966,7 +1118,8 @@ static int bls_same_group(bls_rec_t *a, bls_rec_t *b) {
     return eq;
 }
 
-static void bls_scan(EFI_FILE_PROTOCOL *root, CHAR16 *dir, bls_rec_t *recs, int *nrec) {
+static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
+                     bls_rec_t *recs, int *nrec) {
     EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
     if (!d) return;
     CHAR16 name[160];
@@ -978,7 +1131,9 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, CHAR16 *dir, bls_rec_t *recs, int 
         CHAR16 *buf = read_text_from_root(root, path);
         if (!buf) continue;
 
-        bls_rec_t r = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, 0, -1 };
+        bls_rec_t r = {
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, 0, -1, volume
+        };
         CHAR16 *start = buf;
         while (*start) {
             CHAR16 *end = start;
@@ -1027,8 +1182,8 @@ static int bls_detect(config_t *config) {
         for (UINTN v = 0; v < nvol && nrec < MAX_BLS; v++) {
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
-            bls_scan(root, L"\\loader\\entries", recs, &nrec);
-            bls_scan(root, L"\\boot\\loader\\entries", recs, &nrec);
+            bls_scan(root, vols[v], L"\\loader\\entries", recs, &nrec);
+            bls_scan(root, vols[v], L"\\boot\\loader\\entries", recs, &nrec);
             root->Close(root);
         }
         efi_free_pool(vols);
@@ -1094,6 +1249,12 @@ static int bls_detect(config_t *config) {
             e->deploy_count   = (UINTN)n;
             e->deploy_default = def;
             e->deploy_sel     = def;
+            e->hp_volume      = recs[idx[0]].volume;
+            e->uuid           = efi_handle_partition_uuid(recs[idx[0]].volume);
+            CHAR16 m[128];
+            SPrint(m, sizeof(m), L"bls: attached %d deployment(s) to %s",
+                   n, e->name);
+            efi_log(m);
             groups++;
         } else {
             free_char16(&dispname);
@@ -1149,6 +1310,30 @@ void bls_decrement(boot_entry_t *e) {
         efi_log(L"WARN: could not update boot-counter (read-only /boot?)");
 }
 
+static void tag_entries_since(config_t *config, UINTN first,
+                              EFI_HANDLE volume) {
+    if (!config || !volume || first >= config->entry_count) return;
+
+    CHAR16 *uuid = efi_handle_partition_uuid(volume);
+    UINTN idx = 0;
+    for (boot_entry_t *e = config->entries; e; e = e->next, idx++) {
+        if (idx < first) continue;
+        e->hp_volume = volume;
+        if (uuid && !e->uuid) e->uuid = efi_strdup(uuid);
+    }
+    if (uuid) efi_free_pool(uuid);
+}
+
+static EFI_HANDLE dc_scanned_vols[64];
+static UINTN      dc_scanned_n;
+
+static void dc_mark_scanned(EFI_HANDLE vol) {
+    if (!vol) return;
+    for (UINTN i = 0; i < dc_scanned_n; i++)
+        if (dc_scanned_vols[i] == vol) return;
+    if (dc_scanned_n < 64) dc_scanned_vols[dc_scanned_n++] = vol;
+}
+
 static int detect_scan_volumes(config_t *config, int bls) {
     static CHAR16 *windows_paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
@@ -1172,6 +1357,8 @@ static int detect_scan_volumes(config_t *config, int bls) {
         EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
         if (!root) continue;
 
+        UINTN volume_start = config->entry_count;
+        dc_mark_scanned(vols[v]);
         if (!windows_found) {
             for (int i = 0; windows_paths[i] != NULL; i++) {
                 if (efi_file_exists_root(root, windows_paths[i])) {
@@ -1196,6 +1383,7 @@ static int detect_scan_volumes(config_t *config, int bls) {
         }
 
         uki_found += scan_uki_dir(config, root, L"\\EFI\\Linux");
+        tag_entries_since(config, volume_start, vols[v]);
 
         root->Close(root);
     }
@@ -1205,9 +1393,11 @@ static int detect_scan_volumes(config_t *config, int bls) {
         for (UINTN v = 0; v < nvol; v++) {
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
-            raw_found += scan_kernel_dir(config, root, L"\\boot", 1);
-            raw_found += scan_kernel_dir(config, root, L"\\@\\boot", 1);
-            raw_found += scan_kernel_dir(config, root, L"\\", 1);
+            UINTN volume_start = config->entry_count;
+            raw_found += scan_kernel_dir(config, root, vols[v], L"\\boot", 1);
+            raw_found += scan_kernel_dir(config, root, vols[v], L"\\@\\boot", 1);
+            raw_found += scan_kernel_dir(config, root, vols[v], L"\\", 1);
+            tag_entries_since(config, volume_start, vols[v]);
             root->Close(root);
         }
         { CHAR16 d[64]; SPrint(d, sizeof(d), L"config: raw kernel scan found %d", raw_found); efi_log(d); }
@@ -1216,7 +1406,9 @@ static int detect_scan_volumes(config_t *config, int bls) {
         for (UINTN v = 0; v < nvol; v++) {
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
+            UINTN volume_start = config->entry_count;
             scan_vendor_loaders(config, root);
+            tag_entries_since(config, volume_start, vols[v]);
             root->Close(root);
         }
     }
@@ -1229,21 +1421,22 @@ static EFI_STATUS detect_entries(config_t *config) {
     config->show_names = 0;
     config->center_info = 1;
 
+    if (efi_fs_drivers_pending()) {
+        efi_log(L"config: starting FS drivers before auto-detection");
+        efi_start_deferred_drivers();
+    }
+
     int bls = bls_detect(config);
     int found = detect_scan_volumes(config, bls);
-
-    if (!found && !bls && efi_fs_drivers_deferred()) {
-        efi_log(L"config: no entries on fast volumes; starting FS drivers and rescanning");
-        efi_start_deferred_drivers();
-        found += detect_scan_volumes(config, bls);
-    }
 
     if (!found && !bls) return EFI_NOT_FOUND;
     return EFI_SUCCESS;
 }
 
 static EFI_HANDLE *hp_fs_known;  static UINTN hp_fs_n;
+static int hp_pending_probe;
 static EFI_HANDLE *hp_blk_known; static UINTN hp_blk_n;
+static int hp_scan_volume(config_t *config, EFI_HANDLE vol);
 
 static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
     for (UINTN i = 0; i < n; i++)
@@ -1251,15 +1444,75 @@ static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
     return 0;
 }
 
+
+
+static int hp_volume_hosts_entry(config_t *config, EFI_HANDLE vol) {
+    EFI_FILE_PROTOCOL *root = root_from_handle(vol);
+    if (!root) return 0;
+
+    int hosts = 0;
+    for (boot_entry_t *e = config->entries; e && !hosts; e = e->next) {
+        if (!e->kernel_path || !e->kernel_path[0]) continue;
+        if (efi_file_exists_root(root, e->kernel_path)) {
+            hosts = 1;
+            break;
+        }
+        CHAR16 *alt = visor_path_without_boot_mount(e->kernel_path);
+        if (alt && efi_file_exists_root(root, alt)) hosts = 1;
+    }
+    root->Close(root);
+    return hosts;
+}
+
 void config_hotplug_arm(config_t *config) {
-    (void)config;
     if (hp_fs_known)  efi_free_pool(hp_fs_known);
     if (hp_blk_known) efi_free_pool(hp_blk_known);
     hp_fs_n = hp_blk_n = 0;
-    hp_fs_known  = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &hp_fs_n);
-    hp_blk_known = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &hp_blk_n);
-    if (!hp_fs_known)  hp_fs_n = 0;
+
+    hp_blk_known = efi_locate_handle_buffer(
+        &gEfiBlockIoProtocolGuid, &hp_blk_n);
     if (!hp_blk_known) hp_blk_n = 0;
+
+    UINTN nf = 0;
+    EFI_HANDLE *fs = efi_locate_handle_buffer(
+        &gEfiSimpleFileSystemProtocolGuid, &nf);
+
+    
+
+
+
+    hp_fs_known = efi_allocate_pool((nf ? nf : 1) * sizeof(EFI_HANDLE));
+    if (hp_fs_known) {
+        EFI_HANDLE boot_volume = efi_boot_volume_handle();
+        for (UINTN i = 0; i < nf; i++) {
+            int seen = (fs[i] == boot_volume);
+            for (UINTN k = 0; !seen && k < dc_scanned_n; k++)
+                if (dc_scanned_vols[k] == fs[i]) seen = 1;
+            if (seen) hp_fs_known[hp_fs_n++] = fs[i];
+        }
+    }
+
+    
+
+
+
+
+    int sweep = (config->scan_existing >= 0) ? config->scan_existing
+                                             : !config->entries_from_config;
+    if (!sweep && fs && hp_fs_known) {
+        efi_free_pool(hp_fs_known);
+        hp_fs_known = fs;
+        hp_fs_n = nf;
+        fs = NULL;
+    }
+    if (fs) efi_free_pool(fs);
+    hp_pending_probe = sweep;
+
+    { CHAR16 d[128];
+      SPrint(d, sizeof(d),
+             L"hotplug: armed, %d of %d volume(s) known, existing-media sweep %s",
+             (int)hp_fs_n, (int)nf, sweep ? L"on" : L"off");
+      efi_log(d); }
 }
 
 static EFI_GUID hp_fs_info_guid = { 0x09576e93, 0x6d3f, 0x11d2,
@@ -1281,14 +1534,16 @@ static CHAR16* hp_volume_label(EFI_FILE_PROTOCOL *root) {
 static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
 
     for (boot_entry_t *e = config->entries; e; e = e->next)
-        if (e->uuid && e->uuid[0] &&
-            efi_handle_matches_partition_uuid(vol, e->uuid))
+        if (e->hp_volume == vol ||
+            (e->uuid && e->uuid[0] &&
+             efi_handle_matches_partition_uuid(vol, e->uuid)))
             return 0;
 
     EFI_FILE_PROTOCOL *root = root_from_handle(vol);
     if (!root) return 0;
 
     UINTN before = config->entry_count;
+    dc_foreign_volume = 1;
 
     static CHAR16 *win_paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
@@ -1313,9 +1568,9 @@ static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
     int uki = scan_uki_dir(config, root, L"\\EFI\\Linux");
 
     int raw = 0;
-    raw += scan_kernel_dir(config, root, L"\\boot", 0);
-    raw += scan_kernel_dir(config, root, L"\\@\\boot", 0);
-    raw += scan_kernel_dir(config, root, L"\\", 0);
+    raw += scan_kernel_dir(config, root, vol, L"\\boot", 0);
+    raw += scan_kernel_dir(config, root, vol, L"\\@\\boot", 0);
+    raw += scan_kernel_dir(config, root, vol, L"\\", 0);
     if (!uki && !raw && config->entry_count == before)
         scan_vendor_loaders(config, root);
 
@@ -1340,18 +1595,11 @@ static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
         }
     }
     root->Close(root);
+    dc_foreign_volume = 0;
 
     int added = (int)(config->entry_count - before);
     if (added > 0) {
-
-        CHAR16 *uuid = efi_handle_partition_uuid(vol);
-        UINTN idx = 0;
-        for (boot_entry_t *e = config->entries; e; e = e->next, idx++) {
-            if (idx < before) continue;
-            e->hp_volume = vol;
-            if (uuid && !e->uuid) e->uuid = efi_strdup(uuid);
-        }
-        if (uuid) efi_free_pool(uuid);
+        tag_entries_since(config, before, vol);
         CHAR16 d[64];
         SPrint(d, sizeof(d), L"hotplug: added %d boot entr%s", added,
                added == 1 ? L"y" : L"ies");
@@ -1387,13 +1635,29 @@ static int hp_vol_present(EFI_HANDLE *fs, UINTN nf, EFI_HANDLE h) {
 
 int config_hotplug_poll(config_t *config, UINTN *first_new) {
 
+    if (hp_pending_probe) {
+        hp_pending_probe = 0;
+        UINTN probed = 0;
+        for (UINTN i = 0; i < hp_blk_n; i++) {
+            if (efi_handle_has_filesystem(hp_blk_known[i])) continue;
+            BS->ConnectController(hp_blk_known[i], NULL, NULL, FALSE);
+            probed++;
+        }
+        if (probed) {
+            CHAR16 d[96];
+            SPrint(d, sizeof(d), L"hotplug: probed %d unreadable block device(s)",
+                   (int)probed);
+            efi_log(d);
+        }
+    }
+
     UINTN nb = 0;
     EFI_HANDLE *blk = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nb);
     if (blk) {
         int fresh = 0;
         for (UINTN i = 0; i < nb; i++)
             if (!hp_in_set(hp_blk_known, hp_blk_n, blk[i])) {
-                BS->ConnectController(blk[i], NULL, NULL, TRUE);
+                BS->ConnectController(blk[i], NULL, NULL, FALSE);
                 fresh = 1;
             }
         if (fresh) {
@@ -1440,15 +1704,39 @@ int config_hotplug_poll(config_t *config, UINTN *first_new) {
 
     int added = 0;
     UINTN before = config->entry_count;
+    UINTN scanned_idx = nf;
     for (UINTN i = 0; i < nf; i++) {
         if (hp_in_set(hp_fs_known, hp_fs_n, fs[i])) continue;
-        efi_log(L"hotplug: new filesystem volume detected");
-        added += hp_scan_volume(config, fs[i]);
+        if (hp_volume_hosts_entry(config, fs[i])) {
+            efi_log(L"hotplug: volume already backs a configured entry - not scanning");
+        } else {
+            efi_log(L"hotplug: scanning a volume Visor has not seen yet");
+            added += hp_scan_volume(config, fs[i]);
+        }
+        scanned_idx = i;
+        break;              
     }
 
-    if (hp_fs_known) efi_free_pool(hp_fs_known);
-    hp_fs_known = fs;
-    hp_fs_n = nf;
+    
+
+    if (scanned_idx < nf) {
+        EFI_HANDLE *grown = efi_allocate_pool((hp_fs_n + 1) * sizeof(EFI_HANDLE));
+        if (grown) {
+            UINTN k = 0;
+            for (UINTN i = 0; i < hp_fs_n; i++)
+                if (hp_vol_present(fs, nf, hp_fs_known[i]))
+                    grown[k++] = hp_fs_known[i];
+            grown[k++] = fs[scanned_idx];
+            if (hp_fs_known) efi_free_pool(hp_fs_known);
+            hp_fs_known = grown;
+            hp_fs_n = k;
+        }
+        efi_free_pool(fs);
+    } else {
+        if (hp_fs_known) efi_free_pool(hp_fs_known);
+        hp_fs_known = fs;
+        hp_fs_n = nf;
+    }
 
     if (added > 0) mask |= 1;
     if (first_new) *first_new = (mask & 1) ? before : removed_at;
@@ -1516,6 +1804,59 @@ static CHAR16* read_text_file(CHAR16 *path) {
     return buf;
 }
 
+
+
+int config_early_file_log_enabled(void) {
+    int previous = efi_log_file_enabled();
+    efi_log_set_file(0);
+    CHAR16 *buf = read_text_file(CONFIG_FILE);
+    efi_log_set_file(previous);
+    if (!buf) return 1;
+
+    int enabled = 1;
+    int in_entry = 0;
+    CHAR16 *start = buf;
+    while (*start) {
+        CHAR16 *end = start;
+        while (*end && *end != '\n') end++;
+        int had_nl = (*end == '\n');
+        if (had_nl) *end = '\0';
+
+        CHAR16 *cr = efi_strchr(start, '\r');
+        if (cr) *cr = '\0';
+        CHAR16 *line = trim(start);
+
+        if (in_entry) {
+            if (line[0] == '}') in_entry = 0;
+        } else if (is_header(line, L"entry") ||
+                   is_header(line, L"linux") ||
+                   is_header(line, L"windows")) {
+            in_entry = 1;
+        } else if (line[0] != '#' && line[0] != '\0') {
+            CHAR16 *eq = efi_strchr(line, '=');
+            if (eq) {
+                *eq = '\0';
+                CHAR16 *key = trim(line);
+                strip_inline_comment(eq + 1);
+                CHAR16 *value = trim(eq + 1);
+                int truthy = (*value == '1' || *value == 't' || *value == 'y');
+                if (efi_strcmp(key, L"log") == 0 ||
+                    efi_strcmp(key, L"boot_log") == 0 ||
+                    efi_strcmp(key, L"file_log") == 0)
+                    enabled = truthy;
+                else if (efi_strcmp(key, L"no_log") == 0)
+                    enabled = !truthy;
+            }
+        }
+
+        if (!had_nl) break;
+        start = end + 1;
+    }
+
+    efi_free_pool(buf);
+    return enabled;
+}
+
 static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     if (efi_strcmp(key, L"timeout") == 0) {
         config->timeout = (*value == '-') ? -1 : (INTN)parse_uint(value);
@@ -1545,6 +1886,21 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->hotplug = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"mouse") == 0 || efi_strcmp(key, L"pointer") == 0) {
         config->mouse = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"mouse_speed") == 0 ||
+               efi_strcmp(key, L"pointer_speed") == 0) {
+        UINTN speed = parse_uint(value);
+        if (speed < 1) speed = 1;
+        if (speed > 20) speed = 20;
+        config->pointer_speed = speed;
+    } else if (efi_strcmp(key, L"scan_existing") == 0 ||
+               efi_strcmp(key, L"hotplug_scan_existing") == 0) {
+        config->scan_existing = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"log") == 0 ||
+               efi_strcmp(key, L"boot_log") == 0 ||
+               efi_strcmp(key, L"file_log") == 0) {
+        config->file_log = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"no_log") == 0) {
+        config->file_log = !(*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"editor") == 0) {
         config->editor = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"box_radius") == 0 || efi_strcmp(key, L"corner_radius") == 0) {
@@ -1862,11 +2218,72 @@ static void add_recovery_entries(config_t *config) {
     }
 }
 
-#define SNAPSHOTS_FILE L"\\EFI\\visor\\snapshots.conf"
+#define SNAPSHOTS_FILE     L"\\EFI\\visor\\snapshots.conf"
+#define SNAPSHOTS_FILE_ALT L"\\EFI\\visor\\snapshot.conf"
 #define MAX_SNAPS 64
+
+static boot_entry_t* sole_linux_entry(config_t *config) {
+    boot_entry_t *only = NULL;
+    for (boot_entry_t *e = config->entries; e; e = e->next) {
+        if (e->type != 0) continue;
+        if (only) return NULL;
+        only = e;
+    }
+    return only;
+}
+
+
+
+static boot_entry_t* snapshot_entry_match(config_t *config,
+                                          CHAR16 *entry_name, CHAR16 *os,
+                                          int *ambiguous) {
+    if (ambiguous) *ambiguous = 0;
+
+    if (entry_name && entry_name[0]) {
+        boot_entry_t *match = NULL;
+        UINTN matches = 0;
+        for (boot_entry_t *e = config->entries; e; e = e->next) {
+            if (e->type == 1 || !str_eq_ci(e->name, entry_name)) continue;
+            match = e;
+            matches++;
+        }
+        if (matches == 1) return match;
+        if (matches > 1) {
+            if (ambiguous) *ambiguous = 1;
+            return NULL;
+        }
+    }
+
+    if (os && os[0]) {
+        for (boot_entry_t *e = config->entries; e; e = e->next)
+            if (e->type != 1 && str_eq_ci(e->name, os))
+                return e;
+
+        boot_entry_t *match = NULL;
+        UINTN matches = 0;
+        for (boot_entry_t *e = config->entries; e; e = e->next) {
+            if (e->type == 1 || !contains_ci(e->name, os)) continue;
+            match = e;
+            matches++;
+        }
+        if (matches == 1) return match;
+        if (matches > 1) {
+            if (ambiguous) *ambiguous = 1;
+            return NULL;
+        }
+    }
+
+    return sole_linux_entry(config);
+}
 
 static int load_snapshots(config_t *config) {
     CHAR16 *buf = read_text_file(SNAPSHOTS_FILE);
+    if (!buf) {
+        buf = read_text_file(SNAPSHOTS_FILE_ALT);
+        if (buf)
+            efi_log(L"config: loaded \\EFI\\visor\\snapshot.conf "
+                    L"(the documented name is snapshots.conf)");
+    }
     if (!buf) return 0;
 
     snapshot_t tmp[MAX_SNAPS];
@@ -1893,6 +2310,7 @@ static int load_snapshots(config_t *config) {
 
         snapshot_t s = { NULL, NULL, NULL, NULL, NULL, NULL };
         CHAR16 *os = NULL;
+        CHAR16 *entry_name = NULL;
         i++;
         while (i < line_count) {
             CHAR16 *l = trim(lines[i]);
@@ -1903,7 +2321,10 @@ static int load_snapshots(config_t *config) {
                 CHAR16 *key = trim(l);
                 strip_inline_comment(eq + 1);
                 CHAR16 *value = trim(eq + 1);
-                if      (efi_strcmp(key, L"os") == 0)      os = value;
+                if      (efi_strcmp(key, L"entry") == 0 ||
+                         efi_strcmp(key, L"boot_entry") == 0)
+                                                           entry_name = value;
+                else if (efi_strcmp(key, L"os") == 0)      os = value;
                 else if (efi_strcmp(key, L"id") == 0)      { if (!s.id)   s.id   = efi_strdup(value); }
                 else if (efi_strcmp(key, L"date") == 0)    { if (!s.date) s.date = efi_strdup(value); }
                 else if (efi_strcmp(key, L"desc") == 0 ||
@@ -1918,18 +2339,24 @@ static int load_snapshots(config_t *config) {
             i++;
         }
 
-        boot_entry_t *tgt = NULL;
-        if (os && os[0]) {
-            for (boot_entry_t *e = config->entries; e; e = e->next)
-                if (contains_ci(e->name, os)) { tgt = e; break; }
-        } else if (config->entries && !config->entries->next) {
-            tgt = config->entries;
-        }
+        int ambiguous = 0;
+        boot_entry_t *tgt = snapshot_entry_match(
+            config, entry_name, os, &ambiguous);
         if (tgt && s.cmdline && s.id) {
             tmp[n] = s;
             owner[n] = tgt;
             n++;
         } else {
+            if (ambiguous)
+                efi_log(L"WARN: snapshot manifest selector matched multiple boot entries");
+            else if (!tgt)
+                efi_log(L"WARN: snapshot manifest record did not match a boot entry");
+            else if (!s.id)
+                efi_log(L"WARN: snapshot manifest record has no id");
+            else if (!s.cmdline)
+                efi_log(L"WARN: snapshot manifest record has no cmdline");
+            if (entry_name && entry_name[0]) efi_log(entry_name);
+            else if (os && os[0]) efi_log(os);
             if (s.id)      efi_free_pool(s.id);
             if (s.date)    efi_free_pool(s.date);
             if (s.desc)    efi_free_pool(s.desc);
@@ -1939,7 +2366,10 @@ static int load_snapshots(config_t *config) {
         }
     }
     efi_free_pool(buf);
-    if (!n) return 1;
+    if (!n) {
+        efi_log(L"WARN: snapshot manifest contained no attachable records");
+        return 1;
+    }
 
     for (boot_entry_t *e = config->entries; e; e = e->next) {
         UINTN cnt = 0;
@@ -1953,6 +2383,10 @@ static int load_snapshots(config_t *config) {
         e->snapshots = arr;
         e->snap_count = cnt;
         e->snap_sel = 0;
+        CHAR16 d[128];
+        SPrint(d, sizeof(d), L"config: attached %d snapshot(s) to %s",
+               (int)cnt, e->name);
+        efi_log(d);
     }
     for (UINTN i = 0; i < n; i++) {
         if (!owner[i]) continue;
@@ -2433,6 +2867,10 @@ EFI_STATUS config_parse(config_t *config) {
     config->snapshots_mode = 1;
     config->autoboot = 0;
     config->mouse = 1;
+    config->pointer_speed = 4;
+    config->file_log = 1;
+    config->scan_existing = -1;
+    config->entries_from_config = 0;
     config->editor = 1;
     config->theme = NULL;
     config->title = NULL;
@@ -2573,11 +3011,14 @@ EFI_STATUS config_parse(config_t *config) {
 
     if (config->entry_count == entry_count_before_parse) {
         detect_entries(config);
+    } else {
+        config->entries_from_config = 1;
+        efi_log(L"config: boot.conf supplied the entries - skipping volume scan");
     }
 
-    if (config->recovery_entries) add_recovery_entries(config);
-
     snapshots_apply(config);
+
+    if (config->recovery_entries) add_recovery_entries(config);
 
     return EFI_SUCCESS;
 }
@@ -2601,11 +3042,17 @@ static boot_entry_t* config_add_entry(config_t *config,
         efi_log(L"ERROR: out of memory naming boot entry");
         return NULL;
     }
-    entry->icon_path = icon_path;
+    entry->icon_path = icon_path ? icon_path
+                     : (type == 1 || looks_windows(kernel_path)
+                        ? icon_path_for(L"windows.png")
+                        : distro_icon(name));
     entry->kernel_path = kernel_path;
     entry->initrd_path = initrd_path;
     entry->cmdline = cmdline ? cmdline
-                   : (config->def_cmdline ? efi_strdup(config->def_cmdline) : NULL);
+                   : (!dc_foreign_volume
+                      && entry_takes_default_cmdline(kernel_path, type)
+                      && config->def_cmdline
+                      ? efi_strdup(config->def_cmdline) : NULL);
     entry->uuid = uuid;
     entry->type = type;
     entry->index = config->entry_count;
@@ -2617,6 +3064,8 @@ static boot_entry_t* config_add_entry(config_t *config,
     entry->encrypted = encrypted;
     entry->initrd_encrypted = initrd_encrypted;
     entry->luks = 0;
+    entry->luks_confirm = 0;
+    entry->luks_verbose = 0;
     entry->luks_key_path = NULL;
     entry->luks_cmdline = NULL;
     entry->luks_preset = NULL;
@@ -2634,8 +3083,8 @@ static boot_entry_t* config_add_entry(config_t *config,
     efi_log(L"config: adding entry");
     efi_log(entry->name);
 
-    if (icon_path) {
-        entry->icon = gui_load_icon(icon_path);
+    if (entry->icon_path) {
+        entry->icon = gui_load_icon(entry->icon_path);
         if (!entry->icon) efi_log(L"WARN: entry icon failed to load");
     }
 

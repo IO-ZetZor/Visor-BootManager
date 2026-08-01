@@ -25,6 +25,8 @@ typedef struct {
     int   recovery_entries;
     int   snapshots_mode;
     int   mouse;
+    UINTN pointer_speed;
+    int   file_log;
     int   editor;
     int   autoboot;
     CHAR16 *theme;
@@ -80,12 +82,16 @@ typedef struct {
     int     fade_speed;
     UINTN   entries_per_page;
     int     hotplug;
+    int     scan_existing;       
+    int     entries_from_config; 
     boot_entry_t *entries;
     boot_entry_t *tail;
     UINTN entry_count;
 } config_t;
 
 EFI_STATUS config_parse(config_t *config);
+
+int config_early_file_log_enabled(void);
 
 void config_hotplug_arm(config_t *config);
 

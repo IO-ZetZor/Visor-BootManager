@@ -17,6 +17,9 @@ typedef struct {
 } efi_file_t;
 
 EFI_FILE_PROTOCOL* efi_boot_volume_root(void);
+EFI_HANDLE efi_boot_volume_handle(void);
+int efi_handles_same_disk(EFI_HANDLE a, EFI_HANDLE b);
+int efi_handle_has_filesystem(EFI_HANDLE handle);
 efi_file_t* efi_fopen(CHAR16 *path);
 
 efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid);
@@ -33,6 +36,7 @@ int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid)
 CHAR16* efi_handle_partition_uuid(EFI_HANDLE handle);
 EFI_DEVICE_PATH* efi_make_file_path(EFI_HANDLE handle, CHAR16 *filename);
 EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid);
+EFI_DEVICE_PATH* efi_file_device_path_on_handle(EFI_HANDLE volume, CHAR16 *path);
 
 typedef struct {
     void *data;
@@ -43,6 +47,7 @@ UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh);
 efi_file_buffer_t* efi_load_file(CHAR16 *path);
 
 efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid);
+efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path);
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
 
@@ -50,7 +55,15 @@ void efi_load_fs_drivers(void);
 
 int  efi_fs_drivers_deferred(void);
 
+int  efi_fs_drivers_pending(void);
+
 void efi_start_deferred_drivers(void);
+
+void efi_start_deferred_images(void);
+
+int  efi_connect_next_block(CHAR16 *prefer_uuid);
+
+void efi_fs_drivers_set_lazy(int enabled);
 
 extern int visor_quiet;
 extern int visor_log_to_console;
@@ -67,6 +80,8 @@ void efi_log_set_file(int enabled);
 int efi_log_file_enabled(void);
 
 void efi_log_begin(void);
+
+void efi_log_rotate(void);
 
 void efi_log_close(void);
 

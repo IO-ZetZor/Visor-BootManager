@@ -40,6 +40,7 @@ typedef struct {
 #define VISOR_ACTION_FIRMWARE  3
 #define VISOR_ACTION_RETRY     4
 #define VISOR_ACTION_MENU      5
+#define VISOR_ACTION_RESCUE    6
 
 #define LOGO_MODE_OFF    0
 #define LOGO_MODE_TITLE  1
@@ -98,6 +99,8 @@ typedef struct boot_entry {
     int     encrypted;
     int     initrd_encrypted;
     int     luks;
+    int     luks_confirm;
+    int     luks_verbose;
     CHAR16 *luks_key_path;
     CHAR16 *luks_cmdline;
     CHAR16 *luks_preset;
@@ -247,7 +250,9 @@ typedef struct {
     int     editor_enabled;
     int     editing;
     int     edit_secret;
+    int     edit_reveal;
     CHAR16 *edit_title;
+    CHAR16 *edit_hint;
     CHAR16  edit_buf[512];
     UINTN   edit_len;
     UINTN   edit_cursor;
@@ -267,6 +272,7 @@ typedef struct {
     int     hp_removal;
 
     int     mouse_enabled;
+    UINTN   pointer_speed;
     void   *spp;
     void   *app;
     int     has_pointer;
@@ -298,7 +304,8 @@ void gui_fade_out(gui_state_t *state);
 
 boot_entry_t* gui_run(gui_state_t *state);
 
-EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out);
+EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 *hint,
+                               CHAR16 **out);
 
 void gui_shutdown(gui_state_t *state);
 

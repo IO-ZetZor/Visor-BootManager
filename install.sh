@@ -303,6 +303,11 @@ else
     warn "Edit $CONF and set your kernel paths / root PARTUUID before rebooting."
 fi
 
+if [ ! -e "$DEST/boot.log" ]; then
+    install -m 0644 /dev/null "$DEST/boot.log"
+    say "Created boot log: $DEST/boot.log"
+fi
+
 DRIVER_DESTS=()
 if [ -n "$FS_DRIVER" ]; then
     mkdir -p "$DEST/drivers"

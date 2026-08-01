@@ -32,6 +32,10 @@ EFI_FILE_PROTOCOL* efi_boot_volume_root(void) {
     return open_root_on_handle(boot_device_handle());
 }
 
+EFI_HANDLE efi_boot_volume_handle(void) {
+    return boot_device_handle();
+}
+
 void* efi_allocate_pool(UINTN size) {
     void *ptr = NULL;
     BS->AllocatePool(EfiLoaderData, size, &ptr);
@@ -264,6 +268,46 @@ EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid) {
     return dp;
 }
 
+EFI_DEVICE_PATH* efi_file_device_path_on_handle(EFI_HANDLE volume, CHAR16 *path) {
+    if (!volume) return NULL;
+    EFI_FILE_PROTOCOL *root = open_root_on_handle(volume);
+    if (!root) return NULL;
+    int found = efi_file_exists_root(root, path);
+    root->Close(root);
+    return found ? efi_make_file_path(volume, path) : NULL;
+}
+
+static int dp_node_is_harddrive(EFI_DEVICE_PATH *n) {
+    return DevicePathType(n) == MEDIA_DEVICE_PATH &&
+           DevicePathSubType(n) == MEDIA_HARDDRIVE_DP;
+}
+
+
+
+int efi_handles_same_disk(EFI_HANDLE a, EFI_HANDLE b) {
+    if (!a || !b) return 0;
+    if (a == b) return 1;
+
+    EFI_DEVICE_PATH *pa = NULL, *pb = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(a, &gEfiDevicePathProtocolGuid, (void**)&pa)) || !pa)
+        return 0;
+    if (EFI_ERROR(BS->HandleProtocol(b, &gEfiDevicePathProtocolGuid, (void**)&pb)) || !pb)
+        return 0;
+
+    for (;;) {
+        int end_a = IsDevicePathEnd(pa) || dp_node_is_harddrive(pa);
+        int end_b = IsDevicePathEnd(pb) || dp_node_is_harddrive(pb);
+        if (end_a || end_b) return end_a && end_b;
+
+        UINTN la = DevicePathNodeLength(pa);
+        UINTN lb = DevicePathNodeLength(pb);
+        if (la != lb || la < 4 || CompareMem(pa, pb, la) != 0) return 0;
+
+        pa = (EFI_DEVICE_PATH*)((UINT8*)pa + la);
+        pb = (EFI_DEVICE_PATH*)((UINT8*)pb + lb);
+    }
+}
+
 static efi_file_t* efi_fopen_inner(CHAR16 *path, CHAR16 *uuid) {
     efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
     if (!file) return NULL;
@@ -319,6 +363,24 @@ int efi_fs_drivers_deferred(void) {
     return g_deferred_count > 0 && !g_deferred_started;
 }
 
+
+
+int efi_fs_drivers_pending(void) {
+    extern int efi_fs_probe_exhausted(void);
+    return efi_fs_drivers_deferred() || !efi_fs_probe_exhausted();
+}
+
+
+
+
+
+
+static int g_deferred_lazy = 1;
+
+void efi_fs_drivers_set_lazy(int enabled) {
+    g_deferred_lazy = enabled ? 1 : 0;
+}
+
 efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid) {
     CHAR16 nbuf[NORM_PATH_MAX];
     path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
@@ -326,9 +388,24 @@ efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid) {
     efi_file_t *file = efi_fopen_inner(path, uuid);
     if (file) return file;
 
-    if (!g_deferred_started && g_deferred_count > 0) {
-        efi_start_deferred_drivers();
-        return efi_fopen_inner(path, uuid);
+    if (g_deferred_lazy && !g_deferred_started && g_deferred_count > 0) {
+        efi_start_deferred_images();
+        file = efi_fopen_inner(path, uuid);
+        if (file) return file;
+
+        UINTN probed = 0;
+        while (efi_connect_next_block(uuid)) {
+            probed++;
+            file = efi_fopen_inner(path, uuid);
+            if (!file) continue;
+            CHAR16 m[96];
+            SPrint(m, sizeof(m),
+                   L"drivers: file found after probing %d block device(s)",
+                   (int)probed);
+            efi_log(m);
+            return file;
+        }
+        return NULL;
     }
 
     return NULL;
@@ -456,8 +533,7 @@ UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
     return size;
 }
 
-efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
-    efi_file_t *file = efi_fopen_uuid(path, uuid);
+static efi_file_buffer_t* efi_read_open_file(efi_file_t *file) {
     if (!file) return NULL;
 
     UINT64 size = efi_file_size(file->handle);
@@ -502,8 +578,35 @@ efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
     return buf;
 }
 
+efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
+    return efi_read_open_file(efi_fopen_uuid(path, uuid));
+}
+
 efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return efi_load_file_uuid(path, NULL);
+}
+
+
+
+
+efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
+    if (!volume) return NULL;
+    CHAR16 nbuf[NORM_PATH_MAX];
+    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
+
+    EFI_FILE_PROTOCOL *root = open_root_on_handle(volume);
+    if (!root) return NULL;
+
+    efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
+    if (!file) { root->Close(root); return NULL; }
+    file->root = root;
+    file->handle = NULL;
+    if (EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
+        root->Close(root);
+        efi_free_pool(file);
+        return NULL;
+    }
+    return efi_read_open_file(file);
 }
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
@@ -561,7 +664,15 @@ static int has_efi_suffix(CHAR16 *name) {
     return c[0] == '.' && c[1] == 'e' && c[2] == 'f' && c[3] == 'i';
 }
 
-void efi_start_deferred_drivers(void) {
+int efi_handle_has_filesystem(EFI_HANDLE handle) {
+    void *io = NULL;
+    return handle &&
+           !EFI_ERROR(BS->HandleProtocol(handle,
+                          &gEfiSimpleFileSystemProtocolGuid, &io)) && io;
+}
+
+
+void efi_start_deferred_images(void) {
     if (g_deferred_started) return;
     if (g_deferred_count == 0) { g_deferred_started = 1; return; }
 
@@ -575,23 +686,72 @@ void efi_start_deferred_drivers(void) {
         g_deferred_drivers[i] = NULL;
     }
     g_deferred_count = 0;
+    g_deferred_started = 1;
 
     CHAR16 msg[64];
-    SPrint(msg, sizeof(msg), L"drivers: started %d, connecting controllers", started);
+    SPrint(msg, sizeof(msg), L"drivers: started %d filesystem driver(s)", started);
     efi_log(msg);
+}
 
-    UINTN nh = 0;
-    EFI_HANDLE *handles = NULL;
 
-    if (!EFI_ERROR(BS->LocateHandleBuffer(ByProtocol, &gEfiBlockIoProtocolGuid,
-                                          NULL, &nh, &handles)) && handles) {
-        for (UINTN i = 0; i < nh; i++)
-            BS->ConnectController(handles[i], NULL, NULL, TRUE);
-        efi_free_pool(handles);
+
+
+static EFI_HANDLE *g_probe_blk;
+static UINTN       g_probe_n;
+static UINTN       g_probe_i;
+static int         g_probe_ready;
+
+static void probe_init(CHAR16 *prefer_uuid) {
+    if (g_probe_ready) return;
+    g_probe_ready = 1;
+    g_probe_n = 0;
+    g_probe_i = 0;
+    g_probe_blk = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &g_probe_n);
+    if (!g_probe_blk) { g_probe_n = 0; return; }
+
+    UINTN out = 0;
+    for (int pass = 0; pass < 3; pass++) {
+        for (UINTN i = out; i < g_probe_n; i++) {
+            EFI_BLOCK_IO *bio = NULL;
+            BS->HandleProtocol(g_probe_blk[i], &gEfiBlockIoProtocolGuid, (void**)&bio);
+            int logical = bio && bio->Media && bio->Media->LogicalPartition;
+            int match = (pass == 0) && prefer_uuid && prefer_uuid[0] &&
+                        efi_handle_matches_partition_uuid(g_probe_blk[i], prefer_uuid);
+            int want = (pass == 0) ? match : (pass == 1 ? logical : 1);
+            if (!want) continue;
+            EFI_HANDLE t = g_probe_blk[out];
+            g_probe_blk[out] = g_probe_blk[i];
+            g_probe_blk[i] = t;
+            out++;
+        }
     }
-    g_deferred_started = 1;
-    { CHAR16 m[64]; SPrint(m, sizeof(m),
-        L"drivers: deferred start complete (%d block device(s))", (int)nh);
+}
+
+int efi_fs_probe_exhausted(void) {
+    return g_probe_ready && g_probe_i >= g_probe_n;
+}
+
+int efi_connect_next_block(CHAR16 *prefer_uuid) {
+    probe_init(prefer_uuid);
+    while (g_probe_i < g_probe_n) {
+        EFI_HANDLE h = g_probe_blk[g_probe_i++];
+        if (efi_handle_has_filesystem(h)) continue;
+        BS->ConnectController(h, NULL, NULL, FALSE);
+        return 1;
+    }
+    return 0;
+}
+
+void efi_start_deferred_drivers(void) {
+    if (g_deferred_started && efi_fs_probe_exhausted()) return;
+    efi_start_deferred_images();
+
+    UINTN connected = 0;
+    while (efi_connect_next_block(NULL)) connected++;
+
+    { CHAR16 m[112]; SPrint(m, sizeof(m),
+        L"drivers: deferred start complete (probed %d of %d block device(s))",
+        (int)connected, (int)g_probe_n);
       efi_log(m); }
 }
 
@@ -663,10 +823,11 @@ void efi_print(CHAR16 *msg, ...) {
         ST->ConOut->OutputString(ST->ConOut, msg);
 }
 
-#define LOG_PATH     L"\\EFI\\visor\\boot.log"
-#define LOG_MARKER    "===== visor boot ====="
-#define LOG_MARKER_W L"=================== visor boot ==================="
-#define LOG_KEEP   3
+#define LOG_PATH      L"\\EFI\\visor\\boot.log"
+#define LOG_MARKER_W  L"=================== visor boot ==================="
+#define LOG_MARKER_A   "=================== visor boot ==================="
+#define LOG_KEEP      3
+#define LOG_MAX_BYTES (128 * 1024)
 
 static UINTN log_elapsed_cs(void) {
     static EFI_EVENT lt = NULL;
@@ -714,8 +875,13 @@ static EFI_FILE_PROTOCOL *log_file_open(void) {
     g_log_root = log_open_root();
     if (!g_log_root) return NULL;
     EFI_FILE_PROTOCOL *f = NULL;
-    if (EFI_ERROR(g_log_root->Open(g_log_root, &f, LOG_PATH,
-            EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) || !f) {
+    EFI_STATUS status = g_log_root->Open(
+        g_log_root, &f, LOG_PATH, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+    if (EFI_ERROR(status) || !f)
+        status = g_log_root->Open(
+            g_log_root, &f, LOG_PATH,
+            EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+    if (EFI_ERROR(status) || !f) {
         g_log_root->Close(g_log_root);
         g_log_root = NULL;
         return NULL;
@@ -766,44 +932,59 @@ void efi_log_close(void) {
     if (g_log_root) { g_log_root->Close(g_log_root); g_log_root = NULL; }
 }
 
+
+
 void efi_log_begin(void) {
-    int prev_file_log = visor_log_to_file;
+    efi_log(LOG_MARKER_W);
+}
+
+
+
+void efi_log_rotate(void) {
+    if (!visor_log_to_file) return;
+
     visor_log_to_file = 0;
     efi_file_buffer_t *buf = efi_load_file(LOG_PATH);
-    visor_log_to_file = prev_file_log;
-    UINT8  *keep = NULL;
-    UINTN   keep_len = 0;
-
-    if (buf && buf->data && buf->size > 0) {
-        UINT8 *d = (UINT8*)buf->data;
-        UINTN  sz = buf->size;
-        const char *m = LOG_MARKER;
-        UINTN mlen = 0; while (m[mlen]) mlen++;
-
-        UINTN offs[64]; UINTN nofs = 0;
-        for (UINTN i = 0; i + mlen <= sz && nofs < 64; i++) {
-            UINTN k = 0;
-            while (k < mlen && d[i + k] == (UINT8)m[k]) k++;
-            if (k == mlen) { offs[nofs++] = i; i += mlen - 1; }
-        }
-
-        if (nofs >= LOG_KEEP) {
-            keep = d + offs[nofs - (LOG_KEEP - 1)];
-            keep_len = sz - offs[nofs - (LOG_KEEP - 1)];
-        } else if (nofs > 0) {
-            keep = d + offs[0];
-            keep_len = sz - offs[0];
-        }
+    visor_log_to_file = 1;
+    if (!buf) return;
+    if (!buf->data || buf->size <= LOG_MAX_BYTES) {
+        if (buf->data) efi_free_pool(buf->data);
+        efi_free_pool(buf);
+        return;
     }
+
+    UINT8 *d  = (UINT8*)buf->data;
+    UINTN  sz = buf->size;
+    const char *m = LOG_MARKER_A;
+    UINTN mlen = 0; while (m[mlen]) mlen++;
+
+    UINT8 *keep = NULL;
+    UINTN  keep_len = 0;
+    UINTN  offs[64]; UINTN nofs = 0;
+
+    for (UINTN i = 0; i + mlen <= sz && nofs < 64; i++) {
+        UINTN k = 0;
+        while (k < mlen && d[i + k] == (UINT8)m[k]) k++;
+        if (k == mlen) { offs[nofs++] = i; i += mlen - 1; }
+    }
+
+    if (nofs >= LOG_KEEP) {
+        keep = d + offs[nofs - LOG_KEEP];
+        keep_len = sz - offs[nofs - LOG_KEEP];
+    } else if (nofs > 0) {
+        keep = d + offs[0];
+        keep_len = sz - offs[0];
+    }
+
+    efi_log_close();
 
     EFI_FILE_PROTOCOL *root = log_open_root();
     if (root) {
-
         EFI_FILE_PROTOCOL *f = NULL;
         if (!EFI_ERROR(root->Open(root, &f, LOG_PATH,
-                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f) {
+                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f)
             f->Delete(f);
-        }
+        f = NULL;
         if (!EFI_ERROR(root->Open(root, &f, LOG_PATH,
                 EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f) {
             if (keep && keep_len > 0) {
@@ -815,9 +996,10 @@ void efi_log_begin(void) {
         }
         root->Close(root);
     }
-    if (buf) { if (buf->data) efi_free_pool(buf->data); efi_free_pool(buf); }
 
-    efi_log(LOG_MARKER_W);
+    efi_free_pool(buf->data);
+    efi_free_pool(buf);
+    efi_log(L"log: rotated boot.log (size cap reached)");
 }
 
 void efi_sleep(UINTN milliseconds) {

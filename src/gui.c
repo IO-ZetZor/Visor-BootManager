@@ -526,6 +526,7 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->override_cmdline = NULL;
 
     state->mouse_enabled = 1;
+    state->pointer_speed = 4;
     state->spp = NULL;
     state->app = NULL;
     state->has_pointer = 0;
@@ -1641,9 +1642,32 @@ static int v_cycle_next(gui_state_t *state) {
     return 0;
 }
 
+static const CHAR16* v_panel_name(int panel) {
+    if (panel == 1) return L"deployments";
+    if (panel == 2) return L"snapshots";
+    return L"entry";
+}
+
+static void v_log_press(gui_state_t *state, boot_entry_t *entry) {
+    int panel = state->version_mode ? 1 : (state->snap_mode ? 2 : 0);
+    CHAR16 line[192];
+    SPrint(line, sizeof(line),
+           L"input: V pressed focus=%s selected=%d panel=%s deployments=%d snapshots=%d",
+           state->focus == FOCUS_ENTRIES ? L"entries" : L"power",
+           (int)state->selected, v_panel_name(panel),
+           entry ? (int)entry->deploy_count : 0,
+           entry ? (int)entry->snap_count : 0);
+    efi_log(line);
+    if (entry && entry->name) efi_log(entry->name);
+}
+
 static void v_cycle_engage(gui_state_t *state, int what) {
     boot_entry_t *se = entry_at(state, state->selected);
     int cur = state->version_mode ? 1 : (state->snap_mode ? 2 : 0);
+    CHAR16 line[96];
+    SPrint(line, sizeof(line), L"input: V panel %s -> %s",
+           v_panel_name(cur), v_panel_name(what));
+    efi_log(line);
     if (what == cur) return;
     int anim = gui_animation_on(state);
 
@@ -2413,7 +2437,8 @@ static void draw_editor_overlay(gui_state_t *state) {
     UINTN th = state->name_size ? state->name_size : 20;
     if (th < 18) th = 18;
     UINTN bw = W * 8 / 10, bx = (W - bw) / 2;
-    UINTN bh = th * 4, by = (H - bh) / 2;
+    UINTN bh = state->edit_hint ? th * 5 : th * 4;
+    UINTN by = (H - bh) / 2;
 
     if (state->blur)
         draw_frost(state, (INTN)bx, (INTN)by, (INTN)bw, (INTN)bh, 255);
@@ -2427,18 +2452,23 @@ static void draw_editor_overlay(gui_state_t *state) {
     draw_text_px_a(state, title, (INTN)bx + 20, (INTN)by + 12, state->underline_color, th * 3 / 4, 255);
 
     UINTN tx = bx + 20, ty = by + 12 + th;
+    int mask = state->edit_secret && !state->edit_reveal;
     CHAR16 secret_buf[512];
     CHAR16 *shown = state->edit_buf;
-    if (state->edit_secret) {
+    if (mask) {
         for (UINTN i = 0; i < state->edit_len && i < 511; i++) secret_buf[i] = '*';
         secret_buf[state->edit_len < 511 ? state->edit_len : 511] = 0;
         shown = secret_buf;
     }
     draw_text_px_a(state, shown, (INTN)tx, (INTN)ty, COLOR_WHITE, th, 255);
 
+    if (state->edit_hint)
+        draw_text_px_a(state, state->edit_hint, (INTN)tx, (INTN)(ty + th + th / 4),
+                       COLOR_WHITE, th * 5 / 8, 170);
+
     CHAR16 tmp[512];
     UINTN k = 0;
-    for (; k < state->edit_cursor && k < 511; k++) tmp[k] = state->edit_secret ? '*' : state->edit_buf[k];
+    for (; k < state->edit_cursor && k < 511; k++) tmp[k] = mask ? '*' : state->edit_buf[k];
     tmp[k] = 0;
     UINTN caret = tx + text_width_px(tmp, th);
     fill_rect_alpha(state, (INTN)caret, (INTN)ty, 2, (INTN)th,
@@ -2448,7 +2478,9 @@ static void draw_editor_overlay(gui_state_t *state) {
 static void editor_enter(gui_state_t *state) {
     boot_entry_t *e = entry_at(state, state->selected);
     state->edit_secret = 0;
+    state->edit_reveal = 0;
     state->edit_title = NULL;
+    state->edit_hint = NULL;
     state->edit_len = 0;
     if (e && e->cmdline)
         while (e->cmdline[state->edit_len] && state->edit_len < 511) {
@@ -2460,9 +2492,11 @@ static void editor_enter(gui_state_t *state) {
     state->editing = 1;
 }
 
-static void prompt_enter(gui_state_t *state, CHAR16 *title) {
+static void prompt_enter(gui_state_t *state, CHAR16 *title, CHAR16 *hint) {
     state->edit_secret = 1;
+    state->edit_reveal = 0;
     state->edit_title = title;
+    state->edit_hint = hint;
     state->edit_len = 0;
     state->edit_cursor = 0;
     state->edit_buf[0] = 0;
@@ -2496,6 +2530,8 @@ static int editor_key(gui_state_t *state, EFI_INPUT_KEY *key) {
     if (key->UnicodeChar == 0x00) {
         if (key->ScanCode == 0x04 && state->edit_cursor > 0) state->edit_cursor--;
         else if (key->ScanCode == 0x03 && state->edit_cursor < state->edit_len) state->edit_cursor++;
+        else if (key->ScanCode == 0x0C && state->edit_secret)
+            state->edit_reveal = !state->edit_reveal;
         return 0;
     }
     CHAR16 c = key->UnicodeChar;
@@ -2549,8 +2585,11 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
             if (st.LeftButton) btn = 1;
         }
         if (dx || dy) {
-            state->cursor_x += dx * 4;
-            state->cursor_y += dy * 4;
+            UINTN speed = state->pointer_speed;
+            if (speed < 1) speed = 1;
+            if (speed > 20) speed = 20;
+            state->cursor_x += dx * (INTN)speed;
+            state->cursor_y += dy * (INTN)speed;
             moved = 1;
         }
     }
@@ -2708,6 +2747,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 CHAR16 vu = key.UnicodeChar;
                 if (vu >= 'a' && vu <= 'z') vu -= 32;
                 if (vu == 'V') {
+                    v_log_press(state, se);
                     v_cycle_engage(state, v_cycle_next(state));
                     need_redraw = 1; full_redraw = 1;
                 } else if (key.UnicodeChar == 0x0D) {
@@ -2756,11 +2796,17 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
             if (uc == 'V') {
                 boot_entry_t *se = entry_at(state, state->selected);
+                v_log_press(state, se);
                 if (state->focus == FOCUS_ENTRIES && se &&
                     (se->deploy_count > 1 || se->snap_count > 0)) {
                     v_cycle_engage(state, v_cycle_next(state));
                     need_redraw = 1; full_redraw = 1;
-                }
+                } else if (state->focus != FOCUS_ENTRIES)
+                    efi_log(L"input: V ignored because power actions have focus");
+                else if (!se)
+                    efi_log(L"input: V ignored because no boot entry is selected");
+                else
+                    efi_log(L"input: V ignored because the entry has no alternate deployments or snapshots");
             }
             else if (uc == 'E') {
                 if (state->focus == FOCUS_ENTRIES && state->editor_enabled && state->entry_count > 0) {
@@ -2771,6 +2817,11 @@ boot_entry_t* gui_run(gui_state_t *state) {
             else if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
             else if (uc == 'R') { state->action = VISOR_ACTION_REBOOT; state->running = 0; }
             else if (uc == 'F') { state->action = VISOR_ACTION_FIRMWARE; state->running = 0; }
+            else if (key.UnicodeChar == 0x1B) {
+                efi_log(L"input: Esc pressed at the menu - opening options/rescue console");
+                state->action = VISOR_ACTION_RESCUE;
+                state->running = 0;
+            }
             else if (key.UnicodeChar == 0x0D) {
 
                 if (state->focus == FOCUS_POWER)
@@ -2832,6 +2883,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
                         need_redraw = 1;
                         break;
                     case 0x17:
+                        efi_log(L"input: Esc pressed at the menu - opening options/rescue console");
+                        state->action = VISOR_ACTION_RESCUE;
                         state->running = 0;
                         break;
                 }
@@ -2937,7 +2990,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
     return selected;
 }
 
-EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out) {
+EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 *hint,
+                               CHAR16 **out) {
     EFI_STATUS status;
     EFI_INPUT_KEY key;
     int running = 1;
@@ -2946,7 +3000,8 @@ EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out) 
     if (!state || !out) return EFI_INVALID_PARAMETER;
     *out = NULL;
 
-    prompt_enter(state, title ? title : L"Password   (Enter = boot, Esc = cancel)");
+    prompt_enter(state, title ? title : L"Password   (Enter = boot, Esc = cancel)",
+                 hint ? hint : L"F2 shows what you typed - use it to check your keyboard layout");
 
     while (running) {
         gui_draw_menu(state, 0);
@@ -2965,7 +3020,9 @@ EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 **out) 
     }
 
     state->edit_secret = 0;
+    state->edit_reveal = 0;
     state->edit_title = NULL;
+    state->edit_hint = NULL;
     state->editing = 0;
 
     if (!accepted) {
