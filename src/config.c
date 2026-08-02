@@ -1022,6 +1022,8 @@ static int scan_vendor_loaders(config_t *config, EFI_FILE_PROTOCOL *root) {
     return added;
 }
 
+static int scope_wants_volume(int quick, EFI_HANDLE vol);
+
 #define MAX_BLS 48
 
 typedef struct {
@@ -1172,7 +1174,7 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
     d->Close(d);
 }
 
-static int bls_detect(config_t *config) {
+static int bls_detect(config_t *config, int quick) {
     bls_rec_t recs[MAX_BLS];
     int nrec = 0;
 
@@ -1180,6 +1182,7 @@ static int bls_detect(config_t *config) {
     EFI_HANDLE *vols = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nvol);
     if (vols) {
         for (UINTN v = 0; v < nvol && nrec < MAX_BLS; v++) {
+            if (!scope_wants_volume(quick, vols[v])) continue;
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
             bls_scan(root, vols[v], L"\\loader\\entries", recs, &nrec);
@@ -1324,6 +1327,112 @@ static void tag_entries_since(config_t *config, UINTN first,
     if (uuid) efi_free_pool(uuid);
 }
 
+static const EFI_GUID scope_type_esp =
+    { 0xc12a7328, 0xf81f, 0x11d2, { 0xba,0x4b,0x00,0xa0,0xc9,0x3e,0xc9,0x3b } };
+static const EFI_GUID scope_type_xbootldr =
+    { 0xbc13c2ff, 0x59e6, 0x4262, { 0xa3,0x52,0xb2,0x75,0xfd,0x6f,0x71,0x72 } };
+
+#define SCOPE_MAX_PARTS 64
+static UINT8 scope_parts[SCOPE_MAX_PARTS][16];
+static UINTN scope_part_n;
+static int   scope_gpt_read;
+
+static void scope_read_gpt(void) {
+    if (scope_gpt_read) return;
+    scope_gpt_read = 1;
+
+    UINTN nh = 0;
+    EFI_HANDLE *hs = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nh);
+    if (!hs) return;
+
+    for (UINTN h = 0; h < nh && scope_part_n < SCOPE_MAX_PARTS; h++) {
+        EFI_BLOCK_IO *bio = NULL;
+        if (EFI_ERROR(BS->HandleProtocol(hs[h], &gEfiBlockIoProtocolGuid,
+                                         (void**)&bio)) || !bio || !bio->Media)
+            continue;
+        if (bio->Media->LogicalPartition || !bio->Media->MediaPresent) continue;
+        UINT32 bs = bio->Media->BlockSize;
+        if (bs < 512 || bs > 4096) continue;
+        UINTN align = bio->Media->IoAlign > 1 ? bio->Media->IoAlign : 1;
+
+        UINT8 *raw = efi_allocate_pool(bs + align);
+        if (!raw) continue;
+        UINT8 *hdr = raw + ((align - ((UINTN)raw & (align - 1))) & (align - 1));
+        if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, 1, bs, hdr)) ||
+            CompareMem(hdr, (void*)"EFI PART", 8) != 0) {
+            efi_free_pool(raw);
+            continue;
+        }
+        UINT64 elba;
+        UINT32 num, esz;
+        CopyMem(&elba, hdr + 72, sizeof(elba));
+        CopyMem(&num,  hdr + 80, sizeof(num));
+        CopyMem(&esz,  hdr + 84, sizeof(esz));
+        efi_free_pool(raw);
+        if (esz < 128 || esz > 4096 || !num) continue;
+        if (num > 128) num = 128;
+        UINTN rdsz = (((UINTN)num * esz + bs - 1) / bs) * bs;
+
+        raw = efi_allocate_pool(rdsz + align);
+        if (!raw) continue;
+        UINT8 *ents = raw + ((align - ((UINTN)raw & (align - 1))) & (align - 1));
+        if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, elba, rdsz, ents))) {
+            efi_free_pool(raw);
+            continue;
+        }
+        for (UINT32 i = 0; i < num && scope_part_n < SCOPE_MAX_PARTS; i++) {
+            UINT8 *e = ents + (UINTN)i * esz;
+            if (CompareMem(e, &scope_type_esp, 16) != 0 &&
+                CompareMem(e, &scope_type_xbootldr, 16) != 0)
+                continue;
+            CopyMem(scope_parts[scope_part_n++], e + 16, 16);
+        }
+        efi_free_pool(raw);
+    }
+    efi_free_pool(hs);
+
+    { CHAR16 d[64]; SPrint(d, sizeof(d), L"config: %d boot partition(s) in GPT",
+                           (int)scope_part_n); efi_log(d); }
+}
+
+static int scope_part_guid(EFI_HANDLE h, UINT8 out[16]) {
+    EFI_DEVICE_PATH *dp = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(h, &gEfiDevicePathProtocolGuid, (void**)&dp)) || !dp)
+        return 0;
+    for (EFI_DEVICE_PATH *n = dp; !IsDevicePathEnd(n);
+         n = (EFI_DEVICE_PATH*)((UINT8*)n + DevicePathNodeLength(n))) {
+        if (DevicePathType(n) != MEDIA_DEVICE_PATH ||
+            DevicePathSubType(n) != MEDIA_HARDDRIVE_DP)
+            continue;
+        HARDDRIVE_DEVICE_PATH *hd = (HARDDRIVE_DEVICE_PATH*)n;
+        if (hd->SignatureType != SIGNATURE_TYPE_GUID) continue;
+        CopyMem(out, hd->Signature, 16);
+        return 1;
+    }
+    return 0;
+}
+
+static int scope_wants_volume(int quick, EFI_HANDLE vol) {
+    if (!quick) return 1;
+    if (vol == efi_boot_volume_handle()) return 1;
+
+    scope_read_gpt();
+
+    UINT8 g[16];
+    if (scope_part_n && scope_part_guid(vol, g)) {
+        for (UINTN i = 0; i < scope_part_n; i++)
+            if (CompareMem(scope_parts[i], g, 16) == 0) return 1;
+        return 0;
+    }
+
+    EFI_FILE_PROTOCOL *root = root_from_handle(vol);
+    if (!root) return 0;
+    int ok = efi_file_exists_root(root, L"\\EFI") ||
+             efi_file_exists_root(root, L"\\loader\\entries");
+    root->Close(root);
+    return ok;
+}
+
 static EFI_HANDLE dc_scanned_vols[64];
 static UINTN      dc_scanned_n;
 
@@ -1334,7 +1443,7 @@ static void dc_mark_scanned(EFI_HANDLE vol) {
     if (dc_scanned_n < 64) dc_scanned_vols[dc_scanned_n++] = vol;
 }
 
-static int detect_scan_volumes(config_t *config, int bls) {
+static int detect_scan_volumes(config_t *config, int bls, int quick) {
     static CHAR16 *windows_paths[] = {
         L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
         L"\\EFI\\BOOT\\bootmgfw.efi",
@@ -1354,6 +1463,7 @@ static int detect_scan_volumes(config_t *config, int bls) {
     int uki_found = 0;
 
     for (UINTN v = 0; v < nvol; v++) {
+        if (!scope_wants_volume(quick, vols[v])) continue;
         EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
         if (!root) continue;
 
@@ -1391,6 +1501,7 @@ static int detect_scan_volumes(config_t *config, int bls) {
     int raw_found = 0;
     if (!bls) {
         for (UINTN v = 0; v < nvol; v++) {
+            if (!scope_wants_volume(quick, vols[v])) continue;
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
             UINTN volume_start = config->entry_count;
@@ -1404,6 +1515,7 @@ static int detect_scan_volumes(config_t *config, int bls) {
     }
     if (!uki_found && !bls && !raw_found) {
         for (UINTN v = 0; v < nvol; v++) {
+            if (!scope_wants_volume(quick, vols[v])) continue;
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
             UINTN volume_start = config->entry_count;
@@ -1426,8 +1538,17 @@ static EFI_STATUS detect_entries(config_t *config) {
         efi_start_deferred_drivers();
     }
 
-    int bls = bls_detect(config);
-    int found = detect_scan_volumes(config, bls);
+    int quick = (config->scan_mode == SCAN_MODE_QUICK);
+    if (quick) efi_log(L"config: quick scan - ESP and /boot partitions only");
+
+    int bls = bls_detect(config, quick);
+    int found = detect_scan_volumes(config, bls, quick);
+
+    if (quick && !found && !bls) {
+        efi_log(L"config: quick scan found nothing - widening to a deep scan");
+        bls = bls_detect(config, 0);
+        found = detect_scan_volumes(config, bls, 0);
+    }
 
     if (!found && !bls) return EFI_NOT_FOUND;
     return EFI_SUCCESS;
@@ -1895,6 +2016,22 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     } else if (efi_strcmp(key, L"scan_existing") == 0 ||
                efi_strcmp(key, L"hotplug_scan_existing") == 0) {
         config->scan_existing = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"scan") == 0 ||
+               efi_strcmp(key, L"scan_mode") == 0) {
+        if (efi_strcmp(value, L"deep") == 0 || efi_strcmp(value, L"deepscan") == 0 ||
+            efi_strcmp(value, L"full") == 0)
+            config->scan_mode = SCAN_MODE_DEEP;
+        else if (efi_strcmp(value, L"quick") == 0 || efi_strcmp(value, L"quickscan") == 0 ||
+                 efi_strcmp(value, L"fast") == 0)
+            config->scan_mode = SCAN_MODE_QUICK;
+        else
+            efi_log(L"WARN: invalid scan mode (deep/quick)");
+    } else if (efi_strcmp(key, L"deep_scan") == 0 || efi_strcmp(key, L"deepscan") == 0) {
+        config->scan_mode = (*value == '1' || *value == 't' || *value == 'y')
+                            ? SCAN_MODE_DEEP : SCAN_MODE_QUICK;
+    } else if (efi_strcmp(key, L"quick_scan") == 0 || efi_strcmp(key, L"quickscan") == 0) {
+        config->scan_mode = (*value == '1' || *value == 't' || *value == 'y')
+                            ? SCAN_MODE_QUICK : SCAN_MODE_DEEP;
     } else if (efi_strcmp(key, L"log") == 0 ||
                efi_strcmp(key, L"boot_log") == 0 ||
                efi_strcmp(key, L"file_log") == 0) {
@@ -2870,6 +3007,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->pointer_speed = 4;
     config->file_log = 1;
     config->scan_existing = -1;
+    config->scan_mode = SCAN_MODE_DEEP;
     config->entries_from_config = 0;
     config->editor = 1;
     config->theme = NULL;

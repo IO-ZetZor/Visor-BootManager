@@ -9,6 +9,11 @@
 #define CONFIG_DIR  L"\\EFI\\visor"
 #define CONFIG_FILE L"\\EFI\\visor\\boot.conf"
 
+/* Auto-detection scope.  Deep walks every filesystem the firmware exposes;
+ * quick looks only at the ESPs and XBOOTLDR (/boot) partitions. */
+#define SCAN_MODE_DEEP  0
+#define SCAN_MODE_QUICK 1
+
 typedef struct {
     INTN  timeout;
     UINTN default_entry;
@@ -82,8 +87,9 @@ typedef struct {
     int     fade_speed;
     UINTN   entries_per_page;
     int     hotplug;
-    int     scan_existing;       
-    int     entries_from_config; 
+    int     scan_existing;
+    int     scan_mode;
+    int     entries_from_config;
     boot_entry_t *entries;
     boot_entry_t *tail;
     UINTN entry_count;
