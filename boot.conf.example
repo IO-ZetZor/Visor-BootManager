@@ -113,6 +113,18 @@ quiet=0
 # Entries are pinned to the volume they were found on. 1 = on (default), 0 = off.
 #hotplug=1
 
+# How hard Visor looks for entries when boot.conf lists none and it has to
+# auto-detect them.
+#   deep  -> open every filesystem the firmware exposes (default). Finds
+#            kernels that live in /boot on a root filesystem, at the cost of a
+#            few seconds on machines with several disks.
+#   quick -> look only at the volume Visor booted from, the EFI system
+#            partitions and any XBOOTLDR (separate /boot) partition. Much
+#            faster. If a quick scan turns up nothing at all, Visor falls back
+#            to a deep scan rather than showing an empty menu.
+# Aliases: scan_mode; also quick_scan=1 / deep_scan=0.
+#scan=deep
+
 # Also sweep media that was ALREADY plugged in when Visor started. Scanning
 # volumes costs time (and, with a filesystem driver installed, a probe of every
 # partition), so by default this happens only when Visor auto-detected the
