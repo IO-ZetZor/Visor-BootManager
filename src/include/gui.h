@@ -17,6 +17,18 @@ typedef struct {
     UINT8 r, g, b;
 } color_t;
 
+#define SPEC_UNSET  0
+#define SPEC_OFF    1
+#define SPEC_ON     2
+#define SPEC_ROLE   3
+#define SPEC_COLOR  4
+
+typedef struct {
+    int     mode;
+    int     role;
+    color_t color;
+} accent_spec_t;
+
 #define COLOR_BLACK     ((color_t){0x00, 0x00, 0x00})
 #define COLOR_WHITE     ((color_t){0xFF, 0xFF, 0xFF})
 #define COLOR_GRAY      ((color_t){0x80, 0x80, 0x80})
@@ -94,6 +106,7 @@ typedef struct boot_entry {
     UINTN   icon_size;
     color_t color;
     int     has_color;
+    int     color_role;
     UINT8   sha256[32];
     int     has_sha256;
     int     encrypted;
@@ -234,6 +247,16 @@ typedef struct {
     color_t accent_secondary;
     color_t accent_tertiary;
     int     accent_valid;
+
+    accent_spec_t sp_logo, sp_underline, sp_highlight;
+    accent_spec_t sp_title, sp_name, sp_info;
+    accent_spec_t sp_shutdown, sp_reboot, sp_firmware;
+    accent_spec_t sp_os_icons, sp_blur, sp_bg;
+    accent_spec_t sp_g_text, sp_g_icons, sp_g_underline, sp_all;
+
+    color_t logo_tint;      int logo_tint_on;
+    color_t os_icon_tint;   int os_icon_tint_on;
+    int     pwr_tint_on[3];
 
     icon_t *background;
     CHAR16 *background_path;
