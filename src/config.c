@@ -1,6 +1,7 @@
 #include "config.h"
 #include "efi_helpers.h"
 #include "accent.h"
+#include "arch.h"
 #include "path_compat.h"
 #include <efi.h>
 #include <efilib.h>
@@ -35,7 +36,7 @@ static void strip_inline_comment(CHAR16 *s) {
             in_quote = !in_quote;
             continue;
         }
-        if (!in_quote && s[i] == '#' && i != first && (i == 0 || is_space16(s[i - 1]))) {
+        if (!in_quote && s[i] == '#' && (i == 0 || is_space16(s[i - 1]))) {
             s[i] = '\0';
             return;
         }
@@ -100,6 +101,42 @@ static int parse_color(CHAR16 *s, color_t *out) {
     return 1;
 }
 
+static int parse_spec(CHAR16 *value, accent_spec_t *sp) {
+    if (!value || !value[0]) return 0;
+
+    color_t c;
+    if (parse_color(value, &c)) {
+        sp->mode = SPEC_COLOR;
+        sp->color = c;
+        return 1;
+    }
+    int role = accent_role_from_str(value);
+    if (role >= 0) {
+        sp->mode = SPEC_ROLE;
+        sp->role = role;
+        return 1;
+    }
+    if (efi_strcmp(value, L"on") == 0 ||
+        *value == '1' || *value == 't' || *value == 'y' ||
+        *value == 'T' || *value == 'Y') {
+        sp->mode = SPEC_ON;
+        return 1;
+    }
+    if (efi_strcmp(value, L"off") == 0 ||
+        *value == '0' || *value == 'f' || *value == 'n' ||
+        *value == 'F' || *value == 'N') {
+        sp->mode = SPEC_OFF;
+        return 1;
+    }
+    return 0;
+}
+
+static int parse_spec_color(CHAR16 *value, accent_spec_t *sp, color_t *fallback) {
+    if (!parse_spec(value, sp)) return 0;
+    if (sp->mode == SPEC_COLOR && fallback) *fallback = sp->color;
+    return 1;
+}
+
 static void wipe16(CHAR16 *s) {
     if (!s) return;
     volatile CHAR16 *p = (volatile CHAR16*)s;
@@ -112,6 +149,11 @@ static void free_char16(CHAR16 **p) {
     *p = NULL;
 }
 
+static void set_char16(CHAR16 **slot, CHAR16 *val) {
+    if (*slot) efi_free_pool(*slot);
+    *slot = val;
+}
+
 static void free_deployments(deployment_t *deps, UINTN count) {
     if (!deps) return;
     for (UINTN i = 0; i < count; i++) {
@@ -122,6 +164,43 @@ static void free_deployments(deployment_t *deps, UINTN count) {
         if (deps[i].bls_path) efi_free_pool(deps[i].bls_path);
     }
     efi_free_pool(deps);
+}
+
+static void free_snapshots(snapshot_t *snaps, UINTN count);
+
+static void free_entry_contents(boot_entry_t *e) {
+    if (!e) return;
+    if (e->name)      efi_free_pool(e->name);
+    if (e->icon_path) efi_free_pool(e->icon_path);
+
+    if (e->deployments) {
+        int cmdline_aliased = 0;
+        for (UINTN i = 0; i < e->deploy_count; i++)
+            if (e->cmdline == e->deployments[i].cmdline) cmdline_aliased = 1;
+        if (!cmdline_aliased && e->cmdline) efi_free_pool(e->cmdline);
+        free_deployments(e->deployments, e->deploy_count);
+    } else {
+        if (e->kernel_path) efi_free_pool(e->kernel_path);
+        if (e->initrd_path) efi_free_pool(e->initrd_path);
+        if (e->cmdline)     efi_free_pool(e->cmdline);
+    }
+
+    if (e->uuid)          efi_free_pool(e->uuid);
+    if (e->snapshots)     free_snapshots(e->snapshots, e->snap_count);
+    if (e->luks_key_path) efi_free_pool(e->luks_key_path);
+    if (e->luks_cmdline)  efi_free_pool(e->luks_cmdline);
+    if (e->luks_preset)   efi_free_pool(e->luks_preset);
+    if (e->decrypt_password) {
+        wipe16(e->decrypt_password);
+        efi_free_pool(e->decrypt_password);
+        e->decrypt_password = NULL;
+    }
+    if (e->icon) {
+        if (e->icon->scaled) efi_free_pool(e->icon->scaled);
+        if (e->icon->pixels) efi_free_pool(e->icon->pixels);
+        efi_free_pool(e->icon);
+        e->icon = NULL;
+    }
 }
 
 static void free_snapshots(snapshot_t *snaps, UINTN count) {
@@ -226,7 +305,7 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
     CHAR16 *cmdline = NULL;
     CHAR16 *uuid = NULL;
     int type = win_hint ? 1 : 0;
-    color_t color; int has_color = 0;
+    color_t color; int has_color = 0; int color_role = -1;
     UINT8 sha256_buf[32]; int has_sha256 = 0;
     UINTN entry_icon_size = 0;
     int encrypted = 0, kernel_encrypted_set = 0, initrd_encrypted_set = 0;
@@ -238,11 +317,22 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
     CHAR16 *luks_cmdline = NULL;
     CHAR16 *luks_preset = NULL;
 
+    int braced = 0;
+    for (CHAR16 *h = lines[*idx]; *h; h++)
+        if (*h == '{') { braced = 1; break; }
+
     while (*idx < count) {
         CHAR16 *line = trim(lines[*idx]);
 
-        if (line[0] == '}' || line[0] == '\0') {
-            break;
+        if (line[0] == '}') break;
+        if (line[0] == '\0') {
+            if (!braced) break;
+            (*idx)++;
+            continue;
+        }
+        if (line[0] == '#') {
+            (*idx)++;
+            continue;
         }
 
         CHAR16 *eq = efi_strchr(line, '=');
@@ -253,20 +343,27 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
             CHAR16 *value = trim(eq + 1);
 
             if (efi_strcmp(key, L"name") == 0) {
-                name = efi_strdup(value);
+                set_char16(&name, efi_strdup(value));
             } else if (efi_strcmp(key, L"icon") == 0) {
-                icon_path = dup_path(value);
+                set_char16(&icon_path, dup_path(value));
             } else if (efi_strcmp(key, L"kernel") == 0) {
-                kernel_path = dup_path(value);
+                set_char16(&kernel_path, dup_path(value));
             } else if (efi_strcmp(key, L"initrd") == 0) {
-                initrd_path = dup_path(value);
+                set_char16(&initrd_path, dup_path(value));
             } else if (efi_strcmp(key, L"cmdline") == 0 || efi_strcmp(key, L"options") == 0) {
-                cmdline = efi_strdup(value);
+                set_char16(&cmdline, efi_strdup(value));
             } else if (efi_strcmp(key, L"uuid") == 0) {
-                uuid = efi_strdup(value);
+                set_char16(&uuid, efi_strdup(value));
             } else if (efi_strcmp(key, L"color") == 0) {
-                has_color = parse_color(value, &color);
-                if (!has_color) efi_log(L"WARN: invalid entry color= (use #RRGGBB)");
+                int role = accent_role_from_str(value);
+                if (role >= 0) {
+                    color_role = role;
+                    has_color = 0;
+                } else {
+                    has_color = parse_color(value, &color);
+                    if (has_color) color_role = -1;
+                    else efi_log(L"WARN: invalid entry color= (an accent role or #RRGGBB)");
+                }
             } else if (efi_strcmp(key, L"sha256") == 0) {
                 has_sha256 = parse_sha256(value, sha256_buf);
                 if (!has_sha256) efi_log(L"WARN: invalid sha256= (expect 64 hex chars)");
@@ -290,14 +387,14 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
                        efi_strcmp(key, L"luks_show_prompt") == 0) {
                 luks_verbose = (*value == '1' || *value == 't' || *value == 'y');
             } else if (efi_strcmp(key, L"luks_key_path") == 0) {
-                luks_key_path = efi_strdup(value);
+                set_char16(&luks_key_path, efi_strdup(value));
             } else if (efi_strcmp(key, L"luks_cmdline") == 0 ||
                        efi_strcmp(key, L"luks_options") == 0 ||
                        efi_strcmp(key, L"luks_options_append") == 0) {
-                luks_cmdline = efi_strdup(value);
+                set_char16(&luks_cmdline, efi_strdup(value));
             } else if (efi_strcmp(key, L"luks_preset") == 0 ||
                        efi_strcmp(key, L"luks_initramfs") == 0) {
-                luks_preset = efi_strdup(value);
+                set_char16(&luks_preset, efi_strdup(value));
             }
         }
         (*idx)++;
@@ -327,6 +424,7 @@ static EFI_STATUS parse_entry(config_t *config, CHAR16 **lines, UINTN *idx,
             luks_preset = NULL;
         }
         if (e && has_color) { e->color = color; e->has_color = 1; }
+        if (e && color_role >= 0) e->color_role = color_role;
         if (e) e->icon_size = entry_icon_size;
         if (e && has_sha256) {
             for (int i = 0; i < 32; i++) e->sha256[i] = sha256_buf[i];
@@ -901,6 +999,53 @@ static CHAR16* dc_derive_cmdline(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume,
     return cmd;
 }
 
+struct hp_kdir {
+    EFI_FILE_PROTOCOL *root;
+    EFI_HANDLE volume;
+    CHAR16 *dir;
+    int global_cmdline;
+    EFI_FILE_PROTOCOL *d;
+    CHAR16 *auto_cmd;
+    int auto_tried;
+};
+
+static int add_kernel_entry(config_t *config, EFI_FILE_PROTOCOL *root,
+                            EFI_HANDLE volume, CHAR16 *dir, CHAR16 *name,
+                            int global_cmdline, CHAR16 **auto_cmd,
+                            int *auto_tried) {
+    CHAR16 path[MAX_PATH];
+    SPrint(path, sizeof(path), L"%s\\%s", dir_prefix(dir), name);
+    CHAR16 *initrd = find_initrd(root, dir, name);
+
+    efi_log(L"config: auto-detected raw kernel");
+    efi_log(path);
+    if (initrd) efi_log(initrd);
+
+    CHAR16 *entry_cmd = dc_from_loader_entries(root, name);
+    if (!entry_cmd) {
+        if (!*auto_tried) {
+            *auto_tried = 1;
+            *auto_cmd = dc_derive_cmdline(root, volume, NULL, global_cmdline);
+        }
+        entry_cmd = *auto_cmd ? efi_strdup(*auto_cmd) : NULL;
+    }
+
+    CHAR16 *entry_name = efi_strdup(name);
+    CHAR16 *entry_icon = distro_icon(name);
+    CHAR16 *entry_path = efi_strdup(path);
+    if (entry_name && entry_path &&
+        config_add_entry(config, entry_name, entry_icon,
+                         entry_path, initrd, entry_cmd, NULL, 0, 0, 0))
+        return 1;
+
+    free_char16(&entry_name);
+    free_char16(&entry_icon);
+    free_char16(&entry_path);
+    free_char16(&initrd);
+    free_char16(&entry_cmd);
+    return 0;
+}
+
 static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root,
                            EFI_HANDLE volume, CHAR16 *dir, int global_cmdline) {
     EFI_FILE_PROTOCOL *d = efi_open_dir(root, dir);
@@ -914,47 +1059,50 @@ static int scan_kernel_dir(config_t *config, EFI_FILE_PROTOCOL *root,
     while (efi_read_dirent(d, name, 128, &is_dir)) {
         if (is_dir) continue;
         if (!is_kernel_name(name)) continue;
-
-        CHAR16 path[MAX_PATH];
-        SPrint(path, sizeof(path), L"%s\\%s", dir_prefix(dir), name);
-        CHAR16 *initrd = find_initrd(root, dir, name);
-
-        efi_log(L"config: auto-detected raw kernel");
-        efi_log(path);
-        if (initrd) efi_log(initrd);
-
-        CHAR16 *entry_cmd = dc_from_loader_entries(root, name);
-        if (!entry_cmd) {
-            if (!auto_tried) {
-                auto_tried = 1;
-                auto_cmd = dc_derive_cmdline(root, volume, NULL, global_cmdline);
-            }
-            entry_cmd = auto_cmd ? efi_strdup(auto_cmd) : NULL;
-        }
-
-        CHAR16 *entry_name = efi_strdup(name);
-        CHAR16 *entry_icon = distro_icon(name);
-        CHAR16 *entry_path = efi_strdup(path);
-        if (!entry_name || !entry_path) {
-            free_char16(&entry_name);
-            free_char16(&entry_icon);
-            free_char16(&entry_path);
-            free_char16(&initrd);
-            free_char16(&entry_cmd);
-        } else if (config_add_entry(config, entry_name, entry_icon,
-                             entry_path, initrd, entry_cmd, NULL, 0, 0, 0)) {
-            added++;
-        } else {
-            free_char16(&entry_name);
-            free_char16(&entry_icon);
-            free_char16(&entry_path);
-            free_char16(&initrd);
-            free_char16(&entry_cmd);
-        }
+        added += add_kernel_entry(config, root, volume, dir, name,
+                                  global_cmdline, &auto_cmd, &auto_tried);
     }
     if (auto_cmd) efi_free_pool(auto_cmd);
     d->Close(d);
     return added;
+}
+
+static void hp_kdir_begin(EFI_FILE_PROTOCOL *root, CHAR16 *dir,
+                          EFI_HANDLE volume, int global_cmdline,
+                          struct hp_kdir *w) {
+    w->root = root;
+    w->volume = volume;
+    w->dir = dir;
+    w->global_cmdline = global_cmdline;
+    w->d = efi_open_dir(root, dir);
+    w->auto_cmd = NULL;
+    w->auto_tried = 0;
+}
+
+#define HP_DIRENT_SLICE_US 20000ULL
+
+static int hp_kdir_next(config_t *config, struct hp_kdir *w, CHAR16 **out) {
+    *out = NULL;
+    if (!w->d) return 0;
+    CHAR16 name[128];
+    int is_dir;
+    UINT64 t0 = arch_now_us();
+    for (;;) {
+        if (efi_key_pending() || arch_now_us() - t0 >= HP_DIRENT_SLICE_US)
+            return 1;
+        if (!efi_read_dirent(w->d, name, 128, &is_dir)) break;
+        if (is_dir) continue;
+        if (!is_kernel_name(name)) continue;
+        if (add_kernel_entry(config, w->root, w->volume, w->dir, name,
+                             w->global_cmdline, &w->auto_cmd, &w->auto_tried))
+            *out = efi_strdup(name);
+        return 1;
+    }
+    w->d->Close(w->d);
+    w->d = NULL;
+    if (w->auto_cmd) efi_free_pool(w->auto_cmd);
+    w->auto_cmd = NULL;
+    return 0;
 }
 
 static EFI_FILE_PROTOCOL *root_from_handle(EFI_HANDLE h) {
@@ -1529,9 +1677,12 @@ static int detect_scan_volumes(config_t *config, int bls, int quick) {
     return (int)(config->entry_count - start_count);
 }
 
+static int show_names_set;
+static int center_info_set;
+
 static EFI_STATUS detect_entries(config_t *config) {
-    config->show_names = 0;
-    config->center_info = 1;
+    if (!show_names_set)  config->show_names = 0;
+    if (!center_info_set) config->center_info = 1;
 
     if (efi_fs_drivers_pending()) {
         efi_log(L"config: starting FS drivers before auto-detection");
@@ -1556,8 +1707,13 @@ static EFI_STATUS detect_entries(config_t *config) {
 
 static EFI_HANDLE *hp_fs_known;  static UINTN hp_fs_n;
 static int hp_pending_probe;
+static UINTN hp_probe_cursor;
+static int hp_probe_round;
 static EFI_HANDLE *hp_blk_known; static UINTN hp_blk_n;
-static int hp_scan_volume(config_t *config, EFI_HANDLE vol);
+
+#define HP_TRIED_MAX 64
+static EFI_HANDLE hp_blk_tried[HP_TRIED_MAX];
+static UINTN      hp_blk_tried_n;
 
 static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
     for (UINTN i = 0; i < n; i++)
@@ -1598,7 +1754,7 @@ void config_hotplug_arm(config_t *config) {
     EFI_HANDLE *fs = efi_locate_handle_buffer(
         &gEfiSimpleFileSystemProtocolGuid, &nf);
 
-    
+
 
 
 
@@ -1613,13 +1769,18 @@ void config_hotplug_arm(config_t *config) {
         }
     }
 
-    
 
 
 
 
-    int sweep = (config->scan_existing >= 0) ? config->scan_existing
-                                             : !config->entries_from_config;
+
+    int sweep;
+    if (config->scan_existing >= 0)
+        sweep = config->scan_existing;
+    else if (config->scan_mode == SCAN_MODE_QUICK)
+        sweep = 0;
+    else
+        sweep = !config->entries_from_config;
     if (!sweep && fs && hp_fs_known) {
         efi_free_pool(hp_fs_known);
         hp_fs_known = fs;
@@ -1627,13 +1788,19 @@ void config_hotplug_arm(config_t *config) {
         fs = NULL;
     }
     if (fs) efi_free_pool(fs);
-    hp_pending_probe = sweep;
+
+    hp_pending_probe = sweep && !efi_fs_probe_exhausted();
+    hp_probe_cursor = 0;
+    hp_probe_round = 0;
 
     { CHAR16 d[128];
       SPrint(d, sizeof(d),
              L"hotplug: armed, %d of %d volume(s) known, existing-media sweep %s",
              (int)hp_fs_n, (int)nf, sweep ? L"on" : L"off");
-      efi_log(d); }
+      efi_log(d);
+      if (sweep && !hp_pending_probe)
+          efi_log(L"hotplug: block devices already probed at startup - "
+                  L"skipping the re-probe"); }
 }
 
 static EFI_GUID hp_fs_info_guid = { 0x09576e93, 0x6d3f, 0x11d2,
@@ -1652,8 +1819,155 @@ static CHAR16* hp_volume_label(EFI_FILE_PROTOCOL *root) {
     return efi_strdup(info->VolumeLabel);
 }
 
-static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
+enum {
+    HP_STAGE_WINDOWS = 0,
+    HP_STAGE_UKI,
+    HP_STAGE_BOOT,
+    HP_STAGE_BTRFS_BOOT,
+    HP_STAGE_ROOT,
+    HP_STAGE_VENDOR,
+    HP_STAGE_FALLBACK,
+    HP_STAGE_DONE
+};
 
+static EFI_HANDLE hp_cur_vol;
+static EFI_FILE_PROTOCOL *hp_cur_root;
+static int   hp_cur_stage;
+static UINTN hp_cur_before;
+static int   hp_cur_uki;
+static int   hp_cur_raw;
+static struct hp_kdir hp_cur_walk;
+static int   hp_cur_walking;
+
+static void hp_scan_finish(config_t *config) {
+    if (hp_cur_walk.d) { hp_cur_walk.d->Close(hp_cur_walk.d); hp_cur_walk.d = NULL; }
+    if (hp_cur_walk.auto_cmd) {
+        efi_free_pool(hp_cur_walk.auto_cmd);
+        hp_cur_walk.auto_cmd = NULL;
+    }
+    if (hp_cur_root) { hp_cur_root->Close(hp_cur_root); hp_cur_root = NULL; }
+    dc_foreign_volume = 0;
+
+    if (hp_cur_vol) {
+        int total = (int)(config->entry_count - hp_cur_before);
+        if (total > 0) {
+            CHAR16 d[64];
+            SPrint(d, sizeof(d), L"hotplug: added %d boot entr%s", total,
+                   total == 1 ? L"y" : L"ies");
+            efi_log(d);
+        }
+    }
+    hp_cur_vol = NULL;
+    hp_cur_walking = 0;
+    hp_cur_stage = HP_STAGE_DONE;
+}
+
+static CHAR16* hp_stage_dir(int stage) {
+    switch (stage) {
+    case HP_STAGE_BOOT:       return L"\\boot";
+    case HP_STAGE_BTRFS_BOOT: return L"\\@\\boot";
+    default:                  return L"\\";
+    }
+}
+
+static int hp_scan_step(config_t *config, int *done) {
+    *done = 0;
+    EFI_HANDLE vol = hp_cur_vol;
+    EFI_FILE_PROTOCOL *root = hp_cur_root;
+    if (!root) { hp_scan_finish(config); *done = 1; return 0; }
+
+    UINTN before = config->entry_count;
+    dc_foreign_volume = 1;
+
+    switch (hp_cur_stage) {
+    case HP_STAGE_WINDOWS: {
+        static CHAR16 *win_paths[] = {
+            L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+            L"\\EFI\\BOOT\\bootmgfw.efi",
+            NULL
+        };
+        for (int i = 0; win_paths[i]; i++) {
+            if (!efi_file_exists_root(root, win_paths[i])) continue;
+            CHAR16 *entry_name = efi_strdup(L"Windows Boot Manager");
+            CHAR16 *entry_icon = icon_path_for(L"windows.png");
+            CHAR16 *entry_path = efi_strdup(win_paths[i]);
+            if (!entry_name || !entry_path ||
+                !config_add_entry(config, entry_name, entry_icon,
+                                  entry_path, NULL, NULL, NULL, 1, 0, 0)) {
+                free_char16(&entry_name);
+                free_char16(&entry_icon);
+                free_char16(&entry_path);
+            }
+            break;
+        }
+        hp_cur_stage++;
+        break;
+    }
+    case HP_STAGE_UKI:
+        hp_cur_uki += scan_uki_dir(config, root, L"\\EFI\\Linux");
+        hp_cur_stage++;
+        break;
+    case HP_STAGE_BOOT:
+    case HP_STAGE_BTRFS_BOOT:
+    case HP_STAGE_ROOT: {
+        if (!hp_cur_walking) {
+            hp_kdir_begin(root, hp_stage_dir(hp_cur_stage), vol, 0, &hp_cur_walk);
+            hp_cur_walking = 1;
+        }
+        CHAR16 *added_name = NULL;
+        if (!hp_kdir_next(config, &hp_cur_walk, &added_name)) {
+            hp_cur_walking = 0;
+            hp_cur_stage++;
+        }
+        if (added_name) { hp_cur_raw++; efi_free_pool(added_name); }
+        break;
+    }
+    case HP_STAGE_VENDOR:
+        if (!hp_cur_uki && !hp_cur_raw && config->entry_count == hp_cur_before)
+            scan_vendor_loaders(config, root);
+        hp_cur_stage++;
+        break;
+    case HP_STAGE_FALLBACK:
+        if (config->entry_count == hp_cur_before) {
+#if defined(__aarch64__)
+            CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTAA64.EFI";
+#else
+            CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTX64.EFI";
+#endif
+            if (efi_file_exists_root(root, fallback)) {
+                CHAR16 *label = hp_volume_label(root);
+                CHAR16 *entry_name = label ? label : efi_strdup(L"USB Device");
+                CHAR16 *entry_icon = icon_path_for(L"unknown.png");
+                CHAR16 *entry_path = efi_strdup(fallback);
+                if (!entry_name || !entry_path ||
+                    !config_add_entry(config, entry_name, entry_icon,
+                                      entry_path, NULL, NULL, NULL, 1, 0, 0)) {
+                    free_char16(&entry_name);
+                    free_char16(&entry_icon);
+                    free_char16(&entry_path);
+                }
+            }
+        }
+        hp_cur_stage++;
+        break;
+    default:
+        hp_cur_stage = HP_STAGE_DONE;
+        break;
+    }
+
+    dc_foreign_volume = 0;
+
+    int added = (int)(config->entry_count - before);
+    if (added > 0) tag_entries_since(config, before, vol);
+
+    if (hp_cur_stage >= HP_STAGE_DONE) {
+        hp_scan_finish(config);
+        *done = 1;
+    }
+    return added;
+}
+
+static int hp_scan_begin(config_t *config, EFI_HANDLE vol) {
     for (boot_entry_t *e = config->entries; e; e = e->next)
         if (e->hp_volume == vol ||
             (e->uuid && e->uuid[0] &&
@@ -1663,86 +1977,26 @@ static int hp_scan_volume(config_t *config, EFI_HANDLE vol) {
     EFI_FILE_PROTOCOL *root = root_from_handle(vol);
     if (!root) return 0;
 
-    UINTN before = config->entry_count;
-    dc_foreign_volume = 1;
-
-    static CHAR16 *win_paths[] = {
-        L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
-        L"\\EFI\\BOOT\\bootmgfw.efi",
-        NULL
-    };
-    for (int i = 0; win_paths[i]; i++) {
-        if (!efi_file_exists_root(root, win_paths[i])) continue;
-        CHAR16 *entry_name = efi_strdup(L"Windows Boot Manager");
-        CHAR16 *entry_icon = icon_path_for(L"windows.png");
-        CHAR16 *entry_path = efi_strdup(win_paths[i]);
-        if (!entry_name || !entry_path ||
-            !config_add_entry(config, entry_name, entry_icon,
-                              entry_path, NULL, NULL, NULL, 1, 0, 0)) {
-            free_char16(&entry_name);
-            free_char16(&entry_icon);
-            free_char16(&entry_path);
-        }
-        break;
-    }
-
-    int uki = scan_uki_dir(config, root, L"\\EFI\\Linux");
-
-    int raw = 0;
-    raw += scan_kernel_dir(config, root, vol, L"\\boot", 0);
-    raw += scan_kernel_dir(config, root, vol, L"\\@\\boot", 0);
-    raw += scan_kernel_dir(config, root, vol, L"\\", 0);
-    if (!uki && !raw && config->entry_count == before)
-        scan_vendor_loaders(config, root);
-
-    if (config->entry_count == before) {
-#if defined(__aarch64__)
-        CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTAA64.EFI";
-#else
-        CHAR16 *fallback = L"\\EFI\\BOOT\\BOOTX64.EFI";
-#endif
-        if (efi_file_exists_root(root, fallback)) {
-            CHAR16 *label = hp_volume_label(root);
-            CHAR16 *entry_name = label ? label : efi_strdup(L"USB Device");
-            CHAR16 *entry_icon = icon_path_for(L"unknown.png");
-            CHAR16 *entry_path = efi_strdup(fallback);
-            if (!entry_name || !entry_path ||
-                !config_add_entry(config, entry_name, entry_icon,
-                                  entry_path, NULL, NULL, NULL, 1, 0, 0)) {
-                free_char16(&entry_name);
-                free_char16(&entry_icon);
-                free_char16(&entry_path);
-            }
-        }
-    }
-    root->Close(root);
-    dc_foreign_volume = 0;
-
-    int added = (int)(config->entry_count - before);
-    if (added > 0) {
-        tag_entries_since(config, before, vol);
-        CHAR16 d[64];
-        SPrint(d, sizeof(d), L"hotplug: added %d boot entr%s", added,
-               added == 1 ? L"y" : L"ies");
-        efi_log(d);
-    }
-    return added;
+    hp_cur_vol = vol;
+    hp_cur_root = root;
+    hp_cur_stage = HP_STAGE_WINDOWS;
+    hp_cur_before = config->entry_count;
+    hp_cur_uki = 0;
+    hp_cur_raw = 0;
+    hp_cur_walking = 0;
+    hp_cur_walk.d = NULL;
+    hp_cur_walk.auto_cmd = NULL;
+    return 1;
 }
 
 static void hp_free_entry(boot_entry_t *e) {
-    if (e->name)        efi_free_pool(e->name);
-    if (e->icon_path)   efi_free_pool(e->icon_path);
-    if (e->kernel_path) efi_free_pool(e->kernel_path);
-    if (e->initrd_path) efi_free_pool(e->initrd_path);
-    if (e->cmdline)     efi_free_pool(e->cmdline);
-    if (e->uuid)        efi_free_pool(e->uuid);
-    if (e->icon) {
-        if (e->icon->scaled) efi_free_pool(e->icon->scaled);
-        if (e->icon->pixels) efi_free_pool(e->icon->pixels);
-        efi_free_pool(e->icon);
-    }
+    free_entry_contents(e);
     efi_free_pool(e);
 }
+
+#define HP_MAX_PROBES_PER_POLL 1
+
+#define HP_SLICE_BUDGET_US 40000ULL
 
 static int hp_vol_present(EFI_HANDLE *fs, UINTN nf, EFI_HANDLE h) {
     if (!hp_in_set(fs, nf, h)) return 0;
@@ -1754,48 +2008,93 @@ static int hp_vol_present(EFI_HANDLE *fs, UINTN nf, EFI_HANDLE h) {
     return 1;
 }
 
+static int hp_vol_exists(EFI_HANDLE *fs, UINTN nf, EFI_HANDLE h) {
+    return hp_in_set(fs, nf, h);
+}
+
 int config_hotplug_poll(config_t *config, UINTN *first_new) {
+    UINT64 t_poll = arch_now_us();
+    UINT64 us_probe = 0, us_blk = 0, us_fsloc = 0;
+    UINT64 us_removal = 0, us_discover = 0, us_scan = 0;
 
+    int probed_now = 0;
+    UINT64 t_phase = arch_now_us();
     if (hp_pending_probe) {
-        hp_pending_probe = 0;
         UINTN probed = 0;
-        for (UINTN i = 0; i < hp_blk_n; i++) {
-            if (efi_handle_has_filesystem(hp_blk_known[i])) continue;
-            BS->ConnectController(hp_blk_known[i], NULL, NULL, FALSE);
+        while (hp_probe_cursor < hp_blk_n && probed < HP_MAX_PROBES_PER_POLL) {
+            EFI_HANDLE h = hp_blk_known[hp_probe_cursor++];
+            if (efi_handle_has_filesystem(h)) continue;
+            UINT64 t0 = arch_now_us();
+            BS->ConnectController(h, NULL, NULL, FALSE);
+            UINT64 dt = arch_now_us() - t0;
             probed++;
-        }
-        if (probed) {
-            CHAR16 d[96];
-            SPrint(d, sizeof(d), L"hotplug: probed %d unreadable block device(s)",
-                   (int)probed);
-            efi_log(d);
-        }
-    }
-
-    UINTN nb = 0;
-    EFI_HANDLE *blk = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nb);
-    if (blk) {
-        int fresh = 0;
-        for (UINTN i = 0; i < nb; i++)
-            if (!hp_in_set(hp_blk_known, hp_blk_n, blk[i])) {
-                BS->ConnectController(blk[i], NULL, NULL, FALSE);
-                fresh = 1;
+            if (dt > 100000) {
+                CHAR16 d[112];
+                SPrint(d, sizeof(d),
+                       L"hotplug: probing block device %d took %d ms",
+                       (int)(hp_probe_cursor - 1), (int)(dt / 1000));
+                efi_log(d);
             }
-        if (fresh) {
-            if (hp_blk_known) efi_free_pool(hp_blk_known);
-            hp_blk_known = blk;
-            hp_blk_n = nb;
-        } else {
-            efi_free_pool(blk);
+        }
+        hp_probe_round += (int)probed;
+        if (hp_probe_cursor >= hp_blk_n) {
+            hp_pending_probe = 0;
+            if (hp_probe_round) {
+                CHAR16 d[96];
+                SPrint(d, sizeof(d),
+                       L"hotplug: probed %d unreadable block device(s)",
+                       hp_probe_round);
+                efi_log(d);
+            }
+        }
+        probed_now = (probed > 0);
+    }
+    us_probe = arch_now_us() - t_phase;
+
+    t_phase = arch_now_us();
+    if (!probed_now) {
+        UINTN nb = 0;
+        EFI_HANDLE *blk = efi_locate_handle_buffer(&gEfiBlockIoProtocolGuid, &nb);
+        if (blk) {
+            int fresh = 0;
+            for (UINTN i = 0; i < nb; i++)
+                if (!hp_in_set(hp_blk_known, hp_blk_n, blk[i])) {
+                    if (hp_in_set(hp_blk_tried, hp_blk_tried_n, blk[i])) continue;
+                    if (hp_blk_tried_n < HP_TRIED_MAX)
+                        hp_blk_tried[hp_blk_tried_n++] = blk[i];
+                    UINT64 t0 = arch_now_us();
+                    BS->ConnectController(blk[i], NULL, NULL, FALSE);
+                    UINT64 dt = arch_now_us() - t0;
+                    if (dt > 100000) {
+                        CHAR16 d[112];
+                        SPrint(d, sizeof(d),
+                               L"hotplug: connecting a new block device took %d ms",
+                               (int)(dt / 1000));
+                        efi_log(d);
+                    }
+                    fresh = 1;
+                }
+            if (fresh) {
+                if (hp_blk_known) efi_free_pool(hp_blk_known);
+                hp_blk_known = blk;
+                hp_blk_n = nb;
+                hp_probe_cursor = 0;
+            } else {
+                efi_free_pool(blk);
+            }
         }
     }
+    us_blk = arch_now_us() - t_phase;
 
+    t_phase = arch_now_us();
     UINTN nf = 0;
     EFI_HANDLE *fs = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &nf);
+    us_fsloc = arch_now_us() - t_phase;
     if (!fs) return 0;
 
     int mask = 0;
 
+    t_phase = arch_now_us();
     UINTN removed_at = 0, idx = 0;
     int removed = 0;
     boot_entry_t **link = &config->entries;
@@ -1823,29 +2122,57 @@ int config_hotplug_poll(config_t *config, UINTN *first_new) {
         mask |= 2;
     }
 
+    if (hp_cur_vol && !hp_vol_present(fs, nf, hp_cur_vol)) {
+        efi_log(L"hotplug: volume vanished mid-scan - abandoning it");
+        hp_scan_finish(config);
+    }
+    us_removal = arch_now_us() - t_phase;
+
     int added = 0;
     UINTN before = config->entry_count;
     UINTN scanned_idx = nf;
-    for (UINTN i = 0; i < nf; i++) {
-        if (hp_in_set(hp_fs_known, hp_fs_n, fs[i])) continue;
-        if (hp_volume_hosts_entry(config, fs[i])) {
-            efi_log(L"hotplug: volume already backs a configured entry - not scanning");
-        } else {
-            efi_log(L"hotplug: scanning a volume Visor has not seen yet");
-            added += hp_scan_volume(config, fs[i]);
+    int discovery_ran = 0;
+    if (!probed_now) {
+        t_phase = arch_now_us();
+        if (!hp_cur_vol) {
+            discovery_ran = 1;
+            for (UINTN i = 0; i < nf; i++) {
+                if (hp_in_set(hp_fs_known, hp_fs_n, fs[i])) continue;
+                if (hp_volume_hosts_entry(config, fs[i])) {
+                    efi_log(L"hotplug: volume already backs a configured entry - not scanning");
+                } else {
+                    efi_log(L"hotplug: scanning a volume Visor has not seen yet");
+                    hp_scan_begin(config, fs[i]);
+                }
+                scanned_idx = i;
+                break;
+            }
         }
-        scanned_idx = i;
-        break;              
+        us_discover = arch_now_us() - t_phase;
+
+        if (hp_cur_vol) {
+            UINT64 t0 = arch_now_us();
+            int done = 0;
+            while (hp_cur_vol && !done) {
+                added += hp_scan_step(config, &done);
+                if (efi_key_pending()) {
+                    efi_log(L"hotplug: key pressed - pausing the scan");
+                    break;
+                }
+                if (arch_now_us() - t0 >= HP_SLICE_BUDGET_US) break;
+            }
+            us_scan = arch_now_us() - t0;
+        }
     }
 
-    
+
 
     if (scanned_idx < nf) {
         EFI_HANDLE *grown = efi_allocate_pool((hp_fs_n + 1) * sizeof(EFI_HANDLE));
         if (grown) {
             UINTN k = 0;
             for (UINTN i = 0; i < hp_fs_n; i++)
-                if (hp_vol_present(fs, nf, hp_fs_known[i]))
+                if (hp_vol_exists(fs, nf, hp_fs_known[i]))
                     grown[k++] = hp_fs_known[i];
             grown[k++] = fs[scanned_idx];
             if (hp_fs_known) efi_free_pool(hp_fs_known);
@@ -1853,14 +2180,29 @@ int config_hotplug_poll(config_t *config, UINTN *first_new) {
             hp_fs_n = k;
         }
         efi_free_pool(fs);
-    } else {
+    } else if (discovery_ran) {
         if (hp_fs_known) efi_free_pool(hp_fs_known);
         hp_fs_known = fs;
         hp_fs_n = nf;
+    } else {
+        efi_free_pool(fs);
     }
 
     if (added > 0) mask |= 1;
     if (first_new) *first_new = (mask & 1) ? before : removed_at;
+
+    UINT64 us_total = arch_now_us() - t_poll;
+    if (us_total > 150000) {
+        CHAR16 d[224];
+        SPrint(d, sizeof(d),
+               L"hotplug: SLOW poll %d ms (probe %d, blk %d, fs-locate %d, "
+               L"removal %d, discover %d, scan %d)",
+               (int)(us_total / 1000), (int)(us_probe / 1000),
+               (int)(us_blk / 1000), (int)(us_fsloc / 1000),
+               (int)(us_removal / 1000), (int)(us_discover / 1000),
+               (int)(us_scan / 1000));
+        efi_log(d);
+    }
     return mask;
 }
 
@@ -1992,8 +2334,10 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->def_cmdline = (value[0] == '\0') ? NULL : efi_strdup(value);
     } else if (efi_strcmp(key, L"show_names") == 0 || efi_strcmp(key, L"names") == 0) {
         config->show_names = (*value == '1' || *value == 't' || *value == 'y');
+        show_names_set = 1;
     } else if (efi_strcmp(key, L"center_info") == 0 || efi_strcmp(key, L"centre_info") == 0) {
         config->center_info = (*value == '1' || *value == 't' || *value == 'y');
+        center_info_set = 1;
     } else if (efi_strcmp(key, L"autoboot") == 0) {
         config->autoboot = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"remember_last") == 0 || efi_strcmp(key, L"remember") == 0) {
@@ -2097,21 +2441,27 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->logo_size = parse_uint(value);
     } else if (efi_strcmp(key, L"logo_gap") == 0) {
         config->logo_gap = parse_uint(value);
-    } else if (efi_strcmp(key, L"accent_logo") == 0) {
-        config->accent_logo = (*value == '1' || *value == 't' || *value == 'y');
-        config->has_accent_logo = 1;
+    } else if (efi_strcmp(key, L"accent_logo") == 0 ||
+               efi_strcmp(key, L"logo_color") == 0 ||
+               efi_strcmp(key, L"accent_logo_color") == 0) {
+        if (parse_spec(value, &config->sp_logo)) {
+            config->accent_logo = (config->sp_logo.mode != SPEC_OFF);
+            config->has_accent_logo = 1;
+        } else {
+            efi_log(L"WARN: invalid accent_logo (0/1, an accent role, or #RRGGBB)");
+        }
     } else if (efi_strcmp(key, L"font") == 0) {
         if (config->font) efi_free_pool(config->font);
         config->font = (value[0] == '\0') ? NULL : efi_strdup(value);
     } else if (efi_strcmp(key, L"title_color") == 0) {
-        if (!parse_color(value, &config->title_color))
-            efi_log(L"WARN: invalid title_color (use #RRGGBB)");
+        if (!parse_spec_color(value, &config->sp_title, &config->title_color))
+            efi_log(L"WARN: invalid title_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"name_color") == 0) {
-        if (!parse_color(value, &config->name_color))
-            efi_log(L"WARN: invalid name_color (use #RRGGBB)");
+        if (!parse_spec_color(value, &config->sp_name, &config->name_color))
+            efi_log(L"WARN: invalid name_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"highlight_color") == 0) {
-        if (!parse_color(value, &config->highlight_color))
-            efi_log(L"WARN: invalid highlight_color (use #RRGGBB)");
+        if (!parse_spec_color(value, &config->sp_highlight, &config->highlight_color))
+            efi_log(L"WARN: invalid highlight_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"title_size") == 0) {
         config->title_size = parse_uint(value);
     } else if (efi_strcmp(key, L"name_size") == 0) {
@@ -2123,10 +2473,10 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     } else if (efi_strcmp(key, L"icon_y") == 0) {
         config->icon_y = parse_uint(value);
     } else if (efi_strcmp(key, L"underline_color") == 0) {
-        if (parse_color(value, &config->underline_color))
-            config->has_underline_color = 1;
+        if (parse_spec_color(value, &config->sp_underline, &config->underline_color))
+            config->has_underline_color = (config->sp_underline.mode == SPEC_COLOR);
         else
-            efi_log(L"WARN: invalid underline_color (use #RRGGBB)");
+            efi_log(L"WARN: invalid underline_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"underline_thickness") == 0) {
         config->underline_thickness = parse_uint(value);
     } else if (efi_strcmp(key, L"underline_length") == 0) {
@@ -2143,20 +2493,20 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         else
             efi_log(L"WARN: invalid power_position (topright/topleft/bottomleft/bottomright)");
     } else if (efi_strcmp(key, L"shutdown_color") == 0) {
-        if (parse_color(value, &config->shutdown_color))
-            config->has_shutdown_color = 1;
+        if (parse_spec_color(value, &config->sp_shutdown, &config->shutdown_color))
+            config->has_shutdown_color = (config->sp_shutdown.mode == SPEC_COLOR);
         else
-            efi_log(L"WARN: invalid shutdown_color (use #RRGGBB)");
+            efi_log(L"WARN: invalid shutdown_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"reboot_color") == 0) {
-        if (parse_color(value, &config->reboot_color))
-            config->has_reboot_color = 1;
+        if (parse_spec_color(value, &config->sp_reboot, &config->reboot_color))
+            config->has_reboot_color = (config->sp_reboot.mode == SPEC_COLOR);
         else
-            efi_log(L"WARN: invalid reboot_color (use #RRGGBB)");
+            efi_log(L"WARN: invalid reboot_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"firmware_color") == 0) {
-        if (parse_color(value, &config->firmware_color))
-            config->has_firmware_color = 1;
+        if (parse_spec_color(value, &config->sp_firmware, &config->firmware_color))
+            config->has_firmware_color = (config->sp_firmware.mode == SPEC_COLOR);
         else
-            efi_log(L"WARN: invalid firmware_color (use #RRGGBB)");
+            efi_log(L"WARN: invalid firmware_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"background") == 0) {
         if (config->background) efi_free_pool(config->background);
         config->background = dup_path(value);
@@ -2187,20 +2537,43 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     } else if (efi_strcmp(key, L"blur_title") == 0) {
         config->blur_title = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"blur_color") == 0) {
-        if (parse_color(value, &config->blur_color))
-            config->has_blur_color = 1;
+        if (parse_spec_color(value, &config->sp_blur, &config->blur_color))
+            config->has_blur_color = (config->sp_blur.mode == SPEC_COLOR);
         else
-            efi_log(L"WARN: invalid blur_color (use #RRGGBB)");
+            efi_log(L"WARN: invalid blur_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent") == 0) {
-        config->accent_enabled = (*value == '1' || *value == 't' || *value == 'y');
+        if (parse_spec(value, &config->sp_all)) {
+            config->accent_enabled = (config->sp_all.mode != SPEC_OFF);
+        } else {
+            efi_log(L"WARN: invalid accent (0/1, an accent role, or #RRGGBB)");
+        }
     } else if (efi_strcmp(key, L"accent_icons") == 0) {
-        config->accent_icons = (*value == '1' || *value == 't' || *value == 'y');
+        if (parse_spec(value, &config->sp_g_icons))
+            config->accent_icons = (config->sp_g_icons.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid accent_icons (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent_underline") == 0) {
-        config->accent_underline = (*value == '1' || *value == 't' || *value == 'y');
+        if (parse_spec(value, &config->sp_g_underline))
+            config->accent_underline = (config->sp_g_underline.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid accent_underline (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent_text") == 0) {
-        config->accent_text = (*value == '1' || *value == 't' || *value == 'y');
+        if (parse_spec(value, &config->sp_g_text))
+            config->accent_text = (config->sp_g_text.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid accent_text (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent_os_icons") == 0) {
-        config->accent_os_icons = (*value == '1' || *value == 't' || *value == 'y');
+        if (parse_spec(value, &config->sp_os_icons))
+            config->accent_os_icons = (config->sp_os_icons.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid accent_os_icons (0/1, an accent role, or #RRGGBB)");
+    } else if (efi_strcmp(key, L"info_color") == 0) {
+        if (!parse_spec_color(value, &config->sp_info, &config->fg_color))
+            efi_log(L"WARN: invalid info_color (0/1, an accent role, or #RRGGBB)");
+    } else if (efi_strcmp(key, L"bg_color") == 0 ||
+               efi_strcmp(key, L"background_color") == 0) {
+        if (!parse_spec_color(value, &config->sp_bg, &config->bg_color))
+            efi_log(L"WARN: invalid bg_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent_variant") == 0) {
         config->accent_variant = accent_variant_from_str(value);
     }
@@ -3020,6 +3393,22 @@ EFI_STATUS config_parse(config_t *config) {
     config->logo_gap = 0;
     config->accent_logo = 0;
     config->has_accent_logo = 0;
+    config->sp_logo.mode = SPEC_UNSET;
+    config->sp_underline.mode = SPEC_UNSET;
+    config->sp_highlight.mode = SPEC_UNSET;
+    config->sp_title.mode = SPEC_UNSET;
+    config->sp_name.mode = SPEC_UNSET;
+    config->sp_info.mode = SPEC_UNSET;
+    config->sp_shutdown.mode = SPEC_UNSET;
+    config->sp_reboot.mode = SPEC_UNSET;
+    config->sp_firmware.mode = SPEC_UNSET;
+    config->sp_os_icons.mode = SPEC_UNSET;
+    config->sp_blur.mode = SPEC_UNSET;
+    config->sp_bg.mode = SPEC_UNSET;
+    config->sp_g_text.mode = SPEC_UNSET;
+    config->sp_g_icons.mode = SPEC_UNSET;
+    config->sp_g_underline.mode = SPEC_UNSET;
+    config->sp_all.mode = SPEC_UNSET;
     config->font = NULL;
     config->background = NULL;
     config->bg_color = (color_t){0x1a, 0x1a, 0x2e};
@@ -3198,6 +3587,7 @@ static boot_entry_t* config_add_entry(config_t *config,
     entry->icon_size = 0;
     entry->color = config->name_color;
     entry->has_color = 0;
+    entry->color_role = -1;
     entry->has_sha256 = 0;
     entry->encrypted = encrypted;
     entry->initrd_encrypted = initrd_encrypted;
@@ -3241,37 +3631,7 @@ void config_free(config_t *config) {
     boot_entry_t *entry = config->entries;
     while (entry) {
         boot_entry_t *next = entry->next;
-        if (entry->name) efi_free_pool(entry->name);
-        if (entry->icon_path) efi_free_pool(entry->icon_path);
-        if (entry->deployments) {
-            int cmdline_aliased = 0;
-            for (UINTN i = 0; i < entry->deploy_count; i++)
-                if (entry->cmdline == entry->deployments[i].cmdline) cmdline_aliased = 1;
-            for (UINTN i = 0; i < entry->deploy_count; i++) {
-                deployment_t *d = &entry->deployments[i];
-                if (d->version)  efi_free_pool(d->version);
-                if (d->kernel)   efi_free_pool(d->kernel);
-                if (d->initrd)   efi_free_pool(d->initrd);
-                if (d->cmdline)  efi_free_pool(d->cmdline);
-                if (d->bls_path) efi_free_pool(d->bls_path);
-            }
-            if (!cmdline_aliased && entry->cmdline) efi_free_pool(entry->cmdline);
-            efi_free_pool(entry->deployments);
-        } else {
-            if (entry->kernel_path) efi_free_pool(entry->kernel_path);
-            if (entry->initrd_path) efi_free_pool(entry->initrd_path);
-            if (entry->cmdline) efi_free_pool(entry->cmdline);
-        }
-        if (entry->uuid) efi_free_pool(entry->uuid);
-        if (entry->snapshots) free_snapshots(entry->snapshots, entry->snap_count);
-        if (entry->luks_key_path) efi_free_pool(entry->luks_key_path);
-        if (entry->luks_cmdline) efi_free_pool(entry->luks_cmdline);
-        if (entry->luks_preset) efi_free_pool(entry->luks_preset);
-        if (entry->decrypt_password) {
-            wipe16(entry->decrypt_password);
-            efi_free_pool(entry->decrypt_password);
-        }
-
+        free_entry_contents(entry);
         efi_free_pool(entry);
         entry = next;
     }
