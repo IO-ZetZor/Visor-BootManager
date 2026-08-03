@@ -33,6 +33,8 @@ enum {
 
 int accent_variant_from_str(const CHAR16 *s);
 
+int accent_role_from_str(const CHAR16 *s);
+
 int accent_generate(icon_t *bg, int variant, color_t out[ACCENT_ROLE_COUNT]);
 
 #endif
