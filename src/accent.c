@@ -1082,6 +1082,37 @@ static const UINT8 MONO_TONES[ACCENT_ROLE_COUNT] = {
     100, 10, 85, 0, 80, 90, 60, 6, 12, 17, 90, 80, 60,
 };
 
+int accent_role_from_str(const CHAR16 *s) {
+    static const struct { const CHAR16 *name; int role; } names[] = {
+        { L"primary",             ROLE_PRIMARY },
+        { L"on_primary",          ROLE_ON_PRIMARY },
+        { L"primary_container",   ROLE_PRIMARY_CONTAINER },
+        { L"on_primary_container",ROLE_ON_PRIMARY_CONTAINER },
+        { L"secondary",           ROLE_SECONDARY },
+        { L"tertiary",            ROLE_TERTIARY },
+        { L"tertiary_container",  ROLE_TERTIARY_CONTAINER },
+        { L"surface",             ROLE_SURFACE },
+        { L"surface_container",   ROLE_SURFACE_CONTAINER },
+        { L"on_surface",          ROLE_ON_SURFACE },
+        { L"on_surface_variant",  ROLE_ON_SURFACE_VARIANT },
+        { L"outline",             ROLE_OUTLINE },
+        { NULL, 0 }
+    };
+    if (!s || !s[0]) return -1;
+    for (int i = 0; names[i].name; i++) {
+        UINTN j = 0;
+        while (s[j] && names[i].name[j]) {
+            CHAR16 a = s[j], b = names[i].name[j];
+            if (a >= L'A' && a <= L'Z') a = (CHAR16)(a - L'A' + L'a');
+            if (a == L'-') a = L'_';
+            if (a != b) break;
+            j++;
+        }
+        if (!s[j] && !names[i].name[j]) return names[i].role;
+    }
+    return -1;
+}
+
 int accent_variant_from_str(const CHAR16 *s) {
     if (!s || !s[0]) return ACCENT_TONAL;
     switch (s[0]) {
