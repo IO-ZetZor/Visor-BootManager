@@ -334,6 +334,7 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     UINTN  offset     = 8;
     UINT32 width      = 0, height = 0;
     UINT8  bit_depth  = 0, color_type = 0;
+    UINT8  comp_method = 0, filter_method = 0, interlace = 0;
     UINT8 *idat_data  = NULL;
     UINTN  idat_size  = 0;
     UINTN  idat_cap   = 0;
@@ -370,8 +371,11 @@ icon_t* png_load(UINT8 *data, UINTN size) {
                          ((UINT32)data[offset + 10] <<  8) |          data[offset + 11];
             height     = ((UINT32)data[offset + 12] << 24) | ((UINT32)data[offset + 13] << 16) |
                          ((UINT32)data[offset + 14] <<  8) |          data[offset + 15];
-            bit_depth  = data[offset + 16];
-            color_type = data[offset + 17];
+            bit_depth     = data[offset + 16];
+            color_type    = data[offset + 17];
+            comp_method   = data[offset + 18];
+            filter_method = data[offset + 19];
+            interlace     = data[offset + 20];
         }
         else if (type[0] == 'I' && type[1] == 'D' && type[2] == 'A' && type[3] == 'T') {
             if (idat_size + chunk_len > 64u * 1024 * 1024) {
@@ -416,6 +420,19 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     if (width > 8192 || height > 8192 ||
         (UINT64)width * height > 16u * 1024u * 1024u) {
         efi_log(L"  ERROR: PNG dimensions exceed limits - refusing");
+        efi_free_pool(idat_data);
+        return NULL;
+    }
+
+    if (comp_method != 0 || filter_method != 0) {
+        efi_log(L"  ERROR: PNG uses a non-standard compression/filter method");
+        efi_free_pool(idat_data);
+        return NULL;
+    }
+
+    if (interlace != 0) {
+        efi_log(L"  ERROR: interlaced (Adam7) PNG is not supported - "
+                L"re-save the image without interlacing");
         efi_free_pool(idat_data);
         return NULL;
     }
