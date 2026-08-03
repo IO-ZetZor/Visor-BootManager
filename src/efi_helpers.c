@@ -366,7 +366,6 @@ int efi_fs_drivers_deferred(void) {
 
 
 int efi_fs_drivers_pending(void) {
-    extern int efi_fs_probe_exhausted(void);
     return efi_fs_drivers_deferred() || !efi_fs_probe_exhausted();
 }
 
@@ -960,20 +959,24 @@ void efi_log_rotate(void) {
 
     UINT8 *keep = NULL;
     UINTN  keep_len = 0;
-    UINTN  offs[64]; UINTN nofs = 0;
 
-    for (UINTN i = 0; i + mlen <= sz && nofs < 64; i++) {
+    UINTN ring[LOG_KEEP];
+    UINTN nofs = 0;
+
+    for (UINTN i = 0; i + mlen <= sz; i++) {
         UINTN k = 0;
         while (k < mlen && d[i + k] == (UINT8)m[k]) k++;
-        if (k == mlen) { offs[nofs++] = i; i += mlen - 1; }
+        if (k == mlen) {
+            ring[nofs % LOG_KEEP] = i;
+            nofs++;
+            i += mlen - 1;
+        }
     }
 
-    if (nofs >= LOG_KEEP) {
-        keep = d + offs[nofs - LOG_KEEP];
-        keep_len = sz - offs[nofs - LOG_KEEP];
-    } else if (nofs > 0) {
-        keep = d + offs[0];
-        keep_len = sz - offs[0];
+    if (nofs) {
+        UINTN start = (nofs >= LOG_KEEP) ? ring[nofs % LOG_KEEP] : ring[0];
+        keep = d + start;
+        keep_len = sz - start;
     }
 
     efi_log_close();
@@ -1005,6 +1008,12 @@ void efi_log_rotate(void) {
 void efi_sleep(UINTN milliseconds) {
     if (!visor_boot_services_active) return;
     BS->Stall(milliseconds * 1000);
+}
+
+int efi_key_pending(void) {
+    if (!visor_boot_services_active || !ST || !ST->ConIn) return 0;
+    if (!ST->ConIn->WaitForKey) return 0;
+    return BS->CheckEvent(ST->ConIn->WaitForKey) == EFI_SUCCESS;
 }
 
 UINT64 efi_get_tick(void) {
