@@ -652,12 +652,16 @@ static UINT8* cpio_write_entry(UINT8 *p, CHAR8 *name, UINT32 mode,
     CopyMem(p, name, name_len);
     p[name_len] = 0;
     p += name_len + 1;
-    for (UINTN i = 0; i < pad4((UINTN)(p - start)); i++) *p++ = 0;
+
+    UINTN pad = pad4((UINTN)(p - start));
+    for (UINTN i = 0; i < pad; i++) *p++ = 0;
+
     if (data_size) {
         CopyMem(p, data, data_size);
         p += data_size;
     }
-    for (UINTN i = 0; i < pad4((UINTN)(p - start)); i++) *p++ = 0;
+    pad = pad4((UINTN)(p - start));
+    for (UINTN i = 0; i < pad; i++) *p++ = 0;
     return p;
 }
 
@@ -985,7 +989,13 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
         efi_log(L"boot: PE image (Windows/UKI/EFI-stub), LoadImage()");
         EFI_DEVICE_PATH *kernel_dp = NULL;
-        if (!entry->encrypted) {
+        if (entry->has_sha256) {
+            efi_log(L"secure: sha256 pin set - loading the verified buffer, "
+                    L"not re-reading the file by device path");
+            if (!entry->initrd_path && !entry->cmdline)
+                efi_log(L"WARN: a pinned chainload (e.g. bootmgfw.efi) loses its "
+                        L"device path; Windows may not find its BCD");
+        } else if (!entry->encrypted) {
             if (entry->hp_volume) {
                 kernel_dp = efi_file_device_path_on_handle(entry->hp_volume,
                                                            kernel_load_path);
