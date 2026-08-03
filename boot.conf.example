@@ -2,21 +2,46 @@
 #  Visor boot manager configuration
 #  Location on the EFI System Partition (ESP):  \EFI\visor\boot.conf
 #
+#  Every key below is shown with its default and commented out, so this file
+#  can be copied as-is: uncomment only what you want to change.
+#
+#  File syntax:
+#    - One  key = value  per line. Whitespace around '=' is ignored.
+#    - '#' starts a comment. Inside a value it only counts when a space comes
+#      before it, so  title_color=#7AA2F7  is a color, not a comment.
+#    - Quote values containing spaces:  cmdline = "root=... rw quiet"
+#      The surrounding quotes are stripped.
+#    - Entry blocks are  entry { ... }  - see "Boot entries" at the bottom.
+#      Blank lines and comments inside a braced block are fine. Without the
+#      braces the first blank line ends the block, so brace your entries.
+#    - Repeating a key keeps the last value. Unknown keys are ignored; an
+#      invalid value is logged and the previous setting kept.
+#
 #  Notes on paths:
 #    - File paths are relative to the root of the filesystem containing the
 #      target and use back-slashes. Assets normally live on the ESP, e.g.
 #      \EFI\visor\icons\arch.png.
 #    - Colors are hex in the form  #RRGGBB  (e.g. #7AA2F7).
-#    - Lines starting with '#' are comments. Whitespace around '=' is ignored.
 #    - Kernels/initrds on a non-FAT /boot (btrfs, ext4, ...) are unreadable by
 #      UEFI unless you drop an efifs driver into \EFI\visor\drivers\. For a
 #      separate /boot filesystem use \vmlinuz-...; use \boot\vmlinuz-... only
 #      when /boot is a directory inside the root filesystem. Visor also accepts
 #      the older mount-prefixed form when the exact path is absent. A UKI on the
 #      ESP under \EFI\Linux\*.efi always works without a driver.
+#
+#  Layout of this file:
+#      Boot behaviour        what boots, and whether the menu is shown
+#      Entry discovery       where Visor looks when it auto-detects entries
+#      Menu appearance       overall shape of the menu; input devices
+#      Diagnostics           the boot log
+#      Logo / Colors / Blur / Animation / Font sizes / Icons / Underline /
+#      Power actions / Background / Dynamic accent / Themes  - styling
+#      Snapshots             booting into btrfs snapshots
+#      Boot entries          the entry { } blocks themselves
 # ============================================================================
 
-# --- Global settings --------------------------------------------------------
+# --- Boot behaviour ---------------------------------------------------------
+# What gets booted, and whether the menu is shown at all.
 
 # Seconds before the default entry auto-boots:
 #    N   wait N seconds, then boot the default entry
@@ -27,9 +52,83 @@ timeout=5
 # Index of the default entry (0-based, in the order entries appear below).
 default=0
 
+# Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
+# several exist, boot the remembered/default entry (the one default=/remember_last
+# would have preselected) - all without drawing a menu. Hold any key during power-on
+# to interrupt and show the menu anyway. 0 = always show the menu (default).
+#autoboot=0
+
+# Remember the last-booted entry and preselect it next time (persisted in an NVRAM
+# variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
+#remember_last=0
+
+# Global default kernel command line. Applied to any entry that does not set its
+# own cmdline/options - including auto-detected raw kernels (which otherwise have
+# no root=). Per-entry cmdline always wins. (alias: options)
+#cmdline=root=PARTUUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx rw quiet
+
 # 1 = suppress all boot-progress text (plain black screen during hand-off to
 # the OS instead of "Booting <name>..."). 0 = show progress text.
 quiet=0
+
+# Allow editing an entry's kernel command line at the menu: select an entry and
+# press 'e', edit, Enter boots with the change (one-shot, not saved). Set 0 to
+# disable (e.g. on locked-down machines). 1 = on (default).
+#editor=1
+
+# Pressing Esc at the boot menu opens the options / rescue console (the same
+# console Visor drops into after a failed boot): list and pick entries, edit the
+# kernel options for one boot, read boot.log, reboot or enter firmware setup.
+# Esc there returns to the menu.
+
+
+# --- Entry discovery --------------------------------------------------------
+# Where Visor looks for bootable things, and which extra entries it makes up.
+# Auto-detection only runs when this file lists no entry { } blocks of its own.
+
+# How hard Visor looks for entries when boot.conf lists none and it has to
+# auto-detect them.
+#   deep  -> open every filesystem the firmware exposes (default). Finds
+#            kernels that live in /boot on a root filesystem, at the cost of a
+#            few seconds on machines with several disks.
+#   quick -> look only at the volume Visor booted from, the EFI system
+#            partitions and any XBOOTLDR (separate /boot) partition. Much
+#            faster. If a quick scan turns up nothing at all, Visor falls back
+#            to a deep scan rather than showing an empty menu.
+# Aliases: scan_mode; also quick_scan=1 / deep_scan=0.
+#scan=deep
+
+# Live hotplug: while the menu is up, Visor watches for volumes that appear
+# (a USB stick plugged in), scans them for bootable content (Windows, UKIs,
+# kernels, distro loaders, \EFI\BOOT\BOOTX64.EFI) and pops matching entries
+# into the menu - the new icon fades in and the row slides over to make room.
+# Entries are pinned to the volume they were found on. 1 = on (default), 0 = off.
+#hotplug=1
+
+# Also sweep media that was ALREADY plugged in when Visor started. Scanning
+# volumes costs time (and, with a filesystem driver installed, a probe of every
+# partition), so by default this happens only when Visor auto-detected the
+# entries: if boot.conf lists entries, Visor trusts them and only watches for
+# media that appears later. Set to 1 to sweep anyway - it runs after the menu is
+# already on screen, one volume at a time. Alias: hotplug_scan_existing.
+#scan_existing=0
+
+# Auto-generate a "<name> (recovery)" entry for each Linux entry, appending
+# "systemd.unit=rescue.target nomodeset" to its cmdline. 0 = off. (alias: recovery)
+#recovery_entries=0
+
+# Filesystem snapshot booting.  (Full details in the Snapshots section below.)
+#    1         auto (default): load \EFI\visor\snapshots.conf if present, else
+#              auto-detect snapper/Timeshift/plain btrfs snapshots
+#    manifest  use only \EFI\visor\snapshots.conf (no auto-detection)
+#    0         disable snapshot loading entirely
+#snapshots=1
+
+
+# --- Menu appearance and input ----------------------------------------------
+# The menu's overall shape. Finer styling has its own sections further down
+# (Logo, Colors, Blur, Animation, Font sizes, Icons, Underline, Power actions,
+# Background, Dynamic accent, Themes).
 
 # 1 = use the plain text-console menu instead of the graphical one, even when a
 # graphics adapter is available. Visor ALSO falls back to this text menu
@@ -45,12 +144,14 @@ quiet=0
 # kept. Has no effect in text mode.
 #resolution=native
 
-# Global default kernel command line. Applied to any entry that does not set its
-# own cmdline/options - including auto-detected raw kernels (which otherwise have
-# no root=). Per-entry cmdline always wins. (alias: options)
-#cmdline=root=PARTUUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx rw quiet
+# Menu title shown at the top.
+#   (absent / empty) -> the default title "Visor"
+#   none             -> no title at all
+#   anything else    -> shown verbatim
+#title=My Rig
 
 # Graphical menu - show the name label under each icon. 0 = icons only.
+# An auto-detected menu defaults to icons-only unless you set this. (alias: names)
 #show_names=1
 
 # Graphical menu - show details for the selected entry near the bottom of the
@@ -58,43 +159,13 @@ quiet=0
 # name above the path. (alias: centre_info)
 #center_info=0
 
+# How many entries fit on one page. When more exist, chevrons appear and paging
+# cross-fades at anim_speed. Default 3.
+#entries_per_page=3
+
 # Corner radius (in pixels) of the selection highlight / frost box. 0 = built-in
 # default. Larger = rounder; small values = squarer corners. (alias: corner_radius)
 #box_radius=14
-
-# Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
-# several exist, boot the remembered/default entry (the one default=/remember_last
-# would have preselected) - all without drawing a menu. Hold any key during power-on
-# to interrupt and show the menu anyway. 0 = always show the menu (default).
-#autoboot=0
-
-# Remember the last-booted entry and preselect it next time (persisted in an NVRAM
-# variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
-#remember_last=0
-
-# Write diagnostics to \EFI\visor\boot.log. Logging is append-only; the file is
-# trimmed to the last few sessions only once it grows past ~128 KiB, and only
-# after the config is parsed, so a boot that hangs early never destroys the
-# previous boot's log. Set this to 0 if Visor stops after "Visor loading..." on
-# firmware with a broken ESP write path. This key is read before any log write.
-# Aliases: boot_log, file_log. Inverse alias: no_log=1.
-#log=1
-
-# Pressing Esc at the boot menu opens the options / rescue console (the same
-# console Visor drops into after a failed boot): list and pick entries, edit the
-# kernel options for one boot, read boot.log, reboot or enter firmware setup.
-# Esc there returns to the menu.
-
-# Auto-generate a "<name> (recovery)" entry for each Linux entry, appending
-# "systemd.unit=rescue.target nomodeset" to its cmdline. 0 = off. (alias: recovery)
-#recovery_entries=0
-
-# Filesystem snapshot booting.
-#    1         auto (default): load \EFI\visor\snapshots.conf if present, else
-#              auto-detect snapper/Timeshift/plain btrfs snapshots
-#    manifest  use only \EFI\visor\snapshots.conf (no auto-detection)
-#    0         disable snapshot loading entirely
-#snapshots=1
 
 # Mouse / touchpad / touchscreen support in the graphical menu. A cursor appears
 # when a pointer device is present; a single click on an icon boots it, and clicks
@@ -106,43 +177,20 @@ quiet=0
 # Alias: pointer_speed.
 #mouse_speed=4
 
-# Live hotplug: while the menu is up, Visor watches for volumes that appear
-# (a USB stick plugged in), scans them for bootable content (Windows, UKIs,
-# kernels, distro loaders, \EFI\BOOT\BOOTX64.EFI) and pops matching entries
-# into the menu - the new icon fades in and the row slides over to make room.
-# Entries are pinned to the volume they were found on. 1 = on (default), 0 = off.
-#hotplug=1
+# Text font. Currently only "jetbrains" is bundled. Empty = default.
+#font=jetbrains
 
-# How hard Visor looks for entries when boot.conf lists none and it has to
-# auto-detect them.
-#   deep  -> open every filesystem the firmware exposes (default). Finds
-#            kernels that live in /boot on a root filesystem, at the cost of a
-#            few seconds on machines with several disks.
-#   quick -> look only at the volume Visor booted from, the EFI system
-#            partitions and any XBOOTLDR (separate /boot) partition. Much
-#            faster. If a quick scan turns up nothing at all, Visor falls back
-#            to a deep scan rather than showing an empty menu.
-# Aliases: scan_mode; also quick_scan=1 / deep_scan=0.
-#scan=deep
 
-# Also sweep media that was ALREADY plugged in when Visor started. Scanning
-# volumes costs time (and, with a filesystem driver installed, a probe of every
-# partition), so by default this happens only when Visor auto-detected the
-# entries: if boot.conf lists entries, Visor trusts them and only watches for
-# media that appears later. Set to 1 to sweep anyway - it runs after the menu is
-# already on screen, one volume at a time. Alias: hotplug_scan_existing.
-#scan_existing=0
+# --- Diagnostics ------------------------------------------------------------
 
-# Allow editing an entry's kernel command line at the menu: select an entry and
-# press 'e', edit, Enter boots with the change (one-shot, not saved). Set 0 to
-# disable (e.g. on locked-down machines). 1 = on (default).
-#editor=1
+# Write diagnostics to \EFI\visor\boot.log. Logging is append-only; the file is
+# trimmed to the last few sessions only once it grows past ~128 KiB, and only
+# after the config is parsed, so a boot that hangs early never destroys the
+# previous boot's log. Set this to 0 if Visor stops after "Visor loading..." on
+# firmware with a broken ESP write path. This key is read before any log write.
+# Aliases: boot_log, file_log. Inverse alias: no_log=1.
+#log=1
 
-# Menu title shown at the top.
-#   (absent / empty) -> the default title "Visor"
-#   none             -> no title at all
-#   anything else    -> shown verbatim
-#title=My Rig
 
 # --- Logo --------------------------------------------------------------------
 # An image drawn in the header, next to the title or on its own. The bundled
@@ -168,16 +216,10 @@ quiet=0
 #
 # Space between logo and title in pixels. Default is half the title height.
 #logo_gap=24
-#
-# Tint the logo with the wallpaper accent color instead of drawing its own
-# colors. Useful for single-color logos like the bundled one. Needs accent=1;
-# defaults to whatever accent_text is set to.
-#accent_logo=1
+# (The logo's color lives with the accent keys at the bottom: accent_logo.)
 
-# Text font. Currently only "jetbrains" is bundled. Empty = default.
-#font=jetbrains
-
-# Theme. If set, Visor loads \EFI\visor\themes\<name>.conf and the UI values in
+# --- Themes -----------------------------------------------------------------
+# If set, Visor loads \EFI\visor\themes\<name>.conf and the UI values in
 # that file OVERRIDE the ones below. A theme file may contain any of the UI keys
 # in this file (colors, sizes, icons, underline, power, background, title, logo...).
 # Boot entries always stay here in boot.conf - themes are UI-only.
@@ -187,12 +229,29 @@ quiet=0
 #theme=nord
 
 # --- Colors -----------------------------------------------------------------
+# Every key that sets a color or an accent takes the same four kinds of value:
+#   0 / off     leave this element alone - its plain color, no accent
+#   1 / on      accent this element with the role it uses by default
+#   <role>      accent it with a specific role of the wallpaper palette:
+#                 primary, on_primary, primary_container, on_primary_container,
+#                 secondary, tertiary, tertiary_container, surface,
+#                 surface_container, on_surface, on_surface_variant, outline
+#   #RRGGBB     an explicit color, which needs no wallpaper and always wins
+# So title_color=#7AA2F7, title_color=tertiary and title_color=0 are all valid.
+# A role only does something when accent=1 and the wallpaper yields a palette;
+# an explicit color works regardless. More specific beats less specific:
+# a per-element key (title_color) beats its group (accent_text) beats accent=.
+#
 # Title text color.
 #title_color=#7AA2F7
 # Default color for every entry's name (per-entry "color=" overrides this).
 #name_color=#C0CAF5
 # Accent color of the selection highlight / underline.
 #highlight_color=#7AA2F7
+# Countdown, hints and other dim labels.
+#info_color=on_surface_variant
+# Menu background fill, used when no background image is set.
+#bg_color=#1A1A2E
 
 # --- Blur highlight ---------------------------------------------------------
 # Replace the flat selection card with a blurred-glass panel that follows the
@@ -221,12 +280,6 @@ quiet=0
 # Full-screen fade speed for menu fade-in and boot/power fade-out, 1 (slow) ..
 # 10 (fast). Default 10. Ignored when animation=0.
 #fade_speed=10
-
-# Entries shown per page. When more entries exist than fit a page, a chevron
-# (< / >) appears and Left/Right paging cross-fades between pages at anim_speed
-# when animation=1.
-# Default 3.
-#entries_per_page=3
 
 # --- Font sizes (in pixels; 0 / absent = sensible default) ------------------
 # Title height. Default scales with the screen (~ screen_height / 12).
@@ -294,12 +347,16 @@ background=\EFI\visor\backgrounds\default.png
 # Needs a background image; with a solid backdrop it does nothing and the
 # configured colors are kept.
 #   accent            master switch (default 0 = off).
-# When accent=1, these pick which roles are applied:
+# All of these take the same values as the color keys above - 0, 1, a role
+# name, or #RRGGBB - so each group can be pointed at a different role:
 #   accent_underline  underline + highlight use primary    (default 1)
 #   accent_icons      power icons/labels use sec/tertiary  (default 1)
 #   accent_text       title/names/dim text use the on* roles (default 0)
 #   accent_os_icons   flatten the per-OS icons to the primary color too
 #                     (default 0; discards brand colors like Ubuntu orange).
+#   accent_logo       tint the logo instead of drawing its own colors, good
+#                     for single-color logos like the bundled one. Defaults to
+#                     whatever accent_text is. Aliases: logo_color.
 #   accent_variant    scheme variant, same names as caelestia. One of:
 #                       tonal       balanced and subtle (caelestia's default)
 #                       neutral     nearly grey, the most restrained
@@ -308,13 +365,15 @@ background=\EFI\visor\backgrounds\default.png
 #                       vibrant     stronger, more colourful
 #                       expressive  vivid, with a large hue shift between roles
 #                       monochrome  greyscale, no hue
-# Any color still set explicitly above (underline_color, name_color, ...) is
-# overridden by the accent for whichever roles are enabled here.
+# Giving accent= itself a role or color makes that the default for every
+# element that has no key of its own. A per-element key always wins, so
+# "accent=1" with "underline_color=#F7768E" keeps that underline red.
 #accent=1
 #accent_underline=1
 #accent_icons=1
 #accent_text=0
 #accent_os_icons=0
+#accent_logo=tertiary
 #accent_variant=tonal
 
 # --- Snapshots (boot into btrfs snapshots) ----------------------------------
@@ -376,9 +435,13 @@ background=\EFI\visor\backgrounds\default.png
 #    Up                        move up the power column; from the top, back to entries
 #    Enter                     boot the focused entry / run the focused power action
 #    V                         cycle entry info / deployments / snapshots panel
+#    e                         edit the kernel command line for this boot only
+#                              (needs editor=1)
 #    1-9                       boot entry N directly
 #    S / R / F                 Shutdown / Reboot / Firmware setup (from anywhere)
-#    Esc                       boot the default entry
+#    Esc                       open the options / rescue console: list and pick
+#                              entries, edit kernel options for one boot, read
+#                              boot.log, reboot or enter firmware setup
 # ============================================================================
 
 # ----------------------------------------------------------------------------
