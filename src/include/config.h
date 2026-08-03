@@ -9,8 +9,6 @@
 #define CONFIG_DIR  L"\\EFI\\visor"
 #define CONFIG_FILE L"\\EFI\\visor\\boot.conf"
 
-/* Auto-detection scope.  Deep walks every filesystem the firmware exposes;
- * quick looks only at the ESPs and XBOOTLDR (/boot) partitions. */
 #define SCAN_MODE_DEEP  0
 #define SCAN_MODE_QUICK 1
 
@@ -44,6 +42,12 @@ typedef struct {
     UINTN  logo_gap;
     int    accent_logo;
     int    has_accent_logo;
+
+    accent_spec_t sp_logo, sp_underline, sp_highlight;
+    accent_spec_t sp_title, sp_name, sp_info;
+    accent_spec_t sp_shutdown, sp_reboot, sp_firmware;
+    accent_spec_t sp_os_icons, sp_blur, sp_bg;
+    accent_spec_t sp_g_text, sp_g_icons, sp_g_underline, sp_all;
     CHAR16 *font;
     CHAR16 *background;
     color_t bg_color;
