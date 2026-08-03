@@ -1071,37 +1071,128 @@ void gui_set_logo(gui_state_t *state, CHAR16 *path) {
         efi_log(L"  WARN: no logo image - drawing the title alone");
 }
 
+static int accent_resolve(gui_state_t *state, accent_spec_t *own,
+                          accent_spec_t *group, int def_role, color_t *out) {
+    accent_spec_t *chain[3];
+    int n = 0;
+    if (own   && own->mode   != SPEC_UNSET) chain[n++] = own;
+    if (group && group->mode != SPEC_UNSET) chain[n++] = group;
+    if (state->sp_all.mode   != SPEC_UNSET) chain[n++] = &state->sp_all;
+
+    for (int i = 0; i < n; i++) {
+        switch (chain[i]->mode) {
+        case SPEC_OFF:
+            return 0;
+        case SPEC_COLOR:
+            *out = chain[i]->color;
+            return 1;
+        case SPEC_ROLE:
+            if (!state->accent_valid) return 0;
+            *out = state->accent_roles[chain[i]->role % GUI_ACCENT_ROLES];
+            return 1;
+        case SPEC_ON:
+        default:
+            i = n;
+            break;
+        }
+    }
+
+    if (!state->accent_valid) return 0;
+    *out = state->accent_roles[def_role % GUI_ACCENT_ROLES];
+    return 1;
+}
+
+static int entry_own_color(gui_state_t *state, boot_entry_t *e, color_t *out) {
+    if (!e) return 0;
+    if (e->has_color) { *out = e->color; return 1; }
+    if (e->color_role >= 0 && state->accent_valid) {
+        *out = state->accent_roles[e->color_role % GUI_ACCENT_ROLES];
+        return 1;
+    }
+    return 0;
+}
+
 void gui_apply_accent(gui_state_t *state) {
     state->accent_valid = 0;
-    if (!state->accent_enabled) return;
+    state->logo_tint_on = 0;
+    state->os_icon_tint_on = 0;
+    state->pwr_tint_on[0] = state->pwr_tint_on[1] = state->pwr_tint_on[2] = 0;
 
-    if (!accent_generate(state->background, state->accent_variant, state->accent_roles)) {
+    if (state->accent_enabled &&
+        accent_generate(state->background, state->accent_variant, state->accent_roles)) {
+        state->accent_primary   = state->accent_roles[ROLE_PRIMARY];
+        state->accent_secondary = state->accent_roles[ROLE_SECONDARY];
+        state->accent_tertiary  = state->accent_roles[ROLE_TERTIARY];
+        state->accent_valid = 1;
+        efi_log(L"accent: derived Material palette from wallpaper");
+    } else if (state->accent_enabled) {
         efi_log(L"accent: no usable color in wallpaper - keeping configured colors");
-        return;
     }
-    state->accent_primary   = state->accent_roles[ROLE_PRIMARY];
-    state->accent_secondary = state->accent_roles[ROLE_SECONDARY];
-    state->accent_tertiary  = state->accent_roles[ROLE_TERTIARY];
-    state->accent_valid = 1;
-    efi_log(L"accent: derived Material palette from wallpaper");
 
-    if (state->accent_underline) {
-        state->underline_color = state->accent_roles[ROLE_PRIMARY];
-        state->highlight_color = state->accent_roles[ROLE_PRIMARY];
+    color_t c;
+    accent_spec_t *g_text      = &state->sp_g_text;
+    accent_spec_t *g_icons     = &state->sp_g_icons;
+    accent_spec_t *g_underline = &state->sp_g_underline;
+
+    if (state->accent_underline || state->sp_underline.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_underline, g_underline, ROLE_PRIMARY, &c))
+            state->underline_color = c;
     }
-    if (state->accent_text) {
-        state->title_color = state->accent_roles[ROLE_PRIMARY];
-        state->name_color  = state->accent_roles[ROLE_ON_SURFACE];
-        state->fg_color    = state->accent_roles[ROLE_ON_SURFACE_VARIANT];
+    if (state->accent_underline || state->sp_highlight.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_highlight, g_underline, ROLE_PRIMARY, &c))
+            state->highlight_color = c;
     }
-    if (state->accent_icons) {
-        state->shutdown_color = state->accent_roles[ROLE_SECONDARY];
-        state->reboot_color   = state->accent_roles[ROLE_SECONDARY];
-        state->firmware_color = state->accent_roles[ROLE_TERTIARY_CONTAINER];
+    if (state->accent_text || state->sp_title.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_title, g_text, ROLE_PRIMARY, &c))
+            state->title_color = c;
     }
-    state->bg_color = state->accent_roles[ROLE_SURFACE];
-    if (!state->blur_color_set)
-        state->blur_color = state->accent_roles[ROLE_ON_PRIMARY_CONTAINER];
+    if (state->accent_text || state->sp_name.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_name, g_text, ROLE_ON_SURFACE, &c))
+            state->name_color = c;
+    }
+    if (state->accent_text || state->sp_info.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_info, g_text, ROLE_ON_SURFACE_VARIANT, &c))
+            state->fg_color = c;
+    }
+    if (state->accent_icons || state->sp_shutdown.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_shutdown, g_icons, ROLE_SECONDARY, &c)) {
+            state->shutdown_color = c;
+            state->pwr_tint_on[0] = 1;
+        }
+    }
+    if (state->accent_icons || state->sp_reboot.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_reboot, g_icons, ROLE_SECONDARY, &c)) {
+            state->reboot_color = c;
+            state->pwr_tint_on[1] = 1;
+        }
+    }
+    if (state->accent_icons || state->sp_firmware.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_firmware, g_icons,
+                           ROLE_TERTIARY_CONTAINER, &c)) {
+            state->firmware_color = c;
+            state->pwr_tint_on[2] = 1;
+        }
+    }
+    if (state->accent_logo || state->sp_logo.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_logo, NULL, ROLE_PRIMARY, &c)) {
+            state->logo_tint = c;
+            state->logo_tint_on = 1;
+        }
+    }
+    if (state->accent_os_icons || state->sp_os_icons.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_os_icons, NULL, ROLE_PRIMARY, &c)) {
+            state->os_icon_tint = c;
+            state->os_icon_tint_on = 1;
+        }
+    }
+
+    if (!state->accent_valid) return;
+
+    if (accent_resolve(state, &state->sp_bg, NULL, ROLE_SURFACE, &c))
+        state->bg_color = c;
+    if (!state->blur_color_set &&
+        accent_resolve(state, &state->sp_blur, NULL, ROLE_ON_PRIMARY_CONTAINER, &c))
+        state->blur_color = c;
 }
 
 static void gui_draw_background(gui_state_t *state) {
@@ -1195,7 +1286,7 @@ static void draw_power_actions(gui_state_t *state, int focus_idx, int live) {
         int focused = ((int)i == focus_idx);
         if (state->power_icons && icon[i]) {
             if (live && !(focused && state->blur)) continue;
-            if (state->accent_icons && state->accent_valid)
+            if (state->pwr_tint_on[i])
                 draw_image_tinted_a(state, icon[i], state->pwr_x[i], state->pwr_y[i],
                                     (UINTN)state->pwr_w[i], key_color[i], 255);
             else
@@ -1517,8 +1608,8 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
         UINTN icon_x = x + (slot_w - ei) / 2;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
         if (e->icon) {
-            if (state->accent_os_icons && state->accent_valid)
-                draw_image_tinted_a(state, e->icon, icon_x, iy, ei, state->accent_primary, master);
+            if (state->os_icon_tint_on)
+                draw_image_tinted_a(state, e->icon, icon_x, iy, ei, state->os_icon_tint, master);
             else
                 draw_image_sized_a(state, e->icon, icon_x, iy, ei, master);
         } else {
@@ -1528,11 +1619,12 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
         }
         if (state->show_names) {
             color_t name_col;
-            if (e->has_color) name_col = e->color;
-            else if (i == sel_local) name_col = state->name_color;
-            else name_col = (color_t){ state->name_color.r * 7 / 10,
-                                       state->name_color.g * 7 / 10,
-                                       state->name_color.b * 7 / 10 };
+            if (!entry_own_color(state, e, &name_col)) {
+                if (i == sel_local) name_col = state->name_color;
+                else name_col = (color_t){ state->name_color.r * 7 / 10,
+                                           state->name_color.g * 7 / 10,
+                                           state->name_color.b * 7 / 10 };
+            }
             UINTN nw = text_width_px(e->name, name_px);
             INTN  nx = (INTN)x + (INTN)slot_w / 2 - (INTN)nw / 2;
             draw_text_px_a(state, e->name, nx, (INTN)name_y, name_col, name_px, master);
@@ -1580,7 +1672,8 @@ static void draw_center_info(gui_state_t *state, boot_entry_t *e,
     UINTN name_y  = top_y;
     UINTN path_y  = want_name ? top_y + name_px + 6 : top_y;
 
-    color_t name_col = e->has_color ? e->color : state->name_color;
+    color_t name_col;
+    if (!entry_own_color(state, e, &name_col)) name_col = state->name_color;
     color_t dim = { state->name_color.r * 7 / 10,
                     state->name_color.g * 7 / 10,
                     state->name_color.b * 7 / 10 };
@@ -1708,7 +1801,8 @@ static void draw_version_info(gui_state_t *state, boot_entry_t *e,
     deployment_t *d = &e->deployments[sel];
 
     UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
-    color_t name_col = e->has_color ? e->color : state->name_color;
+    color_t name_col;
+    if (!entry_own_color(state, e, &name_col)) name_col = state->name_color;
     color_t line_col = { state->name_color.r * 7 / 10,
                          state->name_color.g * 7 / 10,
                          state->name_color.b * 7 / 10 };
@@ -1808,7 +1902,8 @@ static void draw_snap_info(gui_state_t *state, boot_entry_t *e,
                    (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, master);
     }
 
-    color_t name_col = e->has_color ? e->color : state->name_color;
+    color_t name_col;
+    if (!entry_own_color(state, e, &name_col)) name_col = state->name_color;
     color_t dim = { state->name_color.r * 6 / 10,
                     state->name_color.g * 6 / 10,
                     state->name_color.b * 6 / 10 };
@@ -1894,9 +1989,9 @@ static void draw_header(gui_state_t *state) {
             lx = bx;
             ly = by + (INTN)(bh - lsz) / 2;
         }
-        if (state->accent_logo && state->accent_valid)
+        if (state->logo_tint_on)
             draw_image_tinted_a(state, state->logo, (UINTN)lx, (UINTN)ly, lsz,
-                                state->accent_primary, 255);
+                                state->logo_tint, 255);
         else
             draw_image_sized(state, state->logo, (UINTN)lx, (UINTN)ly, lsz);
     }
@@ -2285,9 +2380,9 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         }
 
         if (entry->icon) {
-            if (state->accent_os_icons && state->accent_valid)
+            if (state->os_icon_tint_on)
                 draw_image_tinted_a(state, entry->icon, ix, iyy, ei_d,
-                                    state->accent_primary, hp_new ? hp_a : 255);
+                                    state->os_icon_tint, hp_new ? hp_a : 255);
             else if (hp_new || dx)
                 draw_image_sized_a(state, entry->icon, ix, iyy, ei_d,
                                    hp_new ? hp_a : 255);
@@ -2301,8 +2396,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
 
         if (state->show_names) {
             color_t name_col;
-            if (entry->has_color) {
-                name_col = entry->color;
+            if (entry_own_color(state, entry, &name_col)) {
             } else if (page_start + i == state->selected && state->focus == FOCUS_ENTRIES) {
                 name_col = state->name_color;
             } else {
