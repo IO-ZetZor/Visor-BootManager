@@ -56,6 +56,7 @@ void efi_load_fs_drivers(void);
 int  efi_fs_drivers_deferred(void);
 
 int  efi_fs_drivers_pending(void);
+int  efi_fs_probe_exhausted(void);
 
 void efi_start_deferred_drivers(void);
 
@@ -88,6 +89,7 @@ void efi_log_close(void);
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count);
 
 void efi_sleep(UINTN milliseconds);
+int  efi_key_pending(void);
 
 UINT64 efi_get_tick(void);
 
