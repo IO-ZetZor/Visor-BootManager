@@ -177,6 +177,22 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.logo_gap        = config.logo_gap;
     gui.accent_logo     = config.has_accent_logo ? config.accent_logo
                                                  : config.accent_text;
+    gui.sp_logo         = config.sp_logo;
+    gui.sp_underline    = config.sp_underline;
+    gui.sp_highlight    = config.sp_highlight;
+    gui.sp_title        = config.sp_title;
+    gui.sp_name         = config.sp_name;
+    gui.sp_info         = config.sp_info;
+    gui.sp_shutdown     = config.sp_shutdown;
+    gui.sp_reboot       = config.sp_reboot;
+    gui.sp_firmware     = config.sp_firmware;
+    gui.sp_os_icons     = config.sp_os_icons;
+    gui.sp_blur         = config.sp_blur;
+    gui.sp_bg           = config.sp_bg;
+    gui.sp_g_text       = config.sp_g_text;
+    gui.sp_g_icons      = config.sp_g_icons;
+    gui.sp_g_underline  = config.sp_g_underline;
+    gui.sp_all          = config.sp_all;
     gui.show_names      = config.show_names;
     gui.center_info     = config.center_info;
     gui.box_radius      = config.box_radius;
