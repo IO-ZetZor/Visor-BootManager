@@ -68,7 +68,7 @@ OBJDIR = $(BUILD_DIR)/$(ARCH)
 OBJS = $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 
 FONT    ?= /usr/share/fonts/TTF/JetBrainsMono-Regular.ttf
-FONT_PX ?= 64
+FONT_PX ?= 128
 
 .PHONY: all clean install bakefont check-env check-reloc
 
