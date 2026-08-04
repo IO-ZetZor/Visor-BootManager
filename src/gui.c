@@ -42,6 +42,8 @@ static void font_ensure_decoded(void) {
     g_glyph_cov = out;
 }
 
+static void glyph_cache_flush(void);
+
 void gui_set_font(const char *name) {
     if (name && name[0]) {
         int is_jb = (name[0] == 'j' || name[0] == 'J');
@@ -49,6 +51,7 @@ void gui_set_font(const char *name) {
             efi_log(L"WARN: font= ignored - only the built-in 'jetbrains' font is available");
     }
     g_font = &jetbrains_font;
+    glyph_cache_flush();
 }
 
 static UINTN isqrt_(UINTN n) {
@@ -787,38 +790,6 @@ static void draw_image_tinted_a(gui_state_t *state, icon_t *icon,
     }
 }
 
-static UINT8 sharpen_cov(UINTN a) {
-    if (a == 0 || a >= 255) return (UINT8)a;
-    if (a < 24) return 0;
-    if (a > 232) return 255;
-    INTN v = (INTN)a - 128;
-    v = 128 + v * 5 / 4;
-    if (v < 0) v = 0;
-    if (v > 255) v = 255;
-    return (UINT8)v;
-}
-
-static UINT8 sample_cov(const unsigned char *cov, UINTN w, UINTN h,
-                        INTN sx1024, INTN sy1024) {
-    if (!w || !h) return 0;
-    if (sx1024 < 0) sx1024 = 0;
-    if (sy1024 < 0) sy1024 = 0;
-    UINTN x0 = (UINTN)sx1024 >> 10, y0 = (UINTN)sy1024 >> 10;
-    if (x0 >= w) x0 = w - 1;
-    if (y0 >= h) y0 = h - 1;
-    UINTN x1 = (x0 + 1 < w) ? x0 + 1 : x0;
-    UINTN y1 = (y0 + 1 < h) ? y0 + 1 : y0;
-    INTN fx = sx1024 & 0x3FF, fy = sy1024 & 0x3FF;
-    UINTN c00 = cov[y0 * w + x0], c10 = cov[y0 * w + x1];
-    UINTN c01 = cov[y1 * w + x0], c11 = cov[y1 * w + x1];
-    INTN top = (INTN)c00 + (((INTN)c10 - (INTN)c00) * fx >> 10);
-    INTN bot = (INTN)c01 + (((INTN)c11 - (INTN)c01) * fx >> 10);
-    INTN v = top + ((bot - top) * fy >> 10);
-    if (v < 0) v = 0;
-    if (v > 255) v = 255;
-    return sharpen_cov((UINTN)v);
-}
-
 static INTN scale_metric(INTN v, UINTN dh, UINTN size) {
     INTN num = v * (INTN)dh;
     INTN half = (INTN)size / 2;
@@ -826,26 +797,127 @@ static INTN scale_metric(INTN v, UINTN dh, UINTN size) {
                     : -((-num + half) / (INTN)size);
 }
 
-static UINTN blend_glyph(gui_state_t *state, const glyph_t *g, UINT32 rgb,
-                         INTN dx, INTN dyTop, UINTN size_px, UINTN dh, INTN master) {
-    UINTN advance = ((UINTN)g->advance * dh + size_px / 2) / size_px;
-    if (g->w == 0 || g->h == 0) return advance;
-    if (!g_glyph_cov) return advance;
-    const unsigned char *cov = g_glyph_cov + g->pixel_offset;
-    UINTN dw = ((UINTN)g->w * dh + size_px / 2) / size_px;
-    UINTN ddh = ((UINTN)g->h * dh + size_px / 2) / size_px;
-    if (dw == 0 || ddh == 0) return advance;
+#define FIXQ         16
+#define FIXONE       (1 << FIXQ)
+#define GLYPH_PAD    1
+#define GLYPH_PHASES 4
+#define GLYPH_SLOTS  512
 
+typedef struct {
+    UINT16  cp;
+    UINT16  px;
+    UINT8   phase;
+    UINT8   valid;
+    UINT16  w, h;
+    INT16   ox, oy;
+    UINT8  *cov;
+} glyph_entry_t;
+
+static glyph_entry_t g_glyphs[GLYPH_SLOTS];
+
+static void glyph_cache_flush(void) {
+    for (UINTN i = 0; i < GLYPH_SLOTS; i++) {
+        if (g_glyphs[i].cov) efi_free_pool(g_glyphs[i].cov);
+        g_glyphs[i].cov = NULL;
+        g_glyphs[i].valid = 0;
+    }
+}
+
+static void cov_axis(const UINT8 *src, UINTN sn, UINTN sstride,
+                     UINT8 *dst, UINTN dn, UINTN dstride,
+                     UINTN lines, UINTN line_src, UINTN line_dst,
+                     UINTN step, UINTN phase)
+{
+    UINTN width = step < FIXONE ? FIXONE : step;
+    UINTN half  = width / 2;
+    INTN  poff  = (INTN)(((UINT64)phase * step) >> FIXQ);
+
+    for (UINTN i = 0; i < dn; i++) {
+        INTN c  = ((INTN)i - GLYPH_PAD) * (INTN)step + (INTN)(step / 2) - poff;
+        INTN lo = c - (INTN)half;
+        INTN hi = c + (INTN)half;
+        INTN k0 = lo >> FIXQ;
+        INTN k1 = (hi + FIXONE - 1) >> FIXQ;
+        if (k0 < 0) k0 = 0;
+        if (k1 > (INTN)sn) k1 = (INTN)sn;
+
+        for (UINTN l = 0; l < lines; l++) {
+            const UINT8 *s = src + l * line_src;
+            UINT64 acc = 0;
+            for (INTN k = k0; k < k1; k++) {
+                INTN a = (k << FIXQ), b = a + FIXONE;
+                if (a < lo) a = lo;
+                if (b > hi) b = hi;
+                if (b <= a) continue;
+                acc += (UINT64)s[(UINTN)k * sstride] * (UINT64)(b - a);
+            }
+            UINT64 v = (acc + (width >> 1)) / width;
+            if (v > 255) v = 255;
+            dst[l * line_dst + i * dstride] = (UINT8)v;
+        }
+    }
+}
+
+static glyph_entry_t *glyph_get(CHAR16 cp, UINTN dh, UINTN phase) {
+    const font_t *f = g_font;
+    if (cp < f->first || cp > f->last) cp = '?';
+    UINTN slot = ((UINTN)cp * 2654435761u + dh * 97u + phase) & (GLYPH_SLOTS - 1);
+    glyph_entry_t *e = &g_glyphs[slot];
+    if (e->valid && e->cp == cp && e->px == dh && e->phase == phase) return e;
+
+    const glyph_t *g = &f->glyphs[cp - f->first];
+    if (e->cov) efi_free_pool(e->cov);
+    e->cov = NULL;
+    e->valid = 1;
+    e->cp = (UINT16)cp;
+    e->px = (UINT16)dh;
+    e->phase = (UINT8)phase;
+    e->w = e->h = 0;
+    e->ox = e->oy = 0;
+    if (!g->w || !g->h || !g_glyph_cov || !dh) return e;
+
+    UINTN size = f->size;
+    UINTN step = ((UINTN)size << FIXQ) / dh;
+    UINTN dw = ((UINTN)g->w * dh + size - 1) / size + 2 * GLYPH_PAD;
+    UINTN dhh = ((UINTN)g->h * dh + size - 1) / size + 2 * GLYPH_PAD;
+    if (!dw || !dhh || dw > 4096 || dhh > 4096) return e;
+
+    UINT8 *tmp = efi_allocate_pool(dw * (UINTN)g->h);
+    UINT8 *out = efi_allocate_pool(dw * dhh);
+    if (!tmp || !out) {
+        if (tmp) efi_free_pool(tmp);
+        if (out) efi_free_pool(out);
+        return e;
+    }
+
+    const UINT8 *cov = (const UINT8 *)g_glyph_cov + g->pixel_offset;
+    UINTN ph = (phase << FIXQ) / GLYPH_PHASES;
+
+    /* horizontal */
+    cov_axis(cov, g->w, 1, tmp, dw, 1, g->h, g->w, dw, step, ph);
+    /* vertical */
+    cov_axis(tmp, g->h, dw, out, dhh, dw, dw, 1, 1, step, 0);
+
+    efi_free_pool(tmp);
+    e->cov = out;
+    e->w = (UINT16)dw;
+    e->h = (UINT16)dhh;
+    e->ox = -GLYPH_PAD;
+    e->oy = -GLYPH_PAD;
+    return e;
+}
+
+static void blend_glyph(gui_state_t *state, const glyph_entry_t *e, UINT32 rgb,
+                        INTN dx, INTN dyTop, INTN master) {
+    if (!e->cov || !e->w || !e->h) return;
     UINT8 fr = (rgb >> 16) & 0xFF, fg = (rgb >> 8) & 0xFF, fb = rgb & 0xFF;
-    for (UINTN j = 0; j < ddh; j++) {
-        INTN sy = ((INTN)((j * 2 + 1) * g->h) - (INTN)ddh) * 1024
-                / (INTN)(ddh * 2);
+    for (UINTN j = 0; j < e->h; j++) {
         INTN py = dyTop + (INTN)j;
         if (py < 0 || py >= (INTN)state->screen_height) continue;
-        for (UINTN i = 0; i < dw; i++) {
-            INTN sx = ((INTN)((i * 2 + 1) * g->w) - (INTN)dw) * 1024
-                    / (INTN)(dw * 2);
-            UINT8 a = sample_cov(cov, g->w, g->h, sx, sy);
+        const UINT8 *row = e->cov + j * e->w;
+        for (UINTN i = 0; i < e->w; i++) {
+            UINT8 a = row[i];
+            if (!a) continue;
             if (master < 255) a = (UINT8)((UINTN)a * (UINTN)master / 255);
             if (!a) continue;
             INTN px = dx + (INTN)i;
@@ -859,7 +931,6 @@ static UINTN blend_glyph(gui_state_t *state, const glyph_t *g, UINT32 rgb,
             *p = (0xFFu << 24) | (r << 16) | (gg << 8) | b;
         }
     }
-    return advance;
 }
 
 static UINTN text_width_px(CHAR16 *text, UINTN dh) {
@@ -870,14 +941,14 @@ static UINTN text_width_px(CHAR16 *text, UINTN dh) {
         CHAR16 c = *text++;
         if (c < g_font->first || c > g_font->last) c = '?';
         const glyph_t *g = &g_font->glyphs[c - g_font->first];
-        pen += (UINTN)g->advance * dh * 64 / size;
+        pen += (UINTN)g->advance_q6 * dh / size;
     }
     return (pen + 32) / 64;
 }
 
 static void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
                            color_t color, UINTN dh, INTN master) {
-    if (!text || master <= 0) return;
+    if (!text || master <= 0 || !dh) return;
     if (master > 255) master = 255;
     font_ensure_decoded();
     UINT32 rgb = color_to_u32(color) & 0x00FFFFFF;
@@ -888,11 +959,18 @@ static void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
         CHAR16 c = *text++;
         if (c < g_font->first || c > g_font->last) c = '?';
         const glyph_t *g = &g_font->glyphs[c - g_font->first];
-        INTN gx = (pen64 + 32) / 64
-                + scale_metric((INTN)g->left, dh, size);
-        INTN gyTop = (INTN)baseline - scale_metric((INTN)g->top, dh, size);
-        (void)blend_glyph(state, g, rgb, gx, gyTop, size, dh, master);
-        pen64 += (INTN)g->advance * (INTN)dh * 64 / (INTN)size;
+
+        INTN gpen = pen64 + ((INTN)g->left * (INTN)dh * 64) / (INTN)size;
+        INTN gx    = gpen >> 6;
+        INTN frac  = gpen - (gx << 6);
+        UINTN phase = (UINTN)((frac * GLYPH_PHASES) >> 6);
+        if (phase >= GLYPH_PHASES) phase = GLYPH_PHASES - 1;
+
+        INTN gyTop = baseline - scale_metric((INTN)g->top, dh, size);
+        glyph_entry_t *e = glyph_get(c, dh, phase);
+        if (e) blend_glyph(state, e, rgb, gx + e->ox, gyTop + e->oy, master);
+
+        pen64 += ((INTN)g->advance_q6 * (INTN)dh) / (INTN)size;
     }
 }
 
@@ -3175,4 +3253,5 @@ void gui_shutdown(gui_state_t *state) {
         efi_free_pool(state->blur_cache);
         state->blur_cache = NULL;
     }
+    glyph_cache_flush();
 }
