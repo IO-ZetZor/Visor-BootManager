@@ -38,7 +38,7 @@ def main():
     for cp in range(FIRST, LAST + 1):
         ch = chr(cp)
 
-        adv = int(round(font.getlength(ch)))
+        adv = int(round(font.getlength(ch) * 64))
 
         bbox = font.getbbox(ch)
         if bbox is None:
