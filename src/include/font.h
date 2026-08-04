@@ -5,7 +5,7 @@ typedef struct {
     unsigned short w, h;
     short          left;
     short          top;
-    unsigned short advance;
+    unsigned short advance_q6;
     unsigned int   pixel_offset;
 } glyph_t;
 
