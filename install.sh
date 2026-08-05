@@ -12,18 +12,107 @@ DO_FS_DRIVERS=-1
 FORCE_CONFIG=0
 FS_DRIVER=""
 INSTALL_CLI=1
+ARCH=""
+USE_COLOR=-1
 EFIFS_VERSION="${EFIFS_VERSION:-v1.12}"
 EFIFS_URL_OVERRIDDEN="${EFIFS_URL:-}"
 EFIFS_URL="${EFIFS_URL:-https://github.com/pbatard/efifs/releases/download/$EFIFS_VERSION}"
 CLI_DIR="${CLI_DIR:-/usr/local/bin}"
 
 VISOR_DIR_REL="EFI/visor"
-EFI_NAME="visor_x64.efi"
 CLI_NAME="visor"
 
-say()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
+setup_style() {
+    if [ "$USE_COLOR" -eq -1 ]; then
+        if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-dumb}" = dumb ] || [ ! -t 1 ]; then
+            USE_COLOR=0
+        else
+            USE_COLOR=1
+        fi
+    fi
+
+    if [ "$USE_COLOR" -eq 1 ]; then
+        C_ACCENT=$'\033[38;5;153m'; C_DIM=$'\033[38;5;245m'
+        C_OK=$'\033[38;5;114m';     C_WARN=$'\033[38;5;179m'
+        C_ERR=$'\033[38;5;203m';    C_ASK=$'\033[38;5;183m'
+        C_BOLD=$'\033[1m';          C_OFF=$'\033[0m'
+    else
+        C_ACCENT=""; C_DIM=""; C_OK=""; C_WARN=""
+        C_ERR="";    C_ASK=""; C_BOLD=""; C_OFF=""
+    fi
+
+    case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+        *[Uu][Tt][Ff]8*|*[Uu][Tt][Ff]-8*) UNICODE=1 ;;
+        *) UNICODE=0 ;;
+    esac
+    [ "$USE_COLOR" -eq 0 ] && [ ! -t 1 ] && UNICODE=0
+
+    if [ "$UNICODE" -eq 1 ]; then
+        S_STEP="▸"; S_OK="✓"; S_WARN="!"; S_ERR="✗"; S_ASK="?"; S_BUL="·"; S_RULE="─"
+    else
+        S_STEP=">"; S_OK="+"; S_WARN="!"; S_ERR="x"; S_ASK="?"; S_BUL="-"; S_RULE="-"
+    fi
+}
+
+rule() {
+    local n=54 out=""
+    while [ "${#out}" -lt "$n" ]; do out="$out$S_RULE"; done
+    printf '%s%s%s\n' "$C_DIM" "$out" "$C_OFF"
+}
+
+hdr()  { printf '\n%s%s%s %s%s\n' "$C_ACCENT" "$S_STEP" "$C_OFF" "$C_BOLD$*" "$C_OFF"; }
+say()  { printf '  %s%s%s %s\n' "$C_DIM" "$S_BUL" "$C_OFF" "$*"; }
+ok()   { printf '  %s%s%s %s\n' "$C_OK" "$S_OK" "$C_OFF" "$*"; }
+warn() { printf '  %s%s%s %s\n' "$C_WARN" "$S_WARN" "$C_OFF" "$*" >&2; }
+die()  { printf '\n%s%s%s %s\n\n' "$C_ERR" "$S_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+kv() { printf '  %s%-16s%s %s\n' "$C_DIM" "$1" "$C_OFF" "$2"; }
+
+on_err() {
+    local rc=$? line=$1
+    [ "$rc" -eq 0 ] && return 0
+    printf '\n%s%s%s install.sh failed at line %s (exit %s)\n' \
+        "$C_ERR" "$S_ERR" "$C_OFF" "$line" "$rc" >&2
+    printf '  Nothing further was changed. Re-run with --help for options.\n\n' >&2
+}
+trap 'on_err $LINENO' ERR
+
+banner() {
+    printf '\n%s' "$C_ACCENT"
+    if [ "$UNICODE" -eq 1 ]; then
+        cat <<'EOF'
+  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠀⠀⠀⠀⢀⣺⣿⢀⠀⠀⠀⠀⢀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠀⠀⠀⠀⠀⢘⣿⣦⠶⠒⠛⠛⢿⣿⠛⠛⠓⠶⣦⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠀⠀⠀⣠⠾⠛⠻⠿⠂⠀⠀⠀⠀⠁⠀⠀⠀⠀⠿⠟⠛⠷⣄⡀⠀⠀⠀⠀⠀⠀⠀
+  ⠀⠀⠀⠸⣿⣾⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢨⣿⣿⠇⠀⠀⠀⠀⠀
+  ⠀⠀⠀⢰⠟⠙⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⠀⠀⠀⡈⠉⠙⣦⠖⣆⠀⠀⠀
+  ⠀⠀⢠⡏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⡆⠈⠓⢦⡞⠁⠀⣀⣹⠀⡞⣠⡀⠀
+  ⠀⠀⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⡄⣰⠋⠈⠳⠄⡇⠙⣷⠋⠀⡇⠀
+  ⠀⢸⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣿⣿⡄⠀⠀⠀⠀⠳⢺⢻⡟⠶⠃⠀
+  ⠀⢸⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣷⡀⠀⠀⠀⠠⡇⣿⡹⡄⠀⠀
+  ⠀⢸⣷⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⣷⠀⠀⠀⡀⠉⢸⡇⢧⠀⠀
+  ⠀⠀⣿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⣿⡿⠀⠀⣸⡇⠀⢸⠇⢸⡄⠀
+  ⠀⠀⠘⣷⡀⠀⠀⢠⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣿⣿⣿⣿⣿⡇⢀⣴⣿⠁⠀⣸⠀⢸⡇⠀
+  ⠀⠀⠀⠘⢿⣄⣄⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠃⠀⠀⡿⠀⢸⡇⠀
+  ⠀⠀⠀⠀⠈⠛⢿⠦⣜⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟⣹⠟⠁⠀⠀⢰⠇⠀⢸⠇⠀
+  ⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠈⠛⠿⣿⣿⣿⣿⣿⡿⠟⠋⠀⠀⠀⠀⠀⠀⠀⡟⠀⠀⠈⠀⠀
+  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+EOF
+    else
+        cat <<'EOF'
+   __      __ _____  _____  ____  _____
+   \ \    / /|_   _|/ ____|/ __ \|  __ \
+    \ \  / /   | | | (___ | |  | | |__) |
+     \ \/ /    | |  \___ \| |  | |  _  /
+      \  /    _| |_ ____) | |__| | | \ \
+       \/    |_____|_____/ \____/|_|  \_\
+EOF
+    fi
+    printf '%s' "$C_OFF"
+    printf '  %sVISOR%s  %sA minimal UEFI boot manager%s\n\n' \
+        "$C_BOLD$C_ACCENT" "$C_OFF" "$C_DIM" "$C_OFF"
+}
 
 usage() {
     cat <<'EOF'
@@ -32,7 +121,8 @@ install.sh - install Visor to the EFI System Partition (ESP)
 Usage: ./install.sh [options]
 
   --esp PATH         ESP mount point (auto-detected if omitted)
-  --no-build         skip 'make'; install the existing visor_x64.efi
+  --arch NAME        target architecture: x86_64 or aarch64 (default: this host)
+  --no-build         skip 'make'; install the existing binary
   --boot-entry       add a UEFI boot entry via efibootmgr (else prompted)
   --no-boot-entry    do not add or prompt for a UEFI boot entry
   --sign             sign Visor for Secure Boot via sbctl (else prompted)
@@ -44,7 +134,11 @@ Usage: ./install.sh [options]
   --no-cli           do not install the host-side 'visor' command
   --cli-dir PATH     directory for the host-side command (default: /usr/local/bin)
   --force-config     overwrite an existing boot.conf with the default
+  --color / --no-color   force or disable coloured output
   -h, --help         show this help
+
+Honours NO_COLOR. Colour and box-drawing are disabled automatically when the
+output is not a terminal.
 EOF
     exit 0
 }
@@ -52,10 +146,10 @@ EOF
 ask() {
     local prompt="$1" reply
     if [ -t 0 ]; then
-        printf '\033[1;36m??\033[0m %s [y/n] ' "$prompt" >&2
+        printf '  %s%s%s %s [y/n] ' "$C_ASK" "$S_ASK" "$C_OFF" "$prompt" >&2
         read -r reply || true
     elif [ -r /dev/tty ]; then
-        printf '\033[1;36m??\033[0m %s [y/n] ' "$prompt" >&2
+        printf '  %s%s%s %s [y/n] ' "$C_ASK" "$S_ASK" "$C_OFF" "$prompt" >&2
         read -r reply < /dev/tty || true
     else
         echo 0; return
@@ -66,6 +160,7 @@ ask() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --esp)          ESP="${2:-}"; shift 2 ;;
+        --arch)         ARCH="${2:-}"; shift 2 ;;
         --no-build)     DO_BUILD=0; shift ;;
         --boot-entry)   DO_BOOT_ENTRY=1; shift ;;
         --no-boot-entry) DO_BOOT_ENTRY=0; shift ;;
@@ -77,10 +172,27 @@ while [ $# -gt 0 ]; do
         --no-cli)       INSTALL_CLI=0; shift ;;
         --cli-dir)      CLI_DIR="${2:-}"; shift 2 ;;
         --force-config) FORCE_CONFIG=1; shift ;;
+        --color)        USE_COLOR=1; shift ;;
+        --no-color)     USE_COLOR=0; shift ;;
         -h|--help)      usage ;;
-        *)              die "unknown option: $1 (try --help)" ;;
+        *)              setup_style; die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+setup_style
+
+if [ -z "$ARCH" ]; then
+    case "$(uname -m)" in
+        aarch64|arm64) ARCH=aarch64 ;;
+        x86_64|amd64)  ARCH=x86_64 ;;
+        *)             ARCH=x86_64 ;;
+    esac
+fi
+case "$ARCH" in
+    x86_64)  EFI_NAME="visor_x64.efi" ;;
+    aarch64) EFI_NAME="visor_aa64.efi" ;;
+    *)       die "unsupported --arch '$ARCH' (use x86_64 or aarch64)" ;;
+esac
 
 if [ -n "$FS_DRIVER" ]; then
     [ -f "$FS_DRIVER" ] || die "fs-driver not found: $FS_DRIVER"
@@ -166,7 +278,7 @@ efifs_name_for() {
 }
 
 efifs_arch_suffix() {
-    case "$(uname -m)" in
+    case "$ARCH" in
         aarch64) echo aa64 ;;
         *)       echo x64 ;;
     esac
@@ -217,7 +329,7 @@ install_efifs_driver() {
     install -m 0644 "$tmp" "$DEST/drivers/$driver"
     rm -f "$tmp"
     DRIVER_DESTS+=("$DEST/drivers/$driver")
-    say "Installed filesystem driver: $DEST/drivers/$driver"
+    ok "Filesystem driver: $DEST/drivers/$driver"
 }
 
 detect_esp() {
@@ -242,23 +354,34 @@ detect_esp() {
     fi
 }
 
+printf '\n  %sVisor%s %sinstaller%s\n' "$C_BOLD$C_ACCENT" "$C_OFF" "$C_DIM" "$C_OFF"
+rule
+
+hdr "Target"
+
 if [ -z "$ESP" ]; then
-    say "Detecting EFI System Partition..."
     ESP="$(detect_esp || true)"
+    [ -n "$ESP" ] || die "Could not find the ESP. Re-run with: --esp /your/esp/mount"
+    kv "ESP" "$ESP $C_DIM(auto-detected)$C_OFF"
+else
+    kv "ESP" "$ESP"
 fi
-[ -n "$ESP" ] || die "Could not find the ESP. Re-run with: --esp /your/esp/mount"
 [ -d "$ESP" ] || die "ESP path does not exist: $ESP"
-say "Using ESP: $ESP"
 
 DEST="$ESP/$VISOR_DIR_REL"
+kv "Architecture" "$ARCH"
+kv "Binary" "$EFI_NAME"
+kv "Install to" "$DEST"
 
 if [ "$DO_BUILD" -eq 1 ]; then
-    say "Building $EFI_NAME ..."
+    hdr "Build"
+    say "Compiling $EFI_NAME for $ARCH ..."
     rm -f "$EFI_NAME"
-    if ! make --no-print-directory; then
+    if ! make --no-print-directory ARCH="$ARCH"; then
         die "Build failed - not installing. Fix the errors above (see README 'Requirements')."
     fi
     [ -f "$EFI_NAME" ] || die "Build reported success but $EFI_NAME is missing - aborting."
+    ok "Built $EFI_NAME ($(du -h "$EFI_NAME" | cut -f1))"
 fi
 [ -f "$EFI_NAME" ] || die "$EFI_NAME not found - build first or drop --no-build."
 
@@ -272,9 +395,19 @@ if [ ! -w "$ESP" ]; then
     die "No write permission on $ESP. Re-run with sudo."
 fi
 
-say "Installing into $DEST"
+hdr "Install"
+
 mkdir -p "$DEST/icons" "$DEST/backgrounds"
+
+BACKUP=""
+if [ -f "$DEST/$EFI_NAME" ]; then
+    BACKUP="$DEST/$EFI_NAME.bak"
+    cp -f "$DEST/$EFI_NAME" "$BACKUP"
+    say "Previous binary kept as $(basename "$BACKUP")"
+fi
+
 install -m 0644 "$EFI_NAME" "$DEST/$EFI_NAME"
+ok "Loader: $DEST/$EFI_NAME"
 
 if [ -d assets/icons ]; then
     cp -f assets/icons/*.png "$DEST/icons/" 2>/dev/null || true
@@ -285,22 +418,26 @@ fi
 if [ -f assets/logo.png ]; then
     install -m 0644 assets/logo.png "$DEST/logo.png" 2>/dev/null || true
 fi
+ok "Assets: icons, backgrounds, logo"
 
+CLI_INSTALLED=""
 if [ "$INSTALL_CLI" -eq 1 ] && [ -f "$CLI_NAME" ]; then
     if mkdir -p "$CLI_DIR" 2>/dev/null && install -m 0755 "$CLI_NAME" "$CLI_DIR/$CLI_NAME" 2>/dev/null; then
-        say "Installed command: $CLI_DIR/$CLI_NAME"
+        CLI_INSTALLED="$CLI_DIR/$CLI_NAME"
+        ok "Command: $CLI_INSTALLED"
     else
         warn "Could not install $CLI_NAME command to $CLI_DIR"
     fi
 fi
 
 CONF="$DEST/boot.conf"
+CONF_IS_NEW=0
 if [ -f "$CONF" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
-    say "Keeping existing config: $CONF (use --force-config to replace)"
+    ok "Config: kept existing $CONF"
 else
     install -m 0644 boot.conf.example "$CONF"
-    say "Wrote default config: $CONF"
-    warn "Edit $CONF and set your kernel paths / root PARTUUID before rebooting."
+    CONF_IS_NEW=1
+    ok "Config: wrote default $CONF"
 fi
 
 if [ ! -e "$DEST/boot.log" ]; then
@@ -310,20 +447,24 @@ fi
 
 DRIVER_DESTS=()
 if [ -n "$FS_DRIVER" ]; then
+    hdr "Filesystem drivers"
     mkdir -p "$DEST/drivers"
     install -m 0644 "$FS_DRIVER" "$DEST/drivers/$(basename "$FS_DRIVER")"
     DRIVER_DESTS+=("$DEST/drivers/$(basename "$FS_DRIVER")")
-    say "Installed filesystem driver: $DEST/drivers/$(basename "$FS_DRIVER")"
+    ok "Filesystem driver: $DEST/drivers/$(basename "$FS_DRIVER")"
 fi
 
 BOOT_FS="$(boot_fs_type)"
 if [ "$DO_FS_DRIVERS" -ne 0 ] && [ -z "$FS_DRIVER" ]; then
     case "$BOOT_FS" in
         vfat|msdos|"")
-            [ "$DO_FS_DRIVERS" -eq 1 ] && \
+            if [ "$DO_FS_DRIVERS" -eq 1 ]; then
+                hdr "Filesystem drivers"
                 say "Kernels live on a FAT filesystem the firmware already reads - no driver needed."
+            fi
             ;;
         *)
+            hdr "Filesystem drivers"
             if [ "$DO_FS_DRIVERS" -eq -1 ]; then
                 say "Your kernels appear to live on a '$BOOT_FS' filesystem, which UEFI cannot read."
                 DO_FS_DRIVERS="$(ask "Install the EfiFs $BOOT_FS driver so Visor can load them?")"
@@ -333,7 +474,13 @@ if [ "$DO_FS_DRIVERS" -ne 0 ] && [ -z "$FS_DRIVER" ]; then
     esac
 fi
 
-[ "$DO_BOOT_ENTRY" -eq -1 ] && DO_BOOT_ENTRY="$(ask 'Add a UEFI boot entry for Visor with efibootmgr?')"
+BOOT_ENTRY_STATE="skipped"
+if [ "$DO_BOOT_ENTRY" -eq -1 ]; then
+    hdr "Firmware boot entry"
+    DO_BOOT_ENTRY="$(ask 'Add a UEFI boot entry for Visor with efibootmgr?')"
+elif [ "$DO_BOOT_ENTRY" -eq 1 ]; then
+    hdr "Firmware boot entry"
+fi
 if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
     if ! command -v efibootmgr >/dev/null 2>&1; then
         warn "efibootmgr not installed; skipping boot entry."
@@ -345,28 +492,65 @@ if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
         if [ ! -b "$disk" ]; then
             warn "Could not determine ESP disk (got '$disk'); skipping boot entry."
         elif efibootmgr | grep -q 'Visor'; then
-            say "A 'Visor' boot entry already exists; leaving it untouched."
+            ok "Boot entry 'Visor' already exists; left untouched."
+            BOOT_ENTRY_STATE="already present"
         else
             loader="\\${VISOR_DIR_REL//\//\\}\\$EFI_NAME"
-            say "Creating UEFI boot entry 'Visor' -> $disk part $partnum"
             efibootmgr --create --disk "$disk" --part "$partnum" \
                        --label "Visor" --loader "$loader" >/dev/null
+            ok "Boot entry 'Visor' -> $disk part $partnum"
+            BOOT_ENTRY_STATE="created"
         fi
     fi
 fi
 
-[ "$DO_SIGN" -eq -1 ] && DO_SIGN="$(ask 'Sign Visor for Secure Boot with sbctl?')"
+SIGN_STATE="skipped"
+if [ "$DO_SIGN" -eq -1 ]; then
+    hdr "Secure Boot"
+    DO_SIGN="$(ask 'Sign Visor for Secure Boot with sbctl?')"
+elif [ "$DO_SIGN" -eq 1 ]; then
+    hdr "Secure Boot"
+fi
 if [ "$DO_SIGN" -eq 1 ]; then
     if ! command -v sbctl >/dev/null 2>&1; then
         warn "sbctl not installed; skipping signing."
     else
-        say "Signing $DEST/$EFI_NAME with sbctl"
-        sbctl sign -s "$DEST/$EFI_NAME" || warn "sbctl sign failed (are keys enrolled?)."
+        if sbctl sign -s "$DEST/$EFI_NAME" >/dev/null 2>&1; then
+            ok "Signed $EFI_NAME"
+            SIGN_STATE="signed"
+        else
+            warn "sbctl sign failed (are keys enrolled?)."
+            SIGN_STATE="failed"
+        fi
         for d in ${DRIVER_DESTS[@]+"${DRIVER_DESTS[@]}"}; do
-            say "Signing $d with sbctl"
-            sbctl sign -s "$d" || warn "sbctl sign failed for the driver."
+            if sbctl sign -s "$d" >/dev/null 2>&1; then
+                ok "Signed $(basename "$d")"
+            else
+                warn "sbctl sign failed for $(basename "$d")."
+            fi
         done
     fi
 fi
 
-say "Done. Visor is installed at $DEST"
+printf '\n'
+rule
+printf '  %s%sVisor is installed%s\n\n' "$C_BOLD" "$C_OK" "$C_OFF"
+kv "Location" "$DEST"
+kv "Loader" "$EFI_NAME ($ARCH)"
+kv "Config" "$CONF"
+if [ -n "$CLI_INSTALLED" ]; then kv "Command" "$CLI_INSTALLED"; fi
+kv "Boot entry" "$BOOT_ENTRY_STATE"
+kv "Secure Boot" "$SIGN_STATE"
+if [ -n "$BACKUP" ]; then kv "Rollback" "$(basename "$BACKUP")"; fi
+
+printf '\n  %sNext%s\n' "$C_BOLD" "$C_OFF"
+if [ "$CONF_IS_NEW" -eq 1 ]; then
+    say "Edit $CONF - set your kernel paths and root PARTUUID."
+    say "Or delete it and let Visor auto-detect your entries."
+else
+    say "Your existing boot.conf was kept. Run 'visor status' to check it."
+fi
+say "Docs: https://visor-bootmanager.vercel.app"
+
+banner
+exit 0
