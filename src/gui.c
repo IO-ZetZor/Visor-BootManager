@@ -893,9 +893,7 @@ static glyph_entry_t *glyph_get(CHAR16 cp, UINTN dh, UINTN phase) {
     const UINT8 *cov = (const UINT8 *)g_glyph_cov + g->pixel_offset;
     UINTN ph = (phase << FIXQ) / GLYPH_PHASES;
 
-    /* horizontal */
     cov_axis(cov, g->w, 1, tmp, dw, 1, g->h, g->w, dw, step, ph);
-    /* vertical */
     cov_axis(tmp, g->h, dw, out, dhh, dw, dw, 1, 1, step, 0);
 
     efi_free_pool(tmp);
