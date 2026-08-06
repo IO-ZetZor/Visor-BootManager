@@ -95,7 +95,8 @@ quiet=0
 #            partitions and any XBOOTLDR (separate /boot) partition. Much
 #            faster. If a quick scan turns up nothing at all, Visor falls back
 #            to a deep scan rather than showing an empty menu.
-# Aliases: scan_mode; also quick_scan=1 / deep_scan=0.
+# Aliases: scan_mode; also quick_scan=1 / deep_scan=0, each with the underscore
+# dropped too (quickscan, deepscan).
 #scan=deep
 
 # Live hotplug: while the menu is up, Visor watches for volumes that appear
@@ -251,6 +252,7 @@ quiet=0
 # Countdown, hints and other dim labels.
 #info_color=on_surface_variant
 # Menu background fill, used when no background image is set.
+# Alias: background_color.
 #bg_color=#1A1A2E
 
 # --- Blur highlight ---------------------------------------------------------
@@ -373,6 +375,7 @@ background=\EFI\visor\backgrounds\default.png
 #accent_icons=1
 #accent_text=0
 #accent_os_icons=0
+# Aliases: logo_color, accent_logo_color.
 #accent_logo=tertiary
 #accent_variant=tonal
 
@@ -467,17 +470,22 @@ background=\EFI\visor\backgrounds\default.png
 #        kernel_encrypted = 1                  (optional - override only kernel)
 #        initrd_encrypted = 1                  (optional - override only initrd)
 #        luks      = 1                         (optional - ask for a LUKS password
-#                                               and inject it as an initrd keyfile)
+#                                               and inject it as an initrd keyfile;
+#                                               alias: luks_password - a switch,
+#                                               not a place to put a passphrase)
 #        luks_key_path = /crypto_keyfile.bin   (optional - path inside initramfs)
 #        luks_preset = mkinitcpio              (optional - auto-generate keyfile
 #                                               option; mkinitcpio/arch, dracut,
-#                                               systemd)
+#                                               systemd; alias: luks_initramfs)
 #        luks_cmdline = "..."                  (optional - manual keyfile option;
-#                                               overrides luks_preset)
+#                                               overrides luks_preset; aliases:
+#                                               luks_options, luks_options_append)
 #        luks_confirm = 1                      (optional - ask for the passphrase
-#                                               twice and compare, see below)
+#                                               twice and compare, see below;
+#                                               alias: luks_verify)
 #        luks_verbose = 1                      (optional - drop quiet/splash from
-#                                               this entry's cmdline, see below)
+#                                               this entry's cmdline, see below;
+#                                               alias: luks_show_prompt)
 #    }
 #
 #  About luks=1 and wrong passphrases: Visor cannot verify the passphrase - it
