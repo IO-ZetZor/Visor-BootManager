@@ -1,0 +1,30 @@
+post_install() {
+  echo
+  echo ":: Visor is installed."
+  echo "::"
+  echo ":: The EFI binary is in /usr/lib/visor/"
+  echo ":: Example config at    /usr/share/visor/boot.conf.example"
+  echo ":: Config schema at     /usr/share/visor/boot.conf.schema.json"
+  echo "::"
+  echo ":: Nothing on your ESP has been touched yet. To deploy, run:"
+  echo "::   visor install"
+  echo "::"
+  echo ":: Or use the one-shot installer script to fetch the latest"
+  echo ":: (even if you did not build the AUR package):"
+  echo "::   sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/IO-ZetZor/Visor-BootManager/main/get.sh)\""
+  echo "::"
+  echo ":: Common visor commands:"
+  echo "::   visor build          Build the EFI binary"
+  echo "::   visor install        Install to the ESP"
+  echo "::   visor update         Pull latest source, rebuild, reinstall"
+  echo "::   visor doctor         Check everything"
+  echo "::   visor encrypt        Encrypt kernel/initrd for the ESP"
+  echo "::   visor sign           Sign for Secure Boot with sbctl"
+  echo "::"
+  echo ":: Full config reference: https://visor-bootmanager.vercel.app/install"
+  echo
+}
+
+post_upgrade() {
+  post_install
+}
