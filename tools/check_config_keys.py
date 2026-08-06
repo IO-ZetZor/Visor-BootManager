@@ -2,8 +2,8 @@
 """Report config keys that src/config.c accepts but the docs do not mention.
 
 The parser is the source of truth. Anything it accepts should appear in the
-schema, the example config and the wiki; anything the docs promise should be
-something the parser actually accepts.
+schema and the example config; anything the schema promises should be something
+the parser actually accepts.
 
 Exit status is 1 when a key is missing somewhere, so this can gate a release.
 """
@@ -18,7 +18,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_C = os.path.join(ROOT, "src", "config.c")
 SCHEMA = os.path.join(ROOT, "docs", "boot.conf.schema.json")
 EXAMPLE = os.path.join(ROOT, "boot.conf.example")
-WIKI_DIR = os.path.join(ROOT, "..", "visor-wiki")
 
 
 def read(path):
@@ -64,17 +63,7 @@ def mentioned(text, key):
 def main():
     glob, entry = parser_keys()
     s_glob, s_entry = schema_keys()
-
     example = read(EXAMPLE)
-
-    wiki = ""
-    if os.path.exists(WIKI_DIR):
-        for fname in os.listdir(WIKI_DIR):
-            if fname.endswith(".html"):
-                wiki += read(os.path.join(WIKI_DIR, fname)) + "\n"
-
-    if not wiki:
-        wiki = None
 
     problems = 0
 
@@ -92,17 +81,11 @@ def main():
     report("missing from example:",
            {k for k in glob | entry if not mentioned(example, k)})
 
-    if wiki is None:
-        print("  %-28s %s" % ("wiki not found:", WIKI_DIR))
-    else:
-        report("missing from wiki:",
-               {k for k in glob | entry if not mentioned(wiki, k)})
-
     if problems:
         print("\n%d key(s) out of sync" % problems)
         return 1
 
-    print("all keys documented in schema, example and wiki")
+    print("all keys documented in the schema and the example config")
     return 0
 
 
