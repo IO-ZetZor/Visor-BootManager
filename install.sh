@@ -36,9 +36,11 @@ setup_style() {
         C_OK=$'\033[38;5;114m';     C_WARN=$'\033[38;5;179m'
         C_ERR=$'\033[38;5;203m';    C_ASK=$'\033[38;5;183m'
         C_BOLD=$'\033[1m';          C_OFF=$'\033[0m'
+        C_LOGO=$'\033[38;5;231m'
     else
         C_ACCENT=""; C_DIM=""; C_OK=""; C_WARN=""
         C_ERR="";    C_ASK=""; C_BOLD=""; C_OFF=""
+        C_LOGO=""
     fi
 
     case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
@@ -78,7 +80,7 @@ on_err() {
 trap 'on_err $LINENO' ERR
 
 banner() {
-    printf '\n%s' "$C_ACCENT"
+    printf '\n%s' "$C_LOGO"
     if [ "$UNICODE" -eq 1 ]; then
         cat <<'EOF'
   ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
