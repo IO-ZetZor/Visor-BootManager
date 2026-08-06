@@ -14,6 +14,6 @@ pkgbase = visor
 	optdepends = python: kernel/initrd encryption (visor encrypt)
 	optdepends = python-pillow: font baking (make bakefont)
 	source = visor-1.3.3.tar.gz::https://github.com/IO-ZetZor/Visor-BootManager/archive/refs/tags/v1.3.3.tar.gz
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 6d25a56b873c930f1bf6583f4f943aeeb6f7d8054c9807d9a74ae9b7bb79c113
 
 pkgname = visor
