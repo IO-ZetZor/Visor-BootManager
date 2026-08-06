@@ -70,9 +70,12 @@ OBJS = $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 FONT    ?= /usr/share/fonts/TTF/JetBrainsMono-Regular.ttf
 FONT_PX ?= 128
 
-.PHONY: all clean install bakefont check-env check-reloc
+.PHONY: all clean install bakefont check-env check-reloc check-keys
 
 all: check-env $(TARGET)
+
+check-keys:
+	@python3 tools/check_config_keys.py
 
 check-reloc:
 	@va=$$(objdump -p $(TARGET) 2>/dev/null | awk '/Virtual Address:/{print $$3; exit}'); \
