@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_C = os.path.join(ROOT, "src", "config.c")
 SCHEMA = os.path.join(ROOT, "docs", "boot.conf.schema.json")
 EXAMPLE = os.path.join(ROOT, "boot.conf.example")
-WIKI = os.path.join(ROOT, "..", "visor-wiki", "configuration.html")
+WIKI_DIR = os.path.join(ROOT, "..", "visor-wiki")
 
 
 def read(path):
@@ -66,7 +66,15 @@ def main():
     s_glob, s_entry = schema_keys()
 
     example = read(EXAMPLE)
-    wiki = read(WIKI) if os.path.exists(WIKI) else None
+
+    wiki = ""
+    if os.path.exists(WIKI_DIR):
+        for fname in os.listdir(WIKI_DIR):
+            if fname.endswith(".html"):
+                wiki += read(os.path.join(WIKI_DIR, fname)) + "\n"
+
+    if not wiki:
+        wiki = None
 
     problems = 0
 
@@ -85,7 +93,7 @@ def main():
            {k for k in glob | entry if not mentioned(example, k)})
 
     if wiki is None:
-        print("  %-28s %s" % ("wiki not found:", WIKI))
+        print("  %-28s %s" % ("wiki not found:", WIKI_DIR))
     else:
         report("missing from wiki:",
                {k for k in glob | entry if not mentioned(wiki, k)})
