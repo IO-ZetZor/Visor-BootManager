@@ -2,7 +2,7 @@
 set -eu
 
 REPO="${VISOR_REPO:-https://github.com/IO-ZetZor/Visor-BootManager}"
-SRC="${VISOR_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/visor-src}"
+SRC="${VISOR_SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/visor/source}"
 
 say()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
