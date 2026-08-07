@@ -129,8 +129,11 @@
     },
     "anim_speed": {
       "x-group": "animation",
-      "description": "Animation duration in milliseconds; lower is faster.",
-      "$ref": "#/$defs/pixels"
+      "description": "Selection animation speed, 1 (slow) to 10 (fast). Ignored when animation=0.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 8
     },
     "animation": {
       "x-group": "animation",
@@ -146,7 +149,7 @@
     },
     "background": {
       "x-group": "background",
-      "description": "Path to the background image (PNG or BMP), or a directory to pick from.",
+      "description": "Path to a full-screen background image (PNG, RGB or RGBA). Omit for a solid backdrop.",
       "$ref": "#/$defs/path"
     },
     "background_color": {
@@ -166,8 +169,19 @@
     },
     "blur": {
       "x-group": "background",
-      "description": "Background blur strength.",
-      "$ref": "#/$defs/pixels"
+      "description": "Selection glass mode: 0 is a flat card, 1 is frosted glass (blur plus tint), 'clear' is blur with no tint. Matched on the first character, so any c-word means clear.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/bool"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "clear"
+          ]
+        }
+      ],
+      "default": 0
     },
     "blur_color": {
       "x-group": "background",
@@ -259,8 +273,11 @@
     },
     "fade_speed": {
       "x-group": "animation",
-      "description": "Fade duration in milliseconds.",
-      "$ref": "#/$defs/pixels"
+      "description": "Full-screen fade speed for menu fade-in and boot/power fade-out, 1 (slow) to 10 (fast). Ignored when animation=0.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 10
     },
     "file_log": {
       "x-group": "diagnostics",
@@ -453,7 +470,7 @@
         "bottomleft",
         "bottomright"
       ],
-      "default": "topright"
+      "default": "bottomright"
     },
     "quick_scan": {
       "x-group": "discovery",
@@ -520,7 +537,7 @@
       "x-group": "appearance",
       "description": "'native' keeps the firmware's current mode, 'max'/'highest' picks the largest offered, or an exact WxH such as 1920x1080.",
       "type": "string",
-      "pattern": "^(native|max|highest|[0-9]+x[0-9]+)$",
+      "pattern": "^(native|max|highest|[0-9]+[xX*][0-9]+)$",
       "default": "native"
     },
     "scan": {
