@@ -1,51 +1,95 @@
-# Visor 1.4
+# Visor — 1.4
 
-Animated wallpapers, a file browser in both interfaces, `visor install` that
-works straight out of an AUR package, and a round of hardening.
+Animated backgrounds, a file browser in both interfaces, and an installer
+that finally works straight out of an AUR package — plus a round of
+audit-driven hardening.
 
-## What's new
+## Animated backgrounds
 
-- **Animated GIF backgrounds.** Drop a GIF on the ESP and Visor plays it
-  full-screen in a loop. The accent palette is taken from frame one, and the
-  frosted-glass panels reuse their blur while it plays so the menu stays
-  fast. `background=` now accepts PNG, BMP or GIF.
-- **File browser.** Press `B` in the graphics menu, or run `browse` in the
-  recovery shell. Browse every readable volume, page through directories
-  with sizes, and boot what you pick: a kernel (paired with a sibling
-  initrd automatically), an initrd, or a `.efi` image. Booting through the
-  browser pins the load to the volume you picked it from.
-- **`visor install` and `visor doctor` after an AUR install.** The package
-  ships no source tree, so both commands now operate on the packaged files
-  instead of demanding a checkout. Non-root runs re-exec through sudo.
-- **Menu clock no longer depends on the firmware timer interrupt.** Timing
-  now comes from the architecture clock (TSC / generic counter), so
-  countdowns and animations stay accurate even on firmwares that don't fire
-  the periodic timer — QEMU under TCG included.
+`background=` now accepts a GIF as well as PNG and BMP. Animated GIFs play
+full-screen in a loop behind the menu.
 
-## Fixes
+- **Built-in GIF decoder.** A self-contained GIF89a parser (LZW
+  decompression, frame disposal, loop handling) runs inside the boot
+  manager, so no firmware or driver support is needed. Decoding is
+  bounded so a huge or hostile GIF cannot exhaust memory.
+- **Loop with a sane budget.** Frames advance on a wall-clock schedule;
+  a slow redraw drops time instead of spiralling, and the animation
+  stops cleanly when its loop budget is spent.
+- **Accent palette from frame one.** The dynamic accent extraction reads
+  the first frame, so the colour scheme still matches your wallpaper.
+- **Fast rendering.** The background is drawn with precomputed
+  nearest-neighbour maps (two lookups per pixel instead of two divides),
+  and the frosted-glass panels reuse their blur while the animation
+  plays instead of re-blurring the whole screen on every frame.
+- **A clock that actually ticks.** Timing now comes from the
+  architecture clock (calibrated TSC on x86, the generic counter on
+  ARM) instead of the firmware's periodic timer, which some firmwares —
+  and QEMU under TCG — never fire. Countdowns and animations stay
+  accurate everywhere.
 
-- **PNG decoder validates the zlib header length** (audit finding) before
-  allocating against it.
-- **Large directories no longer stall the menu.** Listings sort with a
-  merge sort instead of an insertion sort.
-- **The browser finds the boot volume reliably.** It probes for Visor's own
-  install, then `\EFI`, instead of relying on a firmware handle match that
-  doesn't hold on all boards.
-- **Opening a filesystem root no longer freezes on some hardware.** The
-  browser no longer force-connects every block controller mid-menu, and the
-  directory read loop is bounded.
-- **The centre info panel no longer collides with the browser panel** (and
-  the boot countdown pauses while browsing).
+## File browser
 
-## File browser — known rough edges
+Browse every readable volume from the menu (press `B`) or the recovery
+shell (`browse [PATH]`), and boot what you pick.
 
-- Booting a picked file still needs a boot entry to attach the override to;
-  with a zero-entry config there is nothing to override.
-- Very slow USB media can make large listings take a moment to appear.
-- Directory dates are not shown yet; sizes only.
-- The browser lists what the firmware's filesystem drivers expose — a
-  filesystem without a loaded driver (for example ext4 without the EfiFs
-  driver) won't be readable from the browser.
+- **All readable filesystems.** The browser enumerates every volume the
+  firmware exposes, labelled by partition UUID, with the boot volume
+  first. It finds the ESP by probing for Visor's own install, then
+  `\EFI`, rather than trusting a firmware handle match that doesn't hold
+  on all boards.
+- **Real listing.** Sizes come from `EFI_FILE_INFO` in one pass;
+  entries sort directories-first, case-insensitively, with a merge sort
+  so even very large directories don't stall the menu (the previous
+  insertion sort was quadratic).
+- **Navigation.** Enter to descend, Backspace/← to go up, ↑/↓ and
+  PgUp/PgDn to page, Tab/→ to switch volumes, Esc to close. The GUI
+  panel also scrolls with the mouse wheel.
+- **Boot what you pick.** Enter on a kernel sets a one-shot override and
+  boots it, auto-pairing a sibling `initrd*`; Enter on an initrd sets
+  the initrd override; Enter on a `.efi` chainloads it.
+- **Booted from where you picked it.** A browsed boot is pinned to the
+  volume it came from — by partition GUID *and* by volume handle — so an
+  MBR stick without a GUID can't be answered by a same-named file on the
+  ESP. This is the same pinning the regular entry loader uses, so the
+  two paths can never disagree.
+
+Known rough edges: booting still needs a selected entry to attach the
+override to (a zero-entry config has nothing to override), very slow USB
+media can make large listings take a moment, dates aren't shown yet, and
+filesystems without a loaded driver (ext4 without the EfiFs driver) won't
+appear.
+
+## Installer and CLI
+
+`visor install` and `visor doctor` now work immediately after an AUR
+install, where no source tree exists.
+
+- **Packaged install.** With no checkout present, `visor install`
+  installs from the packaged files (`/usr/lib/visor` +
+  `/usr/share/visor`): binary and backup, icons/backgrounds/logo, the
+  config (kept unless `--force-config`), `boot.log`, and the UEFI boot
+  entry — mirroring `install.sh`. `--packaged` forces the mode;
+  `--source-dir` always wins for checkout users.
+- **Package-aware doctor.** `visor doctor` recognises packaged installs
+  and reports `ok packaged …` instead of a wall of `miss`es.
+- **Root handling.** Non-root runs re-exec through sudo, and the target
+  user's home is resolved via `getent` so `sudo visor …` (and
+  `pkexec`) no longer looks in `/root` for your config.
+
+## Hardening
+
+- **PNG decoder validates the zlib header.** The declared length must
+  match the one's complement of the stored length before anything is
+  allocated against it (audit finding).
+- **No mid-menu filesystem sweep.** The browser no longer force-connects
+  every block controller from inside the menu loop — a source of freezes
+  on real hardware. Drivers are connected once at boot as before.
+- **Bounded directory reads.** The listing loop and its retry buffer are
+  capped, so a misbehaving driver can't hang the menu.
+- **No more colliding panels.** The centre-info panel and the "Booting
+  in Xs" countdown are suppressed while the browser is open, and an
+  empty directory says so instead of drawing nothing.
 
 ## Upgrading
 
