@@ -7,6 +7,11 @@ A minimal, fast, graphical UEFI boot manager that actually looks of this decade.
 </p>
 
 <p align="center">
+  <img src="docs/visor-anim.gif" width="49%">
+  <img src="docs/train-anim.gif" width="49%">
+</p>
+
+<p align="center">
   <img src="docs/ss2.png" width="49%">
   <img src="docs/ss1.png" width="49%">
 </p>
