@@ -3595,3 +3595,4 @@ void gui_shutdown(gui_state_t *state) {
     }
     glyph_cache_flush();
 }
+

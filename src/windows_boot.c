@@ -19,3 +19,4 @@ EFI_STATUS windows_find_bootmgr(CHAR16 *partition_uuid, EFI_DEVICE_PATH **bootmg
 
     return EFI_NOT_FOUND;
 }
+

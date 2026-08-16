@@ -1244,3 +1244,4 @@ int accent_generate(icon_t *bg, int variant, color_t out[ACCENT_ROLE_COUNT]) {
                             spec[i].tone);
     return 1;
 }
+

@@ -187,3 +187,4 @@ const CHAR16* arch_fb_make_wc(UINT64 base, UINT64 size) {
     if (method[0] == L'n' && cpu) method = L"cpu-arch";
     return method;
 }
+

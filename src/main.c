@@ -122,7 +122,6 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
     config_t config;
-    
 
 
     efi_fs_drivers_set_lazy(0);
@@ -729,3 +728,4 @@ void _exit(int status) {
     ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
     while (1);
 }
+

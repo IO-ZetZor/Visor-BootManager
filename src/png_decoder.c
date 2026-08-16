@@ -584,3 +584,4 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     efi_free_pool(uncomp);
     return icon;
 }
+

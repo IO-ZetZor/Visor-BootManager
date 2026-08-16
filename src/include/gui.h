@@ -355,3 +355,4 @@ int gif_advance(anim_t *a);
 void gif_free(anim_t *a);
 
 #endif
+

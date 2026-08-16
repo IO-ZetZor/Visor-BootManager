@@ -225,3 +225,4 @@ EFI_STATUS visor_decrypt_buffer(const void *input, UINTN input_size,
     *plain_size_out = plain_size;
     return EFI_SUCCESS;
 }
+

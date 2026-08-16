@@ -815,10 +815,6 @@ int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word) {
 }
 
 
-
-
-
-
 static void luks_strip_quiet(CHAR16 *cmdline) {
     if (!cmdline) return;
     static const CHAR16 *hide[] = { L"quiet", L"splash", NULL };
@@ -1176,3 +1172,4 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     return EFI_UNSUPPORTED;
  #endif
 }
+

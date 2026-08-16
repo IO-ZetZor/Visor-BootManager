@@ -557,8 +557,6 @@ static int is_kernel_name(CHAR16 *name) {
 }
 
 
-
-
 static int entry_takes_default_cmdline(CHAR16 *kernel_path, int type) {
     static const CHAR16 *loaders[] = {
         L"grubx64.efi", L"grubaa64.efi", L"shimx64.efi", L"shimaa64.efi",
@@ -572,7 +570,6 @@ static int entry_takes_default_cmdline(CHAR16 *kernel_path, int type) {
         if (ends_with_ci(kernel_path, loaders[i])) return 0;
     return 1;
 }
-
 
 
 static int dc_foreign_volume;
@@ -738,7 +735,6 @@ static int dc_basename_eq(CHAR16 *path_value, CHAR16 *kernel_name) {
         start--;
     return str_eq_ci(path_value + start, kernel_name);
 }
-
 
 
 static CHAR16* dc_from_loader_entries(EFI_FILE_PROTOCOL *root, CHAR16 *kernel_name) {
@@ -1722,7 +1718,6 @@ static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
 }
 
 
-
 static int hp_volume_hosts_entry(config_t *config, EFI_HANDLE vol) {
     EFI_FILE_PROTOCOL *root = root_from_handle(vol);
     if (!root) return 0;
@@ -1755,9 +1750,6 @@ void config_hotplug_arm(config_t *config) {
         &gEfiSimpleFileSystemProtocolGuid, &nf);
 
 
-
-
-
     hp_fs_known = efi_allocate_pool((nf ? nf : 1) * sizeof(EFI_HANDLE));
     if (hp_fs_known) {
         EFI_HANDLE boot_volume = efi_boot_volume_handle();
@@ -1768,10 +1760,6 @@ void config_hotplug_arm(config_t *config) {
             if (seen) hp_fs_known[hp_fs_n++] = fs[i];
         }
     }
-
-
-
-
 
 
     int sweep;
@@ -2166,7 +2154,6 @@ int config_hotplug_poll(config_t *config, UINTN *first_new) {
     }
 
 
-
     if (scanned_idx < nf) {
         EFI_HANDLE *grown = efi_allocate_pool((hp_fs_n + 1) * sizeof(EFI_HANDLE));
         if (grown) {
@@ -2266,7 +2253,6 @@ static CHAR16* read_text_file(CHAR16 *path) {
     efi_free_pool(raw);
     return buf;
 }
-
 
 
 int config_early_file_log_enabled(void) {
@@ -2741,7 +2727,6 @@ static boot_entry_t* sole_linux_entry(config_t *config) {
     }
     return only;
 }
-
 
 
 static boot_entry_t* snapshot_entry_match(config_t *config,
@@ -3658,3 +3643,4 @@ void config_free(config_t *config) {
     config->reboot_icon = NULL;
     config->firmware_icon = NULL;
 }
+

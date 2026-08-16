@@ -104,3 +104,4 @@ void efi_set_var_u32(CHAR16 *name, UINT32 val);
 UINT32 efi_rand(void);
 
 #endif
+

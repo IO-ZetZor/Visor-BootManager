@@ -89,3 +89,4 @@ void sha256(const UINT8 *data, UINTN len, UINT8 out[32]) {
     sha256_update(&ctx, data, len);
     sha256_final(&ctx, out);
 }
+

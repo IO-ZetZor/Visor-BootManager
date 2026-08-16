@@ -112,3 +112,4 @@ void config_free(config_t *config);
 void bls_decrement(boot_entry_t *e);
 
 #endif
+

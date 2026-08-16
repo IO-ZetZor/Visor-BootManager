@@ -34,3 +34,4 @@ int visor_hash_ok(boot_entry_t *entry, const void *data, UINTN size) {
     efi_print(L"SECURITY: kernel hash mismatch, refusing to boot\r\n");
     return 0;
 }
+
