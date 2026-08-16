@@ -7,13 +7,35 @@ PKG_LIB_DIR="${VISOR_LIB_DIR:-/usr/lib/visor}"
 PKG_DATA_DIR="${VISOR_DATA_DIR:-/usr/share/visor}"
 
 real_home() {
-    if [ -n "${SUDO_USER:-}" ]; then
-        eval "printf '%s'" "~$SUDO_USER"
-    elif [ -n "${PKEXEC_UID:-}" ]; then
-        eval "printf '%s'" "~$PKEXEC_UID"
+    local user="${SUDO_USER:-${PKEXEC_UID:-}}"
+    if [ -n "$user" ]; then
+        case "$user" in
+            *[!A-Za-z0-9_.-]*)
+                printf '%s' "${HOME:-/tmp}"
+                return 0
+                ;;
+        esac
+        if command -v getent >/dev/null 2>&1; then
+            local h
+            h="$(getent passwd "$user" 2>/dev/null | cut -d: -f6)"
+            [ -n "$h" ] && [ -d "$h" ] && { printf '%s' "$h"; return 0; }
+        fi
+        eval "printf '%s'" "~$user" 2>/dev/null && return 0
+        printf '%s' "${HOME:-/tmp}"
     else
         printf '%s' "${HOME:-/tmp}"
     fi
+}
+
+host_efi_name() {
+    case "$(uname -m 2>/dev/null)" in
+        aarch64) printf 'visor_aa64.efi\n' ;;
+        *)       printf 'visor_x64.efi\n' ;;
+    esac
+}
+
+packaged_available() {
+    [ -f "$PKG_LIB_DIR/$(host_efi_name)" ] && [ -f "$PKG_DATA_DIR/boot.conf.example" ]
 }
 
 source_dir_default() {
@@ -21,6 +43,7 @@ source_dir_default() {
 }
 
 say() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+ok()  { printf '\033[1;32mok\033[0m  %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -31,7 +54,9 @@ Usage:
 
 Commands:
   build [make-args...]          Build visor_x64.efi
-  install [install-args...]     Run install.sh (--source-dir PATH to pick a tree)
+  install [install-args...]     Install to the ESP. Uses a source checkout when
+                                available, otherwise installs the packaged files
+                                from /usr/lib/visor (--packaged forces this)
   update [options]              Pull latest GitHub version, build, and install
   sign [options]                Sign installed EFI binaries with sbctl
   drivers [options]             Install an EfiFs filesystem driver for /boot
@@ -223,6 +248,92 @@ resolve_esp() {
     detect_esp
 }
 
+ensure_visor_boot_entry() {
+    local esp="$1"
+    command -v efibootmgr >/dev/null 2>&1 || { warn "efibootmgr not installed; skipping boot entry."; return 0; }
+    if efibootmgr 2>/dev/null | grep -q 'Visor'; then
+        say "UEFI boot entry 'Visor' already exists; left untouched."
+        return 0
+    fi
+    local src disk partnum
+    src="$(findmnt -no SOURCE "$esp")" || { warn "Cannot resolve ESP device; skipping boot entry."; return 0; }
+    disk="/dev/$(lsblk -no PKNAME "$src")"
+    partnum="$(lsblk -no PARTN "$src" 2>/dev/null || echo "$src" | grep -o '[0-9]*$')"
+    if [ ! -b "$disk" ]; then
+        warn "Could not determine ESP disk (got '$disk'); skipping boot entry."
+        return 0
+    fi
+    efibootmgr --create --disk "$disk" --part "$partnum" \
+               --label "Visor" --loader "\\EFI\\visor\\$(host_efi_name)" >/dev/null
+    say "UEFI boot entry 'Visor' -> $disk part $partnum"
+}
+
+packaged_install() {
+    local esp=""
+    local boot_entry=1
+    local force_config=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --boot-entry) boot_entry=1; shift ;;
+            --no-boot-entry) boot_entry=0; shift ;;
+            --force-config) force_config=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown install option for packaged mode: $1" ;;
+        esac
+    done
+
+    local efi_name
+    efi_name="$(host_efi_name)"
+    local efi_src="$PKG_LIB_DIR/$efi_name"
+    [ -f "$efi_src" ] || die "packaged EFI missing: $efi_src"
+
+    [ -z "$esp" ] && esp="$(detect_esp || true)"
+    [ -n "$esp" ] || die "Could not find the ESP. Re-run with: --esp /your/esp/mount"
+    [ -d "$esp" ] || die "ESP path does not exist: $esp"
+    [ -w "$esp" ] || die "No write permission on $esp. Re-run with sudo."
+
+    local dest="$esp/EFI/visor"
+    say "Installing from packaged files into $dest"
+    mkdir -p "$dest/icons" "$dest/backgrounds" "$dest/drivers" 2>/dev/null || die "cannot create $dest"
+
+    if [ -f "$dest/$efi_name" ]; then
+        cp -f "$dest/$efi_name" "$dest/$efi_name.bak"
+        say "Previous binary kept as $efi_name.bak"
+    fi
+    install -m 0644 "$efi_src" "$dest/$efi_name"
+    ok "Loader: $dest/$efi_name"
+
+    if [ -d "$PKG_DATA_DIR/icons" ]; then
+        cp -f "$PKG_DATA_DIR"/icons/*.png "$dest/icons/" 2>/dev/null || true
+    fi
+    if [ -d "$PKG_DATA_DIR/backgrounds" ]; then
+        cp -f "$PKG_DATA_DIR"/backgrounds/*.png "$dest/backgrounds/" 2>/dev/null || true
+    fi
+    if [ -f "$PKG_DATA_DIR/logo.png" ]; then
+        install -m 0644 "$PKG_DATA_DIR/logo.png" "$dest/logo.png" 2>/dev/null || true
+    fi
+    ok "Assets: icons, backgrounds, logo"
+
+    local conf="$dest/boot.conf"
+    if [ -f "$conf" ] && [ "$force_config" -eq 0 ]; then
+        ok "Config: kept existing $conf"
+    else
+        install -m 0644 "$PKG_DATA_DIR/boot.conf.example" "$conf"
+        ok "Config: wrote default $conf"
+    fi
+
+    if [ ! -e "$dest/boot.log" ]; then
+        install -m 0644 /dev/null "$dest/boot.log"
+        say "Created boot log: $dest/boot.log"
+    fi
+
+    if [ "$boot_entry" -eq 1 ]; then
+        ensure_visor_boot_entry "$esp"
+    fi
+    say "Done. Reboot to try Visor."
+}
+
 project_or_die() {
     local dir="${1:-}"
     if [ -n "$dir" ]; then
@@ -253,19 +364,38 @@ cmd_build() {
     make --no-print-directory -C "$dir" "$@"
 }
 
+run_packaged_install() {
+    if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        say "Installing from the packaged files (re-running with sudo)"
+        exec sudo bash "$0" install --packaged "$@"
+    fi
+    packaged_install "$@"
+}
+
 cmd_install() {
     local dir=""
     local pass=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --source-dir) dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --packaged) dir="@packaged@"; shift ;;
             *) pass+=("$1"); shift ;;
         esac
     done
 
+    if [ "$dir" = "@packaged@" ]; then
+        run_packaged_install "${pass[@]+"${pass[@]}"}"
+        return 0
+    fi
+
     if [ -z "$dir" ]; then
         dir="$(installer_dir || true)"
         if [ -z "$dir" ]; then
+            if packaged_available; then
+                say "No source tree found - installing from the packaged files"
+                run_packaged_install "${pass[@]+"${pass[@]}"}"
+                return 0
+            fi
             no_source_hint
             die "no install.sh found - run 'visor update' to fetch the source first"
         fi
@@ -287,11 +417,12 @@ cmd_doctor() {
     local source_dir=""
     local config_file=""
     local check_build=0
+    local source_explicit=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
-            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --source-dir) source_dir="$(need_value "$1" "${2:-}")"; source_explicit=1; shift 2 ;;
             --file) config_file="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --build) check_build=1; shift ;;
             -h|--help) usage; exit 0 ;;
@@ -352,6 +483,8 @@ cmd_doctor() {
 
     if [ -f "$source_dir/Makefile" ] && [ -f "$source_dir/install.sh" ]; then
         printf 'ok  source tree\n'
+    elif [ "$source_explicit" -eq 0 ] && packaged_available; then
+        printf 'ok  packaged install: %s + %s\n' "$PKG_LIB_DIR" "$PKG_DATA_DIR"
     else
         printf 'miss source tree files\n'
         ok=0
@@ -359,6 +492,8 @@ cmd_doctor() {
 
     if [ -f "$source_dir/visor_x64.efi" ]; then
         printf 'ok  built EFI: %s\n' "$source_dir/visor_x64.efi"
+    elif [ "$source_explicit" -eq 0 ] && [ -f "$PKG_LIB_DIR/$(host_efi_name)" ]; then
+        printf 'ok  packaged EFI: %s\n' "$PKG_LIB_DIR/$(host_efi_name)"
     else
         printf 'warn built EFI missing: run visor build\n'
     fi
@@ -373,7 +508,14 @@ cmd_doctor() {
     fi
 
     for c in assets/icons/linux.png assets/icons/windows.png assets/icons/unknown.png assets/backgrounds/default.png; do
-        [ -f "$source_dir/$c" ] && printf 'ok  %s\n' "$c" || { printf 'miss %s\n' "$c"; ok=0; }
+        if [ -f "$source_dir/$c" ]; then
+            printf 'ok  %s\n' "$c"
+        elif [ "$source_explicit" -eq 0 ] && [ -f "$PKG_DATA_DIR/${c#assets/}" ]; then
+            printf 'ok  packaged %s\n' "${c#assets/}"
+        else
+            printf 'miss %s\n' "$c"
+            ok=0
+        fi
     done
 
     esp="$(resolve_esp "$esp" || true)"
@@ -390,7 +532,7 @@ cmd_doctor() {
                 ok=0
             fi
             [ -z "$config_file" ] && config_file="$root/boot.conf"
-        elif [ -f "$source_dir/boot.conf.example" ]; then
+        elif [ -f "$source_dir/boot.conf.example" ] || [ -f "$PKG_DATA_DIR/boot.conf.example" ]; then
             printf 'warn installed config missing; example exists\n'
         else
             printf 'miss installed config\n'
@@ -437,6 +579,7 @@ EOF
 
     [ -z "$config_file" ] && [ -f ./boot.conf ] && config_file=./boot.conf
     [ -z "$config_file" ] && [ -f "$source_dir/boot.conf.example" ] && config_file="$source_dir/boot.conf.example"
+    [ -z "$config_file" ] && [ -f "$PKG_DATA_DIR/boot.conf.example" ] && config_file="$PKG_DATA_DIR/boot.conf.example"
     if [ -n "$config_file" ] && [ -f "$config_file" ]; then
         if validate_config_file "$config_file"; then
             printf 'ok  config valid: %s\n' "$config_file"
@@ -683,6 +826,9 @@ cmd_status() {
         printf 'Source dir: %s\n' "$source_dir"
     else
         printf 'Source dir: %s (not found)\n' "$source_dir"
+        if packaged_available; then
+            printf 'Packaged install: %s + %s\n' "$PKG_LIB_DIR" "$PKG_DATA_DIR"
+        fi
     fi
     if [ -d "$source_dir/.git" ]; then
         printf 'Source commit: %s\n' "$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || printf '?')"
