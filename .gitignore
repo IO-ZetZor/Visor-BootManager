@@ -1,0 +1,45 @@
+# Build directory
+/build/
+*.o
+*.so
+*.efi
+*.d
+
+# Cross-built gnu-efi for aarch64 (regenerate with tools/setup_gnuefi_aarch64.sh)
+/gnu-efi-src/
+/gnu-efi/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.orig
+
+# VM test harness runtime artifacts (keep run.sh / shot.sh, drop the rest)
+vm/*.ppm
+vm/*.fd
+vm/*.png
+vm/*.log
+vm/*.gdb
+vm/*.txt
+vm/*.sock
+vm/*.mkv
+vm/*.bin
+vm/*.dbg
+vm/esp/
+vm/esp_aa64/
+vm/esp_*/
+__pycache__/
+tools/accent_host
+tools/accent_host_dbg
+tools/accent_dbg
+!docs/*.png
+.claude/
+
+# visor-config-editor build output (tools/build-editor.sh)
+visor-config-editor
