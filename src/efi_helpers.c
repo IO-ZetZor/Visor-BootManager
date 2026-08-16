@@ -1,4 +1,5 @@
 #include "efi_helpers.h"
+#include "arch.h"
 #include <efi.h>
 #include <efilib.h>
 #include <stdarg.h>
@@ -197,7 +198,9 @@ EFI_DEVICE_PATH* efi_make_file_path(EFI_HANDLE handle, CHAR16 *filename) {
     BS->HandleProtocol(handle, &gEfiDevicePathProtocolGuid, (void**)&dp);
     if (!dp) return NULL;
 
-    UINTN dp_len    = DevicePathSize(dp) - sizeof(EFI_DEVICE_PATH_PROTOCOL);
+    UINTN dp_total = DevicePathSize(dp);
+    if (dp_total < sizeof(EFI_DEVICE_PATH_PROTOCOL)) return NULL;
+    UINTN dp_len    = dp_total - sizeof(EFI_DEVICE_PATH_PROTOCOL);
     UINTN fname_len = StrLen(filename) * sizeof(CHAR16);
     UINTN fp_size   = sizeof(FILEPATH_DEVICE_PATH) + fname_len;
     UINTN end_size  = sizeof(EFI_DEVICE_PATH_PROTOCOL);
@@ -283,7 +286,6 @@ static int dp_node_is_harddrive(EFI_DEVICE_PATH *n) {
 }
 
 
-
 int efi_handles_same_disk(EFI_HANDLE a, EFI_HANDLE b) {
     if (!a || !b) return 0;
     if (a == b) return 1;
@@ -364,14 +366,9 @@ int efi_fs_drivers_deferred(void) {
 }
 
 
-
 int efi_fs_drivers_pending(void) {
     return efi_fs_drivers_deferred() || !efi_fs_probe_exhausted();
 }
-
-
-
-
 
 
 static int g_deferred_lazy = 1;
@@ -586,8 +583,6 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
 }
 
 
-
-
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     if (!volume) return NULL;
     CHAR16 nbuf[NORM_PATH_MAX];
@@ -691,8 +686,6 @@ void efi_start_deferred_images(void) {
     SPrint(msg, sizeof(msg), L"drivers: started %d filesystem driver(s)", started);
     efi_log(msg);
 }
-
-
 
 
 static EFI_HANDLE *g_probe_blk;
@@ -932,11 +925,9 @@ void efi_log_close(void) {
 }
 
 
-
 void efi_log_begin(void) {
     efi_log(LOG_MARKER_W);
 }
-
 
 
 void efi_log_rotate(void) {
@@ -1017,25 +1008,7 @@ int efi_key_pending(void) {
 }
 
 UINT64 efi_get_tick(void) {
-    static EFI_EVENT timer = NULL;
-    static UINT64 seconds = 0;
-
-    if (!timer) {
-        if (EFI_ERROR(BS->CreateEvent(EVT_TIMER, TPL_APPLICATION,
-                                      NULL, NULL, &timer))) {
-            timer = NULL;
-            return 0;
-        }
-
-        BS->SetTimer(timer, TimerPeriodic, 10000000ULL);
-        seconds = 0;
-        return 0;
-    }
-
-    while (BS->CheckEvent(timer) == EFI_SUCCESS) {
-        seconds++;
-    }
-    return seconds * 1000;
+    return arch_now_us() / 1000;
 }
 
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count) {
@@ -1126,3 +1099,4 @@ UINT32 efi_rand(void) {
     state = state * 1103515245u + 12345u;
     return state;
 }
+

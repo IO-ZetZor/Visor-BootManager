@@ -510,6 +510,7 @@ EFI_STATUS gui_init(gui_state_t *state) {
 
     state->background = NULL;
     state->background_path = NULL;
+    state->bg_anim = NULL;
 
     state->version_mode = 0;
     state->ver_fading = 0;
@@ -1101,6 +1102,58 @@ icon_t* gui_load_icon(CHAR16 *path) {
     return gui_load_image(path);
 }
 
+static int path_is_gif(CHAR16 *path) {
+    if (!path) return 0;
+    UINTN n = 0;
+    while (path[n]) n++;
+    if (n < 4) return 0;
+    CHAR16 a = path[n - 4], b = path[n - 3], c = path[n - 2], d = path[n - 1];
+    if (b >= 'A' && b <= 'Z') b += 32;
+    if (c >= 'A' && c <= 'Z') c += 32;
+    if (d >= 'A' && d <= 'Z') d += 32;
+    return a == '.' && b == 'g' && c == 'i' && d == 'f';
+}
+
+static anim_t* gui_load_anim(CHAR16 *path, icon_t **first_out) {
+    if (first_out) *first_out = NULL;
+
+    efi_file_buffer_t *buf = efi_load_file(path);
+    if (!buf) return NULL;
+
+    UINT8 *data = (UINT8*)buf->data;
+    if (buf->size < 6 || data[0] != 'G' || data[1] != 'I' || data[2] != 'F') {
+        efi_free_pool(buf->data);
+        efi_free_pool(buf);
+        return NULL;
+    }
+
+    anim_t *a = gif_load(data, buf->size);
+    efi_free_pool(buf->data);
+    efi_free_pool(buf);
+    if (!a) return NULL;
+
+    if (first_out) {
+        UINTN px = a->width * a->height;
+        icon_t *ic = efi_allocate_pool(sizeof(icon_t));
+        if (ic) {
+            ic->width = a->width;
+            ic->height = a->height;
+            ic->scaled_size = 0;
+            ic->scaled = NULL;
+            ic->pixels = efi_allocate_pool(px * sizeof(UINT32));
+            if (ic->pixels) {
+                for (UINTN i = 0; i < px; i++)
+                    ic->pixels[i] = a->canvas[i];
+                *first_out = ic;
+            } else {
+                efi_free_pool(ic);
+            }
+        }
+    }
+
+    return a;
+}
+
 #define DEFAULT_BACKGROUND_PATH L"\\EFI\\visor\\backgrounds\\default.png"
 
 void gui_set_background(gui_state_t *state, CHAR16 *path) {
@@ -1109,12 +1162,37 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
         efi_free_pool(state->background->pixels);
         efi_free_pool(state->background);
     }
+    state->background = NULL;
+    if (state->bg_anim) {
+        gif_free(state->bg_anim);
+        state->bg_anim = NULL;
+    }
+    if (state->blur_cache) {
+        efi_free_pool(state->blur_cache);
+        state->blur_cache = NULL;
+    }
     if (state->background_path) {
         efi_free_pool(state->background_path);
     }
 
     state->background_path = efi_strdup(path);
-    state->background = gui_load_image(path);
+
+    if (path_is_gif(path)) {
+        icon_t *first = NULL;
+        anim_t *a = gui_load_anim(path, &first);
+        if (a) {
+            if (a->frame_count > 1) {
+                state->bg_anim = a;
+            } else {
+                gif_free(a);
+            }
+            state->background = first;
+        } else {
+            efi_log(L"  ERROR: GIF decode failed");
+        }
+    } else {
+        state->background = gui_load_image(path);
+    }
 
     if (!state->background && efi_strcmp(path, DEFAULT_BACKGROUND_PATH) != 0) {
         efi_log(L"  WARN: background unusable - falling back to default background");
@@ -1271,16 +1349,78 @@ void gui_apply_accent(gui_state_t *state) {
         state->blur_color = c;
 }
 
-static void gui_draw_background(gui_state_t *state) {
+static int anim_build_maps(anim_t *a, UINTN dw, UINTN dh) {
+    if (a->xmap && a->ymap && a->map_w == dw && a->map_h == dh) return 1;
+
+    if (a->xmap) { efi_free_pool(a->xmap); a->xmap = NULL; }
+    if (a->ymap) { efi_free_pool(a->ymap); a->ymap = NULL; }
+    a->map_w = a->map_h = 0;
+
+    if (!dw || !dh) return 0;
+
+    UINTN *xm = efi_allocate_pool(dw * sizeof(UINTN));
+    UINTN *ym = efi_allocate_pool(dh * sizeof(UINTN));
+    if (!xm || !ym) {
+        if (xm) efi_free_pool(xm);
+        if (ym) efi_free_pool(ym);
+        return 0;
+    }
+
+    for (UINTN x = 0; x < dw; x++) xm[x] = (x * a->width) / dw;
+    for (UINTN y = 0; y < dh; y++) ym[y] = (y * a->height) / dh * a->width;
+
+    a->xmap = xm;
+    a->ymap = ym;
+    a->map_w = dw;
+    a->map_h = dh;
+    return 1;
+}
+
+static UINT8 g_dim195[256];
+static int g_dim195_ready = 0;
+
+static void build_dim195(void) {
+    for (int i = 0; i < 256; i++) g_dim195[i] = (UINT8)((i * 195) / 255);
+    g_dim195_ready = 1;
+}
+
+static UINT32 dim_pixel(UINT32 c) {
+    return 0xFF000000u |
+           ((UINT32)g_dim195[(c >> 16) & 0xFF] << 16) |
+           ((UINT32)g_dim195[(c >> 8) & 0xFF] << 8) |
+           (UINT32)g_dim195[c & 0xFF];
+}
+
+static int gui_draw_background(gui_state_t *state) {
+    UINTN dst_width  = state->screen_width;
+    UINTN dst_height = state->screen_height;
+
+    anim_t *a = state->bg_anim;
+    if (a && a->canvas && anim_build_maps(a, dst_width, dst_height)) {
+        if (!g_dim195_ready) build_dim195();
+        if (!state->backbuffer) return 0;
+        UINT32 *src = a->canvas;
+        UINT32 *dst = state->backbuffer;
+        UINT32 fill = dim_pixel(color_to_u32(state->bg_color));
+
+        for (UINTN y = 0; y < dst_height; y++) {
+            UINTN rowbase = a->ymap[y];
+            UINT32 *drow = dst + y * dst_width;
+            for (UINTN x = 0; x < dst_width; x++) {
+                UINT32 pixel = src[rowbase + a->xmap[x]];
+                drow[x] = (pixel & 0xFF000000u) ? dim_pixel(pixel) : fill;
+            }
+        }
+        return 1;
+    }
+
     if (!state->background || !state->background->pixels) {
 
         gui_fill_rect(state, 0, 0, state->screen_width, state->screen_height, state->bg_color);
-        return;
+        return 0;
     }
 
     icon_t *bg = state->background;
-    UINTN dst_width = state->screen_width;
-    UINTN dst_height = state->screen_height;
 
     for (UINTN y = 0; y < dst_height; y++) {
         for (UINTN x = 0; x < dst_width; x++) {
@@ -1294,6 +1434,34 @@ static void gui_draw_background(gui_state_t *state) {
             }
         }
     }
+    return 0;
+}
+
+static int anim_tick(gui_state_t *state) {
+    anim_t *a = state->bg_anim;
+    if (!a || a->frame_count < 2) return 0;
+
+    UINT64 now = efi_get_tick();
+
+    if (!a->next_ms) {
+        a->next_ms = now + a->cur_delay;
+        return 0;
+    }
+    if (now < a->next_ms) return 0;
+
+    if (!gif_advance(a)) {
+        a->next_ms = 0;
+        a->frame_count = 1;
+        return 0;
+    }
+
+    UINTN hold = a->cur_delay;
+    if (hold < 10) hold = 10;
+
+    a->next_ms = now + hold;
+
+    state->scene_valid = 0;
+    return 1;
 }
 
 static const struct { CHAR16 *label; int action; } POWER_ACTIONS[] = {
@@ -2095,11 +2263,12 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     UINTN px = state->screen_width * state->screen_height;
     int building = (!state->scene_cache) || (!state->scene_valid);
     if (building) {
-        gui_draw_background(state);
-        fill_rect_alpha(state, 0, 0, state->screen_width, state->screen_height,
-                        COLOR_BLACK, 60);
+        if (!gui_draw_background(state))
+            fill_rect_alpha(state, 0, 0, state->screen_width, state->screen_height,
+                            COLOR_BLACK, 60);
 
-        if (state->blur || state->blur_title)
+        if ((state->blur || state->blur_title) &&
+            (!state->blur_cache || !state->bg_anim))
             build_blur_cache(state);
 
         draw_header(state);
@@ -3134,6 +3303,11 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
+        if (!state->editing && anim_tick(state)) {
+            need_redraw = 1;
+            full_redraw = 1;
+        }
+
         if (state->timeout_active && state->timeout > 0) {
             UINT64 elapsed = efi_get_tick() - state->timeout_start;
             INTN remaining = state->timeout - (INTN)(elapsed / 1000);
@@ -3148,7 +3322,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
         efi_sleep((state->anim_active || state->page_anim ||
                    state->ver_fading || state->hp_anim) ? 6
-                  : (state->cursor_active ? 12 : 30));
+                  : (state->bg_anim ? 8
+                  : (state->cursor_active ? 12 : 30)));
     }
 
     if (state->action != VISOR_ACTION_BOOT) return NULL;
@@ -3223,6 +3398,8 @@ void gui_shutdown(gui_state_t *state) {
 
     free_icon(state->background);
     state->background = NULL;
+    gif_free(state->bg_anim);
+    state->bg_anim = NULL;
     free_icon(state->logo);
     state->logo = NULL;
     free_icon(state->shutdown_icon);

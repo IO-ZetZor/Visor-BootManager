@@ -329,7 +329,8 @@ quiet=0
 #firmware_icon=\EFI\visor\icons\power_firmware.png
 
 # --- Background -------------------------------------------------------------
-# Full-screen background image (PNG, RGB or RGBA). Omit for a solid backdrop.
+# Full-screen background image (PNG, BMP or GIF). Omit for a solid backdrop.
+# Animated GIFs play in a loop; the accent palette is taken from frame one.
 background=\EFI\visor\backgrounds\default.png
 
 # --- Dynamic accent (palette from wallpaper) --------------------------------

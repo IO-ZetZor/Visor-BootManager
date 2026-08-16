@@ -46,6 +46,8 @@ typedef struct {
     UINT32 *scaled;
 } icon_t;
 
+#include "anim.h"
+
 #define VISOR_ACTION_BOOT      0
 #define VISOR_ACTION_SHUTDOWN  1
 #define VISOR_ACTION_REBOOT    2
@@ -260,6 +262,7 @@ typedef struct {
 
     icon_t *background;
     CHAR16 *background_path;
+    anim_t *bg_anim;
 
     int     version_mode;
     int     ver_fading;
@@ -339,5 +342,11 @@ void gui_set_logo(gui_state_t *state, CHAR16 *path);
 void gui_apply_accent(gui_state_t *state);
 
 void gui_set_font(const char *name);
+
+anim_t* gif_load(UINT8 *data, UINTN size);
+
+int gif_advance(anim_t *a);
+
+void gif_free(anim_t *a);
 
 #endif
