@@ -958,6 +958,8 @@ static int execute_recovery_command(gui_state_t *state, boot_entry_t **selected_
     } else if (text_eq_ci(cmd, L"clear") || text_eq_ci(cmd, L"cls")) {
         shell_clear(rows, cols, selected, failed, status, quiet_boot);
         *row = quiet_boot ? 4 : 3;
+    } else if (text_eq_ci(cmd, L"rem")) {
+        out_line(row, rows, cols, VT_DIM, L"Who's Rem?");
     } else if (text_eq_ci(cmd, L"entries") || text_eq_ci(cmd, L"lsentries")) {
         print_entries(row, rows, cols, state);
     } else if (text_eq_ci(cmd, L"use") || text_eq_ci(cmd, L"select")) {

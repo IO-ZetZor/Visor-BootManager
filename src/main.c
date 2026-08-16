@@ -136,7 +136,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     { CHAR16 d[80]; SPrint(d, sizeof(d), L"main: config parsed, %d entr%s",
         (int)config.entry_count, config.entry_count == 1 ? L"y" : L"ies"); efi_log(d); }
     if (config.entry_count == 0)
-        efi_log(L"WARN: no boot entries found in config or auto-detect");
+        efi_log(L"WARN: no boot entries found - starting from zero");
 
     if (config.text_menu && !text_mode) {
         efi_log(L"main: text_menu=1 in config - using text mode despite available graphics");
@@ -372,7 +372,7 @@ select_entry:
             gui_fade_out(&gui);
             gui_shutdown(&gui);
         }
-        efi_log(L"action: shutdown requested - ResetSystem(Shutdown)");
+        efi_log(L"action: shutdown requested - see you in the next loop");
         RT->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
         return EFI_SUCCESS;
     }
@@ -381,7 +381,7 @@ select_entry:
             gui_fade_out(&gui);
             gui_shutdown(&gui);
         }
-        efi_log(L"action: reboot requested - ResetSystem(Cold)");
+        efi_log(L"action: reboot requested - Return by Death");
         RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
         return EFI_SUCCESS;
     }
