@@ -130,6 +130,8 @@ static EFI_STATUS png_decompress(UINT8 *input, UINTN input_size,
             UINTN byte = br.bit_pos / 8;
             if (byte + 4 > input_size) { status = EFI_INVALID_PARAMETER; break; }
             UINTN len = input[byte] | (input[byte + 1] << 8);
+            UINTN nlen = input[byte + 2] | (input[byte + 3] << 8);
+            if (nlen != (len ^ 0xFFFF)) { status = EFI_INVALID_PARAMETER; break; }
             br.bit_pos += 32;
             byte += 4;
             if (byte + len > input_size) { status = EFI_INVALID_PARAMETER; break; }
