@@ -284,12 +284,17 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     CHAR16 *saved_cmdline = NULL;
     CHAR16 *saved_kernel_path = NULL;
     CHAR16 *saved_initrd_path = NULL;
+    CHAR16 *saved_uuid = NULL;
+    EFI_HANDLE saved_hp_volume = NULL;
     CHAR16 *override_cmdline = NULL;
     CHAR16 *override_kernel_path = NULL;
     CHAR16 *override_initrd_path = NULL;
+    CHAR16 *override_uuid = NULL;
     int cmdline_overridden = 0;
     int kernel_overridden = 0;
     int initrd_overridden = 0;
+    int uuid_overridden = 0;
+    int hp_overridden = 0;
     EFI_STATUS cleanup_status = EFI_SUCCESS;
 
 select_entry:
@@ -416,18 +421,23 @@ select_entry:
     }
 
 boot_selected:
-    
+
 
     efi_fs_drivers_set_lazy(1);
     saved_cmdline = NULL;
     saved_kernel_path = NULL;
     saved_initrd_path = NULL;
+    saved_uuid = NULL;
+    saved_hp_volume = NULL;
     override_cmdline = NULL;
     override_kernel_path = NULL;
     override_initrd_path = NULL;
+    override_uuid = NULL;
     cmdline_overridden = 0;
     kernel_overridden = 0;
     initrd_overridden = 0;
+    uuid_overridden = 0;
+    hp_overridden = 0;
     cleanup_status = EFI_SUCCESS;
 
     efi_log(selected->name);
@@ -457,6 +467,21 @@ boot_selected:
         gui.override_initrd_set = 0;
         initrd_overridden = 1;
         efi_log(L"main: using recovery initrd path override (one-shot)");
+    }
+    if (gui.override_uuid) {
+        saved_uuid = selected->uuid;
+        override_uuid = gui.override_uuid;
+        selected->uuid = gui.override_uuid;
+        gui.override_uuid = NULL;
+        uuid_overridden = 1;
+        efi_log(L"main: using browse volume override (one-shot)");
+    }
+    if (gui.override_volume) {
+        saved_hp_volume = selected->hp_volume;
+        selected->hp_volume = gui.override_volume;
+        gui.override_volume = NULL;
+        hp_overridden = 1;
+        efi_log(L"main: pinning boot to the browsed volume (one-shot)");
     }
 
     if (selected->encrypted || selected->initrd_encrypted || selected->luks) {
@@ -618,6 +643,18 @@ boot_selected:
         saved_initrd_path = NULL;
         override_initrd_path = NULL;
         initrd_overridden = 0;
+    }
+    if (uuid_overridden) {
+        selected->uuid = saved_uuid;
+        if (override_uuid) efi_free_pool(override_uuid);
+        saved_uuid = NULL;
+        override_uuid = NULL;
+        uuid_overridden = 0;
+    }
+    if (hp_overridden) {
+        selected->hp_volume = saved_hp_volume;
+        saved_hp_volume = NULL;
+        hp_overridden = 0;
     }
 
     efi_log(L"ERROR: boot returned (control should have transferred to the OS)");

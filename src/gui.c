@@ -511,6 +511,7 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->background = NULL;
     state->background_path = NULL;
     state->bg_anim = NULL;
+    state->browse = NULL;
 
     state->version_mode = 0;
     state->ver_fading = 0;
@@ -2172,6 +2173,97 @@ static void draw_snap_info(gui_state_t *state, boot_entry_t *e,
     }
 }
 
+static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
+    fb_t *s = state->browse;
+    if (!s) return;
+
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    UINTN head_h = name_px + 14;
+    UINTN row_h  = path_px + 12;
+    INTN  bottom = (INTN)state->screen_height - 48;
+    INTN  avail  = bottom - 48 - (INTN)head_h;
+    INTN  fit    = avail > (INTN)row_h ? avail / (INTN)row_h : 1;
+    UINTN rows   = (UINTN)fit;
+    if (rows > 8) rows = 8;
+    if (rows < 1) rows = 1;
+
+    if (s->cursor < s->scroll) s->scroll = s->cursor;
+    if (s->cursor >= s->scroll + rows) s->scroll = s->cursor - rows + 1;
+    if (s->entry_count > rows && s->scroll + rows > s->entry_count)
+        s->scroll = s->entry_count - rows;
+
+    UINTN block_h = head_h + rows * row_h;
+
+    CHAR16 head[FB_PATH_MAX + 40];
+    SPrint(head, sizeof(head), L"%s   %s",
+           s->vol_count > 0 ? s->vols[s->vol_cur].label : L"?", s->path);
+    UINTN maxw = state->screen_width * 8 / 10;
+    chop_to_width(head, name_px, maxw);
+    UINTN block_w = text_width_px(head, name_px);
+    for (UINTN i = 0; i < rows && s->scroll + i < s->entry_count; i++) {
+        fb_entry_t *e = &s->entries[s->scroll + i];
+        CHAR16 line[FB_NAME_MAX + 32];
+        if (e->is_dir) {
+            SPrint(line, sizeof(line), L"  %s\\", e->name);
+        } else {
+            CHAR16 sz[24];
+            fb_format_size(e->size, sz, sizeof(sz));
+            SPrint(line, sizeof(line), L"  %s   %s", e->name, sz);
+        }
+        chop_to_width(line, path_px, maxw);
+        UINTN w = text_width_px(line, path_px);
+        if (w > block_w) block_w = w;
+    }
+    static CHAR16 hint[] = L"Enter open/boot   Backspace up   Tab volume   Esc close";
+    UINTN hw = text_width_px(hint, path_px);
+    if (hw > block_w) block_w = hw;
+
+    INTN cx = (INTN)state->screen_width / 2;
+    INTN top = bottom - (INTN)block_h - 30;
+    if (top < 8) top = 8;
+    if (state->blur) {
+        INTN fpad = 16;
+        draw_frost(state, cx - (INTN)block_w / 2 - fpad, top - fpad,
+                   (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, 255);
+    }
+
+    color_t name_col = state->name_color;
+    color_t dim = { state->name_color.r * 6 / 10,
+                    state->name_color.g * 6 / 10,
+                    state->name_color.b * 6 / 10 };
+    color_t sel_col = state->underline_color;
+
+    UINTN hh = text_width_px(head, name_px);
+    draw_text_px_a(state, head, cx - (INTN)hh / 2, top, name_col, name_px, 255);
+
+    INTN lx = cx - (INTN)block_w / 2;
+    INTN y  = top + (INTN)head_h;
+    if (s->entry_count == 0) {
+        static CHAR16 empty[] = L"(empty)";
+        draw_text_px_a(state, empty, lx, y, dim, path_px, 255);
+        y += (INTN)row_h;
+    }
+    for (UINTN i = 0; i < rows && s->scroll + i < s->entry_count; i++) {
+        if (y + (INTN)row_h > top + (INTN)block_h + 1) break;
+        UINTN gi = s->scroll + i;
+        fb_entry_t *e = &s->entries[gi];
+        int selr = (gi == s->cursor);
+        CHAR16 line[FB_NAME_MAX + 32];
+        if (e->is_dir) {
+            SPrint(line, sizeof(line), L"%s%s\\", selr ? L"> " : L"  ", e->name);
+        } else {
+            CHAR16 sz[24];
+            fb_format_size(e->size, sz, sizeof(sz));
+            SPrint(line, sizeof(line), L"%s%s   %s", selr ? L"> " : L"  ", e->name, sz);
+        }
+        chop_to_width(line, path_px, maxw);
+        draw_text_px_a(state, line, lx, y, selr ? sel_col : dim, path_px, 255);
+        y += (INTN)row_h;
+    }
+    draw_text_px_a(state, hint, cx - (INTN)hw / 2, top + (INTN)block_h + 6,
+                   dim, path_px, 255);
+}
+
 static void draw_header(gui_state_t *state) {
     int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
     int with_logo = (mode != LOGO_MODE_OFF);
@@ -2358,7 +2450,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
                    ? state->screen_height - ci_margin - ci_block_h : name_y;
     INTN  ci_band_lo = (INTN)ci_top - pad - 2;
     INTN  ci_band_hi = (INTN)(ci_top + ci_block_h) + pad + 2;
-    int ci_active = state->center_info || ci_version || ci_snap;
+    int ci_active = !state->browse && (state->center_info || ci_version || ci_snap);
 
     INTN sel_top  = (INTN)icon_cy - (INTN)sel_ei / 2;
     INTN ecard_top = sel_top - pad;
@@ -2684,13 +2776,16 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         }
     }
 
+    if (state->browse)
+        draw_browse_panel(state, name_px);
+
     state->prev_focus = state->focus;
     state->prev_page = page;
     state->prev_selected = state->selected;
 
     if (partial) return;
 
-    if (state->timeout_active && state->timeout > 0) {
+    if (state->timeout_active && state->timeout > 0 && !state->browse) {
         UINT64 elapsed = efi_get_tick() - state->timeout_start;
         INTN remaining = state->timeout - (INTN)(elapsed / 1000);
         if (remaining > 0) {
@@ -2954,6 +3049,15 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
         return moved ? 2 : 0;
     }
 
+    if (state->browse) {
+        if (scroll > 0) fb_move(state->browse, 1);
+        else if (scroll < 0) fb_move(state->browse, -1);
+        if (scroll) *menu_redraw = 1;
+        if (moved) state->cursor_active = 1;
+        prev_btn = btn;
+        return moved ? 2 : 0;
+    }
+
     if (scroll > 0 && state->selected + 1 < state->entry_count) {
         state->selected++; state->focus = FOCUS_ENTRIES; *menu_redraw = 1;
     } else if (scroll < 0 && state->selected > 0) {
@@ -3080,6 +3184,49 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 continue;
             }
 
+            if (state->browse) {
+                fb_t *bs = state->browse;
+                CHAR16 bu = key.UnicodeChar;
+                if (bu >= 'a' && bu <= 'z') bu -= 32;
+                if (key.UnicodeChar == 0x1B ||
+                    (key.UnicodeChar == 0 && key.ScanCode == 0x17) || bu == 'Q') {
+                    fb_free(bs); state->browse = NULL;
+                    need_redraw = 1; full_redraw = 1;
+                } else if (key.UnicodeChar == 0x0D) {
+                    fb_entry_t *e = fb_cursor(bs);
+                    if (e && e->is_dir) {
+                        fb_enter(bs);
+                        need_redraw = 1; full_redraw = 1;
+                    } else if (e) {
+                        int r = fb_boot_apply(bs, state);
+                        if (r == 1) {
+                            fb_free(bs); state->browse = NULL;
+                            state->running = 0;
+                        } else if (r == 2) {
+                            fb_free(bs); state->browse = NULL;
+                            need_redraw = 1; full_redraw = 1;
+                        } else {
+                            need_redraw = 1; full_redraw = 1;
+                        }
+                    }
+                } else if (key.UnicodeChar == 0 &&
+                           (key.ScanCode == 0x01 || key.ScanCode == 0x04)) {
+                    if (key.ScanCode == 0x04) fb_up(bs);
+                    else fb_move(bs, -1);
+                    need_redraw = 1; full_redraw = 1;
+                } else if (key.UnicodeChar == 0 &&
+                           (key.ScanCode == 0x02 || key.ScanCode == 0x03)) {
+                    if (key.ScanCode == 0x03) fb_switch_volume(bs, 1);
+                    else fb_move(bs, 1);
+                    need_redraw = 1; full_redraw = 1;
+                } else if (key.UnicodeChar == 0x08 || key.UnicodeChar == 0x09) {
+                    if (key.UnicodeChar == 0x09) fb_switch_volume(bs, 1);
+                    else fb_up(bs);
+                    need_redraw = 1; full_redraw = 1;
+                }
+                continue;
+            }
+
             if (state->version_mode || state->snap_mode) {
                 boot_entry_t *se = entry_at(state, state->selected);
                 int snap = state->snap_mode;
@@ -3151,6 +3298,22 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 if (state->focus == FOCUS_ENTRIES && state->editor_enabled && state->entry_count > 0) {
                     editor_enter(state);
                     need_redraw = 1; full_redraw = 1;
+                }
+            }
+            else if (uc == 'B') {
+                if (state->browse) {
+                    fb_free(state->browse);
+                    state->browse = NULL;
+                    need_redraw = 1; full_redraw = 1;
+                } else {
+                    fb_t *bs = efi_allocate_pool(sizeof(fb_t));
+                    if (bs && fb_init(bs)) {
+                        state->browse = bs;
+                        need_redraw = 1; full_redraw = 1;
+                    } else {
+                        if (bs) efi_free_pool(bs);
+                        efi_log(L"input: browse unavailable - no readable filesystems");
+                    }
                 }
             }
             else if (uc == 'S') { state->action = VISOR_ACTION_SHUTDOWN; state->running = 0; }
@@ -3400,6 +3563,8 @@ void gui_shutdown(gui_state_t *state) {
     state->background = NULL;
     gif_free(state->bg_anim);
     state->bg_anim = NULL;
+    fb_free(state->browse);
+    state->browse = NULL;
     free_icon(state->logo);
     state->logo = NULL;
     free_icon(state->shutdown_icon);

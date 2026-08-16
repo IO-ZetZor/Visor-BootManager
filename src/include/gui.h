@@ -47,6 +47,7 @@ typedef struct {
 } icon_t;
 
 #include "anim.h"
+#include "filebrowse.h"
 
 #define VISOR_ACTION_BOOT      0
 #define VISOR_ACTION_SHUTDOWN  1
@@ -133,7 +134,7 @@ typedef struct boot_entry {
     EFI_HANDLE hp_volume;
 } boot_entry_t;
 
-typedef struct {
+typedef struct gui_state {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
     UINTN screen_width;
     UINTN screen_height;
@@ -285,7 +286,11 @@ typedef struct {
     CHAR16 *override_cmdline;
     CHAR16 *override_kernel_path;
     CHAR16 *override_initrd_path;
+    CHAR16 *override_uuid;
+    EFI_HANDLE override_volume;
     int     override_initrd_set;
+
+    fb_t   *browse;
 
     int   (*hotplug_poll)(void *ctx, boot_entry_t **head, UINTN *count,
                           UINTN *first_new);
