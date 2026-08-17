@@ -1103,16 +1103,26 @@ icon_t* gui_load_icon(CHAR16 *path) {
     return gui_load_image(path);
 }
 
-static int path_is_gif(CHAR16 *path) {
+static int path_ext_is(CHAR16 *path, const char *ext) {
     if (!path) return 0;
     UINTN n = 0;
     while (path[n]) n++;
-    if (n < 4) return 0;
-    CHAR16 a = path[n - 4], b = path[n - 3], c = path[n - 2], d = path[n - 1];
-    if (b >= 'A' && b <= 'Z') b += 32;
-    if (c >= 'A' && c <= 'Z') c += 32;
-    if (d >= 'A' && d <= 'Z') d += 32;
-    return a == '.' && b == 'g' && c == 'i' && d == 'f';
+    UINTN el = 0;
+    while (ext[el]) el++;
+    if (n < el + 1) return 0;
+    for (UINTN i = 0; i < el; i++) {
+        CHAR16 c = path[n - el + i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != (CHAR16)ext[i]) return 0;
+    }
+    return path[n - el - 1] == '.';
+}
+
+static int path_anim_kind(CHAR16 *path) {
+    if (path_ext_is(path, "gif")) return 1;
+    if (path_ext_is(path, "mp4") || path_ext_is(path, "mov") ||
+        path_ext_is(path, "m4v")) return 2;
+    return 0;
 }
 
 static anim_t* gui_load_anim(CHAR16 *path, icon_t **first_out) {
@@ -1122,13 +1132,14 @@ static anim_t* gui_load_anim(CHAR16 *path, icon_t **first_out) {
     if (!buf) return NULL;
 
     UINT8 *data = (UINT8*)buf->data;
-    if (buf->size < 6 || data[0] != 'G' || data[1] != 'I' || data[2] != 'F') {
-        efi_free_pool(buf->data);
-        efi_free_pool(buf);
-        return NULL;
+    anim_t *a = NULL;
+    if (buf->size >= 8 && data[4] == 'f' && data[5] == 't' &&
+        data[6] == 'y' && data[7] == 'p') {
+        a = mp4_load(data, buf->size);
+    } else if (buf->size >= 6 && data[0] == 'G' && data[1] == 'I' &&
+               data[2] == 'F') {
+        a = gif_load(data, buf->size);
     }
-
-    anim_t *a = gif_load(data, buf->size);
     efi_free_pool(buf->data);
     efi_free_pool(buf);
     if (!a) return NULL;
@@ -1165,7 +1176,7 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
     }
     state->background = NULL;
     if (state->bg_anim) {
-        gif_free(state->bg_anim);
+        anim_free(state->bg_anim);
         state->bg_anim = NULL;
     }
     if (state->blur_cache) {
@@ -1178,18 +1189,19 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
 
     state->background_path = efi_strdup(path);
 
-    if (path_is_gif(path)) {
+    int kind = path_anim_kind(path);
+    if (kind == 1 || kind == 2) {
         icon_t *first = NULL;
         anim_t *a = gui_load_anim(path, &first);
         if (a) {
             if (a->frame_count > 1) {
                 state->bg_anim = a;
             } else {
-                gif_free(a);
+                anim_free(a);
             }
             state->background = first;
         } else {
-            efi_log(L"  ERROR: GIF decode failed");
+            efi_log(L"  ERROR: animation decode failed");
         }
     } else {
         state->background = gui_load_image(path);
@@ -1450,7 +1462,7 @@ static int anim_tick(gui_state_t *state) {
     }
     if (now < a->next_ms) return 0;
 
-    if (!gif_advance(a)) {
+    if (!anim_advance(a)) {
         a->next_ms = 0;
         a->frame_count = 1;
         return 0;
@@ -3561,7 +3573,7 @@ void gui_shutdown(gui_state_t *state) {
 
     free_icon(state->background);
     state->background = NULL;
-    gif_free(state->bg_anim);
+    anim_free(state->bg_anim);
     state->bg_anim = NULL;
     fb_free(state->browse);
     state->browse = NULL;

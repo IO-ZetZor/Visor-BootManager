@@ -149,7 +149,7 @@
     },
     "background": {
       "x-group": "background",
-      "description": "Path to a full-screen background image (PNG, BMP or GIF). Animated GIFs play in a loop. Omit for a solid backdrop.",
+      "description": "Path to a full-screen background image (PNG, BMP, GIF or MP4). Animated GIFs and MJPEG MP4s play in a loop. Omit for a solid backdrop.",
       "$ref": "#/$defs/path"
     },
     "background_color": {

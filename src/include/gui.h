@@ -354,5 +354,11 @@ int gif_advance(anim_t *a);
 
 void gif_free(anim_t *a);
 
+anim_t* mp4_load(UINT8 *data, UINTN size);
+
+int anim_advance(anim_t *a);
+
+void anim_free(anim_t *a);
+
 #endif
 

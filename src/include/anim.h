@@ -36,6 +36,9 @@ typedef struct {
     UINTN   *ymap;
     UINTN    map_w;
     UINTN    map_h;
+
+    int      codec;
+    void    *mj;
 } anim_t;
 
 #endif
