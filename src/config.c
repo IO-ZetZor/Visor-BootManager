@@ -3,6 +3,7 @@
 #include "accent.h"
 #include "arch.h"
 #include "path_compat.h"
+#include "tcg2.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -224,6 +225,80 @@ static UINTN parse_uint(CHAR16 *s) {
         s++;
     }
     return n;
+}
+
+static int clock_position_from_str(CHAR16 *s) {
+    if (!s || !s[0]) return -1;
+
+    static const struct { const CHAR16 *name; int pos; } names[] = {
+        { L"topright",     CLOCK_POS_TOPRIGHT },
+        { L"top_right",    CLOCK_POS_TOPRIGHT },
+        { L"topleft",      CLOCK_POS_TOPLEFT },
+        { L"top_left",     CLOCK_POS_TOPLEFT },
+        { L"topcenter",    CLOCK_POS_TOPCENTER },
+        { L"top_center",   CLOCK_POS_TOPCENTER },
+        { L"topcentre",    CLOCK_POS_TOPCENTER },
+        { L"top_centre",   CLOCK_POS_TOPCENTER },
+        { L"top",          CLOCK_POS_TOPCENTER },
+        { L"bottomright",  CLOCK_POS_BOTTOMRIGHT },
+        { L"bottom_right", CLOCK_POS_BOTTOMRIGHT },
+        { L"bottomleft",   CLOCK_POS_BOTTOMLEFT },
+        { L"bottom_left",  CLOCK_POS_BOTTOMLEFT },
+        { L"bottomcenter", CLOCK_POS_BOTTOMCENTER },
+        { L"bottom_center",CLOCK_POS_BOTTOMCENTER },
+        { L"bottomcentre", CLOCK_POS_BOTTOMCENTER },
+        { L"bottom_centre",CLOCK_POS_BOTTOMCENTER },
+        { L"bottom",       CLOCK_POS_BOTTOMCENTER },
+        { L"center",       CLOCK_POS_CENTER },
+        { L"centre",       CLOCK_POS_CENTER },
+        { L"middle",       CLOCK_POS_CENTER },
+        { NULL, 0 }
+    };
+
+    for (int i = 0; names[i].name; i++) {
+        UINTN j = 0;
+        while (s[j] && names[i].name[j]) {
+            CHAR16 a = s[j], b = names[i].name[j];
+            if (a >= L'A' && a <= L'Z') a = (CHAR16)(a - L'A' + L'a');
+            if (a == L'-' || a == L' ') a = L'_';
+            if (a != b) break;
+            j++;
+        }
+        if (!s[j] && !names[i].name[j]) return names[i].pos;
+    }
+    return -1;
+}
+
+static int clock_date_from_str(CHAR16 *s) {
+    if (!s || !s[0]) return -1;
+    if (efi_strcmp(s, L"long") == 0 || efi_strcmp(s, L"full") == 0)
+        return CLOCK_DATE_LONG;
+    if (efi_strcmp(s, L"iso") == 0 || efi_strcmp(s, L"ymd") == 0)
+        return CLOCK_DATE_ISO;
+    if (efi_strcmp(s, L"dmy") == 0 || efi_strcmp(s, L"eu") == 0)
+        return CLOCK_DATE_DMY;
+    if (efi_strcmp(s, L"mdy") == 0 || efi_strcmp(s, L"us") == 0)
+        return CLOCK_DATE_MDY;
+    if (*s == '1' || *s == 't' || *s == 'y' || *s == 'T' || *s == 'Y' ||
+        efi_strcmp(s, L"on") == 0)
+        return CLOCK_DATE_LONG;
+    if (*s == '0' || *s == 'f' || *s == 'n' || *s == 'F' || *s == 'N' ||
+        efi_strcmp(s, L"off") == 0)
+        return CLOCK_DATE_OFF;
+    return -1;
+}
+
+static UINTN parse_pcr(CHAR16 *value, UINTN fallback) {
+    if (!value || value[0] < '0' || value[0] > '9') {
+        efi_log(L"WARN: PCR index must be a number 0-23 - keeping the default");
+        return fallback;
+    }
+    UINTN v = parse_uint(value);
+    if (v > 23) {
+        efi_log(L"WARN: PCR index above 23 does not exist - keeping the default");
+        return fallback;
+    }
+    return v;
 }
 
 static int is_header(CHAR16 *line, const CHAR16 *kw) {
@@ -556,7 +631,6 @@ static int is_kernel_name(CHAR16 *name) {
     return 0;
 }
 
-
 static int entry_takes_default_cmdline(CHAR16 *kernel_path, int type) {
     static const CHAR16 *loaders[] = {
         L"grubx64.efi", L"grubaa64.efi", L"shimx64.efi", L"shimaa64.efi",
@@ -570,7 +644,6 @@ static int entry_takes_default_cmdline(CHAR16 *kernel_path, int type) {
         if (ends_with_ci(kernel_path, loaders[i])) return 0;
     return 1;
 }
-
 
 static int dc_foreign_volume;
 
@@ -735,7 +808,6 @@ static int dc_basename_eq(CHAR16 *path_value, CHAR16 *kernel_name) {
         start--;
     return str_eq_ci(path_value + start, kernel_name);
 }
-
 
 static CHAR16* dc_from_loader_entries(EFI_FILE_PROTOCOL *root, CHAR16 *kernel_name) {
     static CHAR16 *dirs[] = { L"\\loader\\entries", L"\\boot\\loader\\entries", NULL };
@@ -1717,7 +1789,6 @@ static int hp_in_set(EFI_HANDLE *set, UINTN n, EFI_HANDLE h) {
     return 0;
 }
 
-
 static int hp_volume_hosts_entry(config_t *config, EFI_HANDLE vol) {
     EFI_FILE_PROTOCOL *root = root_from_handle(vol);
     if (!root) return 0;
@@ -1749,7 +1820,6 @@ void config_hotplug_arm(config_t *config) {
     EFI_HANDLE *fs = efi_locate_handle_buffer(
         &gEfiSimpleFileSystemProtocolGuid, &nf);
 
-
     hp_fs_known = efi_allocate_pool((nf ? nf : 1) * sizeof(EFI_HANDLE));
     if (hp_fs_known) {
         EFI_HANDLE boot_volume = efi_boot_volume_handle();
@@ -1760,7 +1830,6 @@ void config_hotplug_arm(config_t *config) {
             if (seen) hp_fs_known[hp_fs_n++] = fs[i];
         }
     }
-
 
     int sweep;
     if (config->scan_existing >= 0)
@@ -2153,7 +2222,6 @@ int config_hotplug_poll(config_t *config, UINTN *first_new) {
         }
     }
 
-
     if (scanned_idx < nf) {
         EFI_HANDLE *grown = efi_allocate_pool((hp_fs_n + 1) * sizeof(EFI_HANDLE));
         if (grown) {
@@ -2253,7 +2321,6 @@ static CHAR16* read_text_file(CHAR16 *path) {
     efi_free_pool(raw);
     return buf;
 }
-
 
 int config_early_file_log_enabled(void) {
     int previous = efi_log_file_enabled();
@@ -2562,6 +2629,87 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
             efi_log(L"WARN: invalid bg_color (0/1, an accent role, or #RRGGBB)");
     } else if (efi_strcmp(key, L"accent_variant") == 0) {
         config->accent_variant = accent_variant_from_str(value);
+    } else if (efi_strcmp(key, L"clock") == 0 ||
+               efi_strcmp(key, L"show_clock") == 0) {
+        if (parse_spec(value, &config->sp_clock))
+            config->show_clock = (config->sp_clock.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid clock (0/1, an accent role, or #RRGGBB)");
+    } else if (efi_strcmp(key, L"accent_clock") == 0) {
+        if (parse_spec(value, &config->sp_clock))
+            config->accent_clock = (config->sp_clock.mode != SPEC_OFF);
+        else
+            efi_log(L"WARN: invalid accent_clock (0/1, an accent role, or #RRGGBB)");
+    } else if (efi_strcmp(key, L"clock_color") == 0) {
+        if (!parse_spec_color(value, &config->sp_clock, &config->clock_color))
+            efi_log(L"WARN: invalid clock_color (0/1, an accent role, or #RRGGBB)");
+        else
+            config->has_clock_color = 1;
+    } else if (efi_strcmp(key, L"clock_size") == 0 ||
+               efi_strcmp(key, L"clock_px") == 0) {
+        config->clock_size = parse_uint(value);
+    } else if (efi_strcmp(key, L"clock_format") == 0) {
+        if (*value == '1' && value[1] == '2')      config->clock_24h = 0;
+        else if (*value == '2' && value[1] == '4') config->clock_24h = 1;
+        else
+            efi_log(L"WARN: invalid clock_format (12h or 24h)");
+    } else if (efi_strcmp(key, L"clock_seconds") == 0) {
+        config->clock_seconds = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"clock_position") == 0 ||
+               efi_strcmp(key, L"clock_pos") == 0) {
+        int pos = clock_position_from_str(value);
+        if (pos >= 0) config->clock_position = pos;
+        else
+            efi_log(L"WARN: invalid clock_position (top/bottom + left/right/center, or center)");
+    } else if (efi_strcmp(key, L"clock_date") == 0) {
+        int fmt = clock_date_from_str(value);
+        if (fmt >= 0) {
+            config->clock_date_format = fmt;
+            config->clock_date = (fmt != CLOCK_DATE_OFF);
+        } else {
+            efi_log(L"WARN: invalid clock_date (0/1, long, iso, dmy or mdy)");
+        }
+    } else if (efi_strcmp(key, L"clock_date_format") == 0) {
+        int fmt = clock_date_from_str(value);
+        if (fmt >= 0 && fmt != CLOCK_DATE_OFF) {
+            config->clock_date_format = fmt;
+            config->clock_date = 1;
+        } else {
+            efi_log(L"WARN: invalid clock_date_format (long, iso, dmy or mdy)");
+        }
+    } else if (efi_strcmp(key, L"clock_blur") == 0) {
+        config->clock_blur = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"clock_shadow") == 0) {
+        config->clock_shadow = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"screensaver") == 0) {
+
+        if (*value >= '2' && *value <= '9') {
+            config->screensaver = 1;
+            config->screensaver_delay = parse_uint(value);
+        } else if (*value == '1' && value[1] != '\0') {
+            config->screensaver = 1;
+            config->screensaver_delay = parse_uint(value);
+        } else {
+            config->screensaver = (*value == '1' || *value == 't' || *value == 'y');
+        }
+    } else if (efi_strcmp(key, L"screensaver_delay") == 0 ||
+               efi_strcmp(key, L"screensaver_timeout") == 0) {
+        config->screensaver_delay = parse_uint(value);
+    } else if (efi_strcmp(key, L"screensaver_blank") == 0 ||
+               efi_strcmp(key, L"screensaver_blank_delay") == 0) {
+        config->screensaver_blank = parse_uint(value);
+    } else if (efi_strcmp(key, L"screensaver_clock") == 0) {
+        config->screensaver_clock = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"tpm") == 0 ||
+               efi_strcmp(key, L"measure") == 0) {
+        config->tpm = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"tpm_pcr_config") == 0) {
+        config->tpm_pcr_config = parse_pcr(value, TPM_PCR_CONFIG_DEFAULT);
+    } else if (efi_strcmp(key, L"tpm_pcr_cmdline") == 0) {
+        config->tpm_pcr_cmdline = parse_pcr(value, TPM_PCR_CMDLINE_DEFAULT);
+    } else if (efi_strcmp(key, L"loader_vars") == 0 ||
+               efi_strcmp(key, L"loader_interface") == 0) {
+        config->loader_vars = (*value == '1' || *value == 't' || *value == 'y');
     }
 }
 
@@ -2727,7 +2875,6 @@ static boot_entry_t* sole_linux_entry(config_t *config) {
     }
     return only;
 }
-
 
 static boot_entry_t* snapshot_entry_match(config_t *config,
                                           CHAR16 *entry_name, CHAR16 *os,
@@ -3427,6 +3574,26 @@ EFI_STATUS config_parse(config_t *config) {
     config->accent_text = 0;
     config->accent_os_icons = 0;
     config->accent_variant = 0;
+    config->show_clock = 0;
+    config->accent_clock = 1;
+    config->clock_color = COLOR_WHITE;
+    config->has_clock_color = 0;
+    config->clock_size = 0;
+    config->clock_24h = 1;
+    config->clock_seconds = 0;
+    config->clock_position = CLOCK_POS_TOPRIGHT;
+    config->clock_date = 0;
+    config->clock_date_format = CLOCK_DATE_LONG;
+    config->clock_blur = 0;
+    config->clock_shadow = 1;
+    config->screensaver = 0;
+    config->screensaver_delay = 60;
+    config->screensaver_blank = 600;
+    config->screensaver_clock = 1;
+    config->tpm = 1;
+    config->tpm_pcr_config = TPM_PCR_CONFIG_DEFAULT;
+    config->tpm_pcr_cmdline = TPM_PCR_CMDLINE_DEFAULT;
+    config->loader_vars = 1;
     config->animation = 1;
     config->anim_speed = 0;
     config->fade_speed = 0;
@@ -3643,4 +3810,3 @@ void config_free(config_t *config) {
     config->reboot_icon = NULL;
     config->firmware_icon = NULL;
 }
-

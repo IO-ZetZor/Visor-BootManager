@@ -1,7 +1,6 @@
 #ifndef ANIM_H
 #define ANIM_H
 
-
 typedef struct {
     UINTN    width;
     UINTN    height;
@@ -42,4 +41,3 @@ typedef struct {
 } anim_t;
 
 #endif
-

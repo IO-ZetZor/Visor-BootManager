@@ -358,6 +358,122 @@ void gui_fade_out(gui_state_t *state) {
     efi_free_pool(snapshot);
 }
 
+#define SS_LEVEL_AWAKE 0
+#define SS_LEVEL_DIM   1
+#define SS_LEVEL_BLANK 2
+
+static void fade_write_cross(gui_state_t *state, UINT32 *from, UINT32 *to,
+                             UINTN px, UINTN alpha) {
+    if (alpha == 0)   { fade_write_snapshot(state, from, px); return; }
+    if (alpha >= 255) { fade_write_snapshot(state, to, px);   return; }
+
+    UINT32 a = (UINT32)((alpha * 256 + 127) / 255);
+    UINT32 ia = 256 - a;
+    for (UINTN i = 0; i < px; i++) {
+        UINT32 p = to[i], q = from[i];
+        UINT32 rb = ((((p & 0x00FF00FFu) * a) + ((q & 0x00FF00FFu) * ia)) >> 8)
+                    & 0x00FF00FFu;
+        UINT32 g  = ((((p & 0x0000FF00u) * a) + ((q & 0x0000FF00u) * ia)) >> 8)
+                    & 0x0000FF00u;
+        state->backbuffer[i] = 0xFF000000u | rb | g;
+    }
+}
+
+static void gui_crossfade(gui_state_t *state, UINT32 *from, UINT32 *to) {
+    UINTN px = state->screen_width * state->screen_height;
+    if (!gui_animation_on(state)) {
+        fade_write_snapshot(state, to, px);
+        gui_present(state);
+        return;
+    }
+
+    arch_clock_init();
+    UINT64 duration_us = (UINT64)fade_duration_ms(state) * 1000;
+    UINT64 start = arch_now_us();
+
+    for (;;) {
+        UINT64 frame_start = arch_now_us();
+        UINT64 elapsed = frame_start - start;
+        int done = elapsed >= duration_us;
+
+        UINTN e = done ? 1000
+                       : (UINTN)ease_permille((INTN)elapsed, (INTN)duration_us);
+        fade_write_cross(state, from, to, px, e * 255 / 1000);
+        gui_present(state);
+        if (done) break;
+
+        UINT64 spent = arch_now_us() - frame_start;
+        if (spent < FADE_MIN_FRAME_US) BS->Stall(FADE_MIN_FRAME_US - spent);
+    }
+}
+
+static int ss_wake(gui_state_t *state) {
+    state->ss_last_input_ms = efi_get_tick();
+    if (!state->screensaver) return 0;
+    if (state->ss_level == SS_LEVEL_AWAKE) return 0;
+
+    state->ss_level = SS_LEVEL_AWAKE;
+    state->scene_valid = 0;
+    return 1;
+}
+
+static int ss_tick(gui_state_t *state) {
+    if (!state->screensaver) return 0;
+
+    if (state->timeout_active && state->timeout > 0) {
+        state->ss_last_input_ms = efi_get_tick();
+        return 0;
+    }
+
+    if (state->editing || state->browse) {
+        state->ss_last_input_ms = efi_get_tick();
+        return 0;
+    }
+
+    UINT64 now = efi_get_tick();
+    if (!state->ss_last_input_ms) state->ss_last_input_ms = now;
+    UINT64 idle = now - state->ss_last_input_ms;
+
+    if (state->ss_level == SS_LEVEL_AWAKE && idle >= state->ss_delay_ms) {
+        state->ss_level = SS_LEVEL_DIM;
+        return 1;
+    }
+    if (state->ss_level == SS_LEVEL_DIM && state->ss_blank_ms &&
+        idle >= state->ss_blank_ms) {
+        state->ss_level = SS_LEVEL_BLANK;
+        return 1;
+    }
+    return 0;
+}
+
+static int ss_input_pending(gui_state_t *state) {
+    int hit = 0;
+
+    EFI_INPUT_KEY k;
+    while (!EFI_ERROR(uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2,
+                                       ST->ConIn, &k)))
+        hit = 1;
+
+    if (state->mouse_enabled && state->has_pointer) {
+        if (state->spp) {
+            EFI_SIMPLE_POINTER_PROTOCOL *sp = state->spp;
+            EFI_SIMPLE_POINTER_STATE st;
+            while (!EFI_ERROR(sp->GetState(sp, &st))) {
+                if (st.RelativeMovementX || st.RelativeMovementY ||
+                    st.RelativeMovementZ || st.LeftButton || st.RightButton)
+                    hit = 1;
+            }
+        }
+        if (state->app) {
+            EFI_ABSOLUTE_POINTER_PROTOCOL *ap = state->app;
+            EFI_ABSOLUTE_POINTER_STATE st;
+            while (!EFI_ERROR(ap->GetState(ap, &st)))
+                hit = 1;
+        }
+    }
+    return hit;
+}
+
 #define FB_FAST_THRESHOLD_US 20000
 
 static void gui_fb_set_wc(gui_state_t *state) {
@@ -481,6 +597,28 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->logo_size = 0;
     state->logo_gap = 0;
     state->accent_logo = 0;
+    state->show_clock = 0;
+    state->accent_clock = 1;
+    state->clock_color = COLOR_WHITE;
+    state->clock_size = 0;
+    state->clock_24h = 1;
+    state->clock_seconds = 0;
+    state->clock_position = CLOCK_POS_TOPRIGHT;
+    state->clock_date = 0;
+    state->clock_date_format = CLOCK_DATE_LONG;
+    state->clock_blur = 0;
+    state->clock_shadow = 1;
+    state->clock_last_key = -1;
+    state->clock_x = state->clock_y = 0;
+    state->clock_w = state->clock_h = 0;
+    state->clock_drawn = 0;
+    state->clock_dirty = 0;
+    state->screensaver = 0;
+    state->ss_delay_ms = 60000;
+    state->ss_blank_ms = 600000;
+    state->ss_keep_clock = 1;
+    state->ss_level = SS_LEVEL_AWAKE;
+    state->ss_last_input_ms = 0;
     state->show_names = 1;
     state->center_info = 0;
     state->box_radius = 0;
@@ -1122,25 +1260,41 @@ static int path_anim_kind(CHAR16 *path) {
     if (path_ext_is(path, "gif")) return 1;
     if (path_ext_is(path, "mp4") || path_ext_is(path, "mov") ||
         path_ext_is(path, "m4v")) return 2;
+    if (path_ext_is(path, "vbg")) return 3;
     return 0;
 }
 
-static anim_t* gui_load_anim(CHAR16 *path, icon_t **first_out) {
+static anim_t* gui_load_anim(CHAR16 *path, icon_t **first_out, UINTN sw, UINTN sh) {
     if (first_out) *first_out = NULL;
 
     efi_file_buffer_t *buf = efi_load_file(path);
     if (!buf) return NULL;
 
     UINT8 *data = (UINT8*)buf->data;
-    anim_t *a = NULL;
-    if (buf->size >= 8 && data[4] == 'f' && data[5] == 't' &&
-        data[6] == 'y' && data[7] == 'p') {
-        a = mp4_load(data, buf->size);
-    } else if (buf->size >= 6 && data[0] == 'G' && data[1] == 'I' &&
-               data[2] == 'F') {
-        a = gif_load(data, buf->size);
+    UINTN size = buf->size;
+    if (!data || !size) {
+        if (data) efi_free_pool(data);
+        efi_free_pool(buf);
+        return NULL;
     }
-    efi_free_pool(buf->data);
+
+    anim_t *a = NULL;
+    int taken = 0;
+    if (size >= 8 && data[0] == 'V' && data[1] == 'I' &&
+        data[2] == 'S' && data[3] == 'O' && data[4] == 'R' &&
+        data[5] == 'V' && data[6] == 'B' && data[7] == 'G') {
+        a = vbg_load(data, size);
+        taken = 1;
+    } else if (size >= 8 && data[4] == 'f' && data[5] == 't' &&
+               data[6] == 'y' && data[7] == 'p') {
+        a = mp4_load(data, size, sw, sh);
+        taken = 1;
+    } else if (size >= 6 && data[0] == 'G' && data[1] == 'I' &&
+               data[2] == 'F') {
+        a = gif_load(data, size);
+        taken = 1;
+    }
+    if (!taken) efi_free_pool(data);
     efi_free_pool(buf);
     if (!a) return NULL;
 
@@ -1190,9 +1344,19 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
     state->background_path = efi_strdup(path);
 
     int kind = path_anim_kind(path);
-    if (kind == 1 || kind == 2) {
+    {
+        CHAR16 dbg[80];
+        SPrint(dbg, sizeof(dbg), L"  anim kind=%d for ", kind);
+        UINTN dl = 0; while (dbg[dl]) dl++;
+        UINTN pi = 0;
+        while (path[pi] && dl < 78) { dbg[dl++] = path[pi++]; }
+        dbg[dl] = 0;
+        efi_log(dbg);
+    }
+    if (kind >= 1 && kind <= 3) {
         icon_t *first = NULL;
-        anim_t *a = gui_load_anim(path, &first);
+        anim_t *a = gui_load_anim(path, &first,
+                                  state->screen_width, state->screen_height);
         if (a) {
             if (a->frame_count > 1) {
                 state->bg_anim = a;
@@ -1353,6 +1517,11 @@ void gui_apply_accent(gui_state_t *state) {
         }
     }
 
+    if (state->accent_clock || state->sp_clock.mode != SPEC_UNSET) {
+        if (accent_resolve(state, &state->sp_clock, NULL, ROLE_CLOCK, &c))
+            state->clock_color = c;
+    }
+
     if (!state->accent_valid) return;
 
     if (accent_resolve(state, &state->sp_bg, NULL, ROLE_SURFACE, &c))
@@ -1361,6 +1530,8 @@ void gui_apply_accent(gui_state_t *state) {
         accent_resolve(state, &state->sp_blur, NULL, ROLE_ON_PRIMARY_CONTAINER, &c))
         state->blur_color = c;
 }
+
+#define ANIM_MAX_SKIP 8
 
 static int anim_build_maps(anim_t *a, UINTN dw, UINTN dh) {
     if (a->xmap && a->ymap && a->map_w == dw && a->map_h == dh) return 1;
@@ -1419,9 +1590,18 @@ static int gui_draw_background(gui_state_t *state) {
         for (UINTN y = 0; y < dst_height; y++) {
             UINTN rowbase = a->ymap[y];
             UINT32 *drow = dst + y * dst_width;
-            for (UINTN x = 0; x < dst_width; x++) {
-                UINT32 pixel = src[rowbase + a->xmap[x]];
-                drow[x] = (pixel & 0xFF000000u) ? dim_pixel(pixel) : fill;
+            const UINT32 *srow = src + rowbase;
+            if (a->width == dst_width) {
+                for (UINTN x = 0; x < dst_width; x++) {
+                    UINT32 pixel = srow[x];
+                    drow[x] = (pixel & 0xFF000000u) ? dim_pixel(pixel) : fill;
+                }
+            } else {
+                const UINTN *xm = a->xmap;
+                for (UINTN x = 0; x < dst_width; x++) {
+                    UINT32 pixel = srow[xm[x]];
+                    drow[x] = (pixel & 0xFF000000u) ? dim_pixel(pixel) : fill;
+                }
             }
         }
         return 1;
@@ -1462,7 +1642,11 @@ static int anim_tick(gui_state_t *state) {
     }
     if (now < a->next_ms) return 0;
 
-    if (!anim_advance(a)) {
+    UINTN step = a->cur_delay ? a->cur_delay : 10;
+    UINTN skip = 1 + (UINTN)((now - a->next_ms) / step);
+    if (skip > ANIM_MAX_SKIP) skip = ANIM_MAX_SKIP;
+
+    if (!anim_advance_n(a, skip)) {
         a->next_ms = 0;
         a->frame_count = 1;
         return 0;
@@ -1614,23 +1798,36 @@ static void box_blur_pass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN rad
 
 static void box_blur_vpass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN rad) {
     UINTN W = state->screen_width, H = state->screen_height;
-    for (UINTN x = 0; x < W; x++) {
-        UINT32 sr = 0, sg = 0, sb = 0;
-        INTN win = 2 * rad + 1;
+    INTN win = 2 * rad + 1;
+    UINTN strip = 64;
+    UINT32 sr[64], sg[64], sb[64];
+
+    for (UINTN x0 = 0; x0 < W; x0 += strip) {
+        UINTN nx = W - x0 < strip ? W - x0 : strip;
+        for (UINTN i = 0; i < nx; i++) { sr[i] = 0; sg[i] = 0; sb[i] = 0; }
         for (INTN i = -rad; i <= rad; i++) {
             UINTN yi = (i < 0) ? 0 : ((UINTN)i >= H ? H - 1 : (UINTN)i);
-            UINT32 p = src[yi * W + x];
-            sr += (p >> 16) & 0xFF; sg += (p >> 8) & 0xFF; sb += p & 0xFF;
+            const UINT32 *s = src + yi * W + x0;
+            for (UINTN k = 0; k < nx; k++) {
+                UINT32 p = s[k];
+                sr[k] += (p >> 16) & 0xFF; sg[k] += (p >> 8) & 0xFF; sb[k] += p & 0xFF;
+            }
         }
         for (UINTN y = 0; y < H; y++) {
-            dst[y * W + x] = (0xFFu << 24) | (((sr / win) & 0xFF) << 16)
-                           | (((sg / win) & 0xFF) << 8) | ((sb / win) & 0xFF);
+            UINT32 *d = dst + y * W + x0;
+            for (UINTN k = 0; k < nx; k++)
+                d[k] = (0xFFu << 24) | (((sr[k] / win) & 0xFF) << 16)
+                     | (((sg[k] / win) & 0xFF) << 8) | ((sb[k] / win) & 0xFF);
             UINTN ya = y + rad + 1; if (ya >= H) ya = H - 1;
             INTN yrm = (INTN)y - rad; UINTN yr = (yrm < 0) ? 0 : (UINTN)yrm;
-            UINT32 pa = src[ya * W + x], pr = src[yr * W + x];
-            sr += ((pa >> 16) & 0xFF) - ((pr >> 16) & 0xFF);
-            sg += ((pa >> 8) & 0xFF) - ((pr >> 8) & 0xFF);
-            sb += (pa & 0xFF) - (pr & 0xFF);
+            const UINT32 *pa = src + ya * W + x0;
+            const UINT32 *pr = src + yr * W + x0;
+            for (UINTN k = 0; k < nx; k++) {
+                UINT32 A = pa[k], R = pr[k];
+                sr[k] += ((A >> 16) & 0xFF) - ((R >> 16) & 0xFF);
+                sg[k] += ((A >> 8) & 0xFF) - ((R >> 8) & 0xFF);
+                sb[k] += (A & 0xFF) - (R & 0xFF);
+            }
         }
     }
 }
@@ -2185,10 +2382,7 @@ static void draw_snap_info(gui_state_t *state, boot_entry_t *e,
     }
 }
 
-static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
-    fb_t *s = state->browse;
-    if (!s) return;
-
+static UINTN browse_rows(gui_state_t *state, UINTN name_px) {
     UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
     UINTN head_h = name_px + 14;
     UINTN row_h  = path_px + 12;
@@ -2198,6 +2392,39 @@ static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
     UINTN rows   = (UINTN)fit;
     if (rows > 8) rows = 8;
     if (rows < 1) rows = 1;
+    return rows;
+}
+
+static int browse_band_set(gui_state_t *state) {
+    if (!state->scene_cache || !state->scene_valid) return 0;
+    UINTN name_px = state->name_size ? state->name_size : default_name_px(state);
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    UINTN head_h = name_px + 14;
+    UINTN row_h  = path_px + 12;
+    INTN  bottom = (INTN)state->screen_height - 48;
+    INTN  avail  = bottom - 48 - (INTN)head_h;
+    INTN  fit    = avail > (INTN)row_h ? avail / (INTN)row_h : 1;
+    UINTN rows   = (UINTN)fit;
+    if (rows > 8) rows = 8;
+    if (rows < 1) rows = 1;
+    UINTN block_h = head_h + rows * row_h;
+    INTN top = bottom - (INTN)block_h - 30;
+    if (top < 8) top = 8;
+    state->band_n = 1;
+    state->band_y[0] = top - 40;
+    state->band_h[0] = (INTN)block_h + (INTN)path_px + 62;
+    return 1;
+}
+
+static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
+    fb_t *s = state->browse;
+    if (!s) return;
+
+    UINTN path_px = (name_px * 4) / 5; if (path_px < 10) path_px = 10;
+    UINTN head_h = name_px + 14;
+    UINTN row_h  = path_px + 12;
+    INTN  bottom = (INTN)state->screen_height - 48;
+    UINTN rows   = browse_rows(state, name_px);
 
     if (s->cursor < s->scroll) s->scroll = s->cursor;
     if (s->cursor >= s->scroll + rows) s->scroll = s->cursor - rows + 1;
@@ -2207,8 +2434,9 @@ static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
     UINTN block_h = head_h + rows * row_h;
 
     CHAR16 head[FB_PATH_MAX + 40];
-    SPrint(head, sizeof(head), L"%s   %s",
-           s->vol_count > 0 ? s->vols[s->vol_cur].label : L"?", s->path);
+    SPrint(head, sizeof(head), L"%s   %s%s",
+           s->vol_count > 0 ? s->vols[s->vol_cur].label : L"?", s->path,
+           s->truncated ? L"  [...]" : L"");
     UINTN maxw = state->screen_width * 8 / 10;
     chop_to_width(head, name_px, maxw);
     UINTN block_w = text_width_px(head, name_px);
@@ -2272,15 +2500,30 @@ static void draw_browse_panel(gui_state_t *state, UINTN name_px) {
         draw_text_px_a(state, line, lx, y, selr ? sel_col : dim, path_px, 255);
         y += (INTN)row_h;
     }
+    if (s->entry_count > rows) {
+        INTN bar_x = cx + (INTN)block_w / 2 + 6;
+        INTN bar_y = top + (INTN)head_h;
+        INTN bar_h = (INTN)block_h - (INTN)head_h;
+        INTN thumb_h = bar_h * (INTN)rows / (INTN)s->entry_count;
+        if (thumb_h < 4) thumb_h = 4;
+        if (thumb_h > bar_h) thumb_h = bar_h;
+        UINTN span = s->entry_count - rows;
+        UINTN pos = s->scroll < span ? s->scroll : span;
+        INTN thumb_y = bar_y + (INTN)((INTN)pos * (bar_h - thumb_h) / (INTN)span);
+        fill_rect_alpha(state, bar_x, bar_y, 3, bar_h, (color_t){0, 0, 0}, 110);
+        fill_rect_alpha(state, bar_x, thumb_y, 3, thumb_h, sel_col, 220);
+    }
+
     draw_text_px_a(state, hint, cx - (INTN)hw / 2, top + (INTN)block_h + 6,
                    dim, path_px, 255);
 }
 
-static void draw_header(gui_state_t *state) {
+static int header_box(gui_state_t *state, INTN *out_x, INTN *out_y,
+                      INTN *out_w, INTN *out_h) {
     int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
     int with_logo = (mode != LOGO_MODE_OFF);
     int with_text = state->show_title && mode != LOGO_MODE_ONLY;
-    if (!with_logo && !with_text) return;
+    if (!with_logo && !with_text) return 0;
 
     CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
     UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
@@ -2319,8 +2562,33 @@ static void draw_header(gui_state_t *state) {
         bh = title_px;
     }
 
-    INTN bx = (bw < state->screen_width) ? (INTN)(state->screen_width - bw) / 2 : 0;
-    INTN by = (INTN)(state->screen_height / 14);
+    *out_x = (bw < state->screen_width) ? (INTN)(state->screen_width - bw) / 2 : 0;
+    *out_y = (INTN)(state->screen_height / 14);
+    *out_w = (INTN)bw;
+    *out_h = (INTN)bh;
+    return 1;
+}
+
+static void draw_header(gui_state_t *state) {
+    int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
+    int with_logo = (mode != LOGO_MODE_OFF);
+    int with_text = state->show_title && mode != LOGO_MODE_ONLY;
+
+    INTN bx, by, bwi, bhi;
+    if (!header_box(state, &bx, &by, &bwi, &bhi)) return;
+    UINTN bw = (UINTN)bwi, bh = (UINTN)bhi;
+
+    CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
+    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
+    UINTN tw = with_text ? text_width_px(title, title_px) : 0;
+
+    UINTN lsz = 0, gap = 0;
+    if (with_logo) {
+        gap = state->logo_gap ? state->logo_gap : title_px / 2;
+        if (mode == LOGO_MODE_ABOVE && with_text) lsz = bh - gap - title_px;
+        else if (with_text)                       lsz = bw - gap - tw;
+        else                                      lsz = bh;
+    }
 
     if (state->blur_title) {
         INTN pad = 18;
@@ -2360,6 +2628,314 @@ static void draw_header(gui_state_t *state) {
     }
 }
 
+static UINTN clock_px(gui_state_t *state) {
+    UINTN px = state->clock_size ? state->clock_size
+                                 : (state->name_size ? state->name_size
+                                                     : default_title_px(state));
+    if (px < 10) px = 10;
+    return px;
+}
+
+static UINTN clock_date_px(UINTN px) {
+    UINTN d = px * 40 / 100;
+    if (d < 9) d = 9;
+    return d;
+}
+
+static const CHAR16 *MONTH_LONG[12] = {
+    L"January", L"February", L"March",     L"April",   L"May",      L"June",
+    L"July",    L"August",   L"September", L"October", L"November", L"December"
+};
+
+static const CHAR16 *WEEKDAY_LONG[7] = {
+    L"Sunday", L"Monday", L"Tuesday", L"Wednesday",
+    L"Thursday", L"Friday", L"Saturday"
+};
+
+static int day_of_week(UINTN y, UINTN m, UINTN d) {
+    static const int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (m < 1 || m > 12 || y < 1) return -1;
+    if (m < 3) y -= 1;
+    return (int)((y + y / 4 - y / 100 + y / 400 + (UINTN)t[m - 1] + d) % 7);
+}
+
+static UINTN put2(CHAR16 *buf, UINTN at, UINTN v) {
+    buf[at]     = (CHAR16)(L'0' + (v / 10) % 10);
+    buf[at + 1] = (CHAR16)(L'0' + v % 10);
+    return at + 2;
+}
+
+static UINTN put_str(CHAR16 *buf, UINTN at, const CHAR16 *s) {
+    while (*s) buf[at++] = *s++;
+    return at;
+}
+
+static UINTN clock_format_time(gui_state_t *state, EFI_TIME *t, CHAR16 *buf) {
+    UINTN h = t->Hour;
+    const CHAR16 *suffix = NULL;
+
+    if (!state->clock_24h) {
+        suffix = (h < 12) ? L" AM" : L" PM";
+        h = h % 12;
+        if (h == 0) h = 12;
+    }
+
+    UINTN n = 0;
+
+    if (!state->clock_24h && h < 10) buf[n++] = (CHAR16)(L'0' + h);
+    else                             n = put2(buf, n, h);
+
+    buf[n++] = L':';
+    n = put2(buf, n, t->Minute);
+    if (state->clock_seconds) {
+        buf[n++] = L':';
+        n = put2(buf, n, t->Second);
+    }
+    if (suffix) n = put_str(buf, n, suffix);
+
+    buf[n] = 0;
+    return n;
+}
+
+static UINTN clock_format_date(gui_state_t *state, EFI_TIME *t, CHAR16 *buf) {
+    UINTN n = 0;
+    UINTN mon = (t->Month >= 1 && t->Month <= 12) ? t->Month : 1;
+
+    switch (state->clock_date_format) {
+        case CLOCK_DATE_ISO:
+            n = put2(buf, n, (UINTN)t->Year / 100);
+            n = put2(buf, n, (UINTN)t->Year % 100);
+            buf[n++] = L'-';
+            n = put2(buf, n, t->Month);
+            buf[n++] = L'-';
+            n = put2(buf, n, t->Day);
+            break;
+        case CLOCK_DATE_DMY:
+            n = put2(buf, n, t->Day);
+            buf[n++] = L'/';
+            n = put2(buf, n, t->Month);
+            buf[n++] = L'/';
+            n = put2(buf, n, (UINTN)t->Year % 100);
+            break;
+        case CLOCK_DATE_MDY:
+            n = put2(buf, n, t->Month);
+            buf[n++] = L'/';
+            n = put2(buf, n, t->Day);
+            buf[n++] = L'/';
+            n = put2(buf, n, (UINTN)t->Year % 100);
+            break;
+        default: {
+            int wd = day_of_week((UINTN)t->Year, t->Month, t->Day);
+            if (wd >= 0) {
+                n = put_str(buf, n, WEEKDAY_LONG[wd]);
+                buf[n++] = L','; buf[n++] = L' ';
+            }
+            n = put_str(buf, n, MONTH_LONG[mon - 1]);
+            buf[n++] = L' ';
+            if (t->Day >= 10) n = put2(buf, n, t->Day);
+            else              buf[n++] = (CHAR16)(L'0' + t->Day);
+            break;
+        }
+    }
+
+    buf[n] = 0;
+    return n;
+}
+
+static INTN clock_key(gui_state_t *state, EFI_TIME *t) {
+    INTN key = (INTN)t->Hour * 60 + (INTN)t->Minute;
+    if (state->clock_seconds) key = key * 60 + (INTN)t->Second;
+
+    if (state->clock_date) key += (INTN)t->Day * 100000;
+    return key;
+}
+
+static int clock_layout(gui_state_t *state, EFI_TIME *t,
+                        CHAR16 *time_buf, CHAR16 *date_buf,
+                        INTN *out_x, INTN *out_y, INTN *out_w, INTN *out_h,
+                        INTN *time_x, INTN *date_x, INTN *date_y) {
+    UINTN px = clock_px(state);
+    UINTN dpx = clock_date_px(px);
+
+    clock_format_time(state, t, time_buf);
+    date_buf[0] = 0;
+    if (state->clock_date) clock_format_date(state, t, date_buf);
+
+    UINTN tw = text_width_px(time_buf, px);
+    UINTN dw = date_buf[0] ? text_width_px(date_buf, dpx) : 0;
+    UINTN gap = date_buf[0] ? (px / 5 + 2) : 0;
+
+    UINTN bw = tw > dw ? tw : dw;
+    UINTN bh = px + (date_buf[0] ? gap + dpx : 0);
+
+    UINTN margin = clamp_uintn(ui_base(state) / 26, 28, 46);
+    int pos = state->clock_position;
+
+    int right  = (pos == CLOCK_POS_TOPRIGHT || pos == CLOCK_POS_BOTTOMRIGHT);
+    int left   = (pos == CLOCK_POS_TOPLEFT  || pos == CLOCK_POS_BOTTOMLEFT);
+    int bottom = (pos == CLOCK_POS_BOTTOMRIGHT || pos == CLOCK_POS_BOTTOMLEFT ||
+                  pos == CLOCK_POS_BOTTOMCENTER);
+
+    INTN x;
+    if (right)     x = (INTN)state->screen_width - (INTN)bw - (INTN)margin;
+    else if (left) x = (INTN)margin;
+    else           x = ((INTN)state->screen_width - (INTN)bw) / 2;
+
+    INTN y;
+    if (pos == CLOCK_POS_CENTER)
+        y = ((INTN)state->screen_height - (INTN)bh) / 2;
+    else if (bottom)
+        y = (INTN)state->screen_height - (INTN)bh - (INTN)margin;
+    else
+
+        y = (INTN)(state->screen_height / 14);
+
+    if (x < (INTN)margin) x = (INTN)margin;
+    if (y < 0) y = 0;
+
+    if (!bottom && pos != CLOCK_POS_CENTER) {
+        INTN hx, hy, hw, hh;
+        if (header_box(state, &hx, &hy, &hw, &hh)) {
+            INTN pad = (INTN)(px / 2);
+            int overlap_x = (x - pad) < (hx + hw) && (x + (INTN)bw + pad) > hx;
+            int overlap_y = y < (hy + hh) && (y + (INTN)bh) > hy;
+            if (overlap_x && overlap_y)
+                y = hy + hh + (INTN)(px / 2) + 8;
+        }
+    }
+
+    *time_x = x + ((INTN)bw - (INTN)tw) / 2;
+    *date_x = x + ((INTN)bw - (INTN)dw) / 2;
+    *date_y = y + (INTN)px + (INTN)gap;
+
+    *out_x = x; *out_y = y; *out_w = (INTN)bw; *out_h = (INTN)bh;
+    return 1;
+}
+
+static int draw_clock_ex(gui_state_t *state, int frost) {
+    if (!state->show_clock) return 0;
+
+    EFI_TIME t;
+    if (EFI_ERROR(RT->GetTime(&t, NULL))) return 0;
+
+    CHAR16 time_buf[24], date_buf[48];
+    INTN x, y, w, h, tx, dx, dy;
+    if (!clock_layout(state, &t, time_buf, date_buf, &x, &y, &w, &h, &tx, &dx, &dy))
+        return 0;
+
+    UINTN px = clock_px(state);
+    UINTN dpx = clock_date_px(px);
+    int backing = frost && state->clock_blur;
+
+    if (backing) {
+        INTN pad = (INTN)(px / 2);
+        draw_frost(state, x - pad, y - pad / 2, w + pad * 2, h + pad, 255);
+    }
+
+    if (state->clock_shadow) {
+        INTN off = (INTN)(px / 14); if (off < 1) off = 1;
+        draw_text_px_a(state, time_buf, tx + off, y + off, COLOR_BLACK, px, 115);
+        if (date_buf[0])
+            draw_text_px_a(state, date_buf, dx + off, dy + off, COLOR_BLACK, dpx, 115);
+    }
+
+    draw_text_px(state, time_buf, tx, y, state->clock_color, px);
+    if (date_buf[0])
+        draw_text_px(state, date_buf, dx, dy, state->clock_color, dpx);
+
+    INTN pad = backing ? (INTN)(px / 2) : 2;
+    INTN rx = x - pad, ry = y - pad / 2 - 2;
+    INTN rw = w + pad * 2, rh = h + pad + 4;
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+
+    state->clock_x = rx; state->clock_y = ry;
+    state->clock_w = rw; state->clock_h = rh;
+    state->clock_drawn = 1;
+    state->clock_last_key = clock_key(state, &t);
+    return 1;
+}
+
+static int draw_clock(gui_state_t *state) {
+    return draw_clock_ex(state, 1);
+}
+
+static int clock_needs_tick(gui_state_t *state) {
+    if (!state->show_clock) return 0;
+    EFI_TIME t;
+    if (EFI_ERROR(RT->GetTime(&t, NULL))) return 0;
+    return clock_key(state, &t) != state->clock_last_key;
+}
+
+static void ss_draw_frame(gui_state_t *state) {
+    if (!gui_draw_background(state))
+        fill_rect_alpha(state, 0, 0, state->screen_width, state->screen_height,
+                        COLOR_BLACK, 60);
+
+    state->clock_drawn = 0;
+    state->clock_dirty = 0;
+
+    if (state->ss_keep_clock) draw_clock_ex(state, 0);
+}
+
+static void ss_transition_to_saver(gui_state_t *state) {
+    UINTN px = state->screen_width * state->screen_height;
+    if (!state->backbuffer) return;
+
+    state->cursor_saved = 0;
+
+    UINT32 *from = efi_allocate_pool(px * sizeof(UINT32));
+    UINT32 *to   = efi_allocate_pool(px * sizeof(UINT32));
+    if (!from || !to) {
+
+        if (from) efi_free_pool(from);
+        if (to)   efi_free_pool(to);
+        ss_draw_frame(state);
+        gui_present(state);
+        return;
+    }
+
+    CopyMem(from, state->backbuffer, px * sizeof(UINT32));
+    ss_draw_frame(state);
+    CopyMem(to, state->backbuffer, px * sizeof(UINT32));
+
+    gui_crossfade(state, from, to);
+    efi_free_pool(from);
+    efi_free_pool(to);
+}
+
+static void cursor_overlay(gui_state_t *state);
+
+static void ss_transition_to_menu(gui_state_t *state, int was_blank) {
+    UINTN px = state->screen_width * state->screen_height;
+    if (!state->backbuffer) return;
+
+    state->cursor_saved = 0;
+
+    UINT32 *from = was_blank ? NULL : efi_allocate_pool(px * sizeof(UINT32));
+    if (from) CopyMem(from, state->backbuffer, px * sizeof(UINT32));
+
+    state->scene_valid = 0;
+    gui_draw_menu(state, 0);
+
+    if (from) {
+        UINT32 *to = efi_allocate_pool(px * sizeof(UINT32));
+        if (to) {
+            CopyMem(to, state->backbuffer, px * sizeof(UINT32));
+            gui_crossfade(state, from, to);
+            efi_free_pool(to);
+        } else {
+            gui_present(state);
+        }
+        efi_free_pool(from);
+    } else {
+
+        gui_fade_in_current(state);
+    }
+
+    if (state->cursor_active) cursor_overlay(state);
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -2371,7 +2947,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
             fill_rect_alpha(state, 0, 0, state->screen_width, state->screen_height,
                             COLOR_BLACK, 60);
 
-        if ((state->blur || state->blur_title) &&
+        if ((state->blur || state->blur_title ||
+             (state->show_clock && state->clock_blur)) &&
             (!state->blur_cache || !state->bg_anim))
             build_blur_cache(state);
 
@@ -2380,14 +2957,25 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         draw_power_actions(state, -1, 0);
 
         if (state->scene_cache) {
-            for (UINTN i = 0; i < px; i++) state->scene_cache[i] = state->backbuffer[i];
+            CopyMem(state->scene_cache, state->backbuffer, px * sizeof(UINT32));
             state->scene_valid = 1;
         }
     } else if (partial) {
         for (int b = 0; b < state->band_n; b++)
             scene_restore_band(state, state->band_y[b], state->band_h[b]);
+
+        if (state->clock_drawn)
+            scene_restore_band(state, state->clock_y, state->clock_h);
     } else {
-        for (UINTN i = 0; i < px; i++) state->backbuffer[i] = state->scene_cache[i];
+        CopyMem(state->backbuffer, state->scene_cache, px * sizeof(UINT32));
+    }
+
+    if (draw_clock(state)) {
+        state->clock_dirty = 1;
+    } else {
+
+        state->clock_dirty = state->clock_drawn;
+        state->clock_drawn = 0;
     }
 
     if (state->entry_count == 0) {
@@ -2398,6 +2986,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         if (!building && state->scene_valid)
             scene_restore_band(state, state->pwr_y0 - 6,
                                state->pwr_y1 - state->pwr_y0 + 12);
+        if (state->browse)
+            draw_browse_panel(state, state->name_size ? state->name_size : default_name_px(state));
         draw_power_actions(state, state->focus == FOCUS_POWER ? (int)state->power_sel : -1, 1);
         return;
     }
@@ -2515,13 +3105,15 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         INTN fin = ease_alpha(state->page_frame, N); if (fin > 255) fin = 255;
         INTN fout = 255 - fin;
 
-        state->band_n = 1;
-        state->band_y[0] = (INTN)row_top - pad - 2;
-        state->band_h[0] = (INTN)(name_y + name_px + pad) + 2 - state->band_y[0];
-        if (state->center_info) {
-            state->band_y[1] = ci_band_lo;
-            state->band_h[1] = ci_band_hi - ci_band_lo;
-            state->band_n = 2;
+        if (!state->browse) {
+            state->band_n = 1;
+            state->band_y[0] = (INTN)row_top - pad - 2;
+            state->band_h[0] = (INTN)(name_y + name_px + pad) + 2 - state->band_y[0];
+            if (state->center_info) {
+                state->band_y[1] = ci_band_lo;
+                state->band_h[1] = ci_band_hi - ci_band_lo;
+                state->band_n = 2;
+            }
         }
 
         UINTN old_start = state->page_old * per_page;
@@ -2537,7 +3129,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
 
         draw_chevrons(state, page, per_page, start_x, total_w, isp, max_ei, icon_cy, fin);
 
-        if (state->center_info && state->entry_count > 0)
+        if (!state->browse && state->center_info && state->entry_count > 0)
             draw_center_info(state, entry_at(state, state->selected),
                              ci_top, name_px, 255);
 
@@ -2646,8 +3238,10 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         } else { bl[nb] = ilo[a]; bh[nb] = ihi[a]; nb++; }
     }
     if (nb > 4) { bh[0] = bh[nb - 1]; nb = 1; }
-    state->band_n = nb;
-    for (int a = 0; a < nb; a++) { state->band_y[a] = bl[a]; state->band_h[a] = bh[a] - bl[a]; }
+    if (!state->browse) {
+        state->band_n = nb;
+        for (int a = 0; a < nb; a++) { state->band_y[a] = bl[a]; state->band_h[a] = bh[a] - bl[a]; }
+    }
 
     int pfocus = (state->focus == FOCUS_POWER) ? (int)state->power_sel : -1;
 
@@ -3064,7 +3658,7 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
     if (state->browse) {
         if (scroll > 0) fb_move(state->browse, 1);
         else if (scroll < 0) fb_move(state->browse, -1);
-        if (scroll) *menu_redraw = 1;
+        if (scroll && browse_band_set(state)) *menu_redraw = 1;
         if (moved) state->cursor_active = 1;
         prev_btn = btn;
         return moved ? 2 : 0;
@@ -3149,7 +3743,45 @@ boot_entry_t* gui_run(gui_state_t *state) {
     int  full_redraw = 1;
     int  intro_fade = 1;
 
+    state->ss_last_input_ms = efi_get_tick();
+
     while (state->running) {
+
+        if (state->screensaver && state->ss_level != SS_LEVEL_AWAKE) {
+            if (ss_input_pending(state)) {
+                int was_blank = (state->ss_level == SS_LEVEL_BLANK);
+                ss_wake(state);
+                ss_transition_to_menu(state, was_blank);
+                need_redraw = 0;
+                full_redraw = 0;
+                intro_fade = 0;
+
+                state->timeout_start = efi_get_tick();
+                last_remaining = -2;
+                continue;
+            }
+
+            if (state->ss_level == SS_LEVEL_DIM) {
+                int rd = anim_tick(state);
+                if (state->ss_keep_clock && clock_needs_tick(state)) rd = 1;
+                if (rd) { ss_draw_frame(state); gui_present(state); }
+            }
+
+            if (ss_tick(state) && state->ss_level == SS_LEVEL_BLANK) {
+                gui_fade_out(state);
+
+                if (state->bg_anim) state->bg_anim->next_ms = 0;
+            }
+
+            efi_sleep(state->ss_level == SS_LEVEL_BLANK ? 120 : 60);
+            continue;
+        }
+
+        if (ss_tick(state) && state->ss_level == SS_LEVEL_DIM) {
+            ss_transition_to_saver(state);
+            continue;
+        }
+
         if (need_redraw) {
             INTN ghost_y = -1;
             if (state->cursor_saved) {
@@ -3168,6 +3800,9 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 for (int b = 0; b < state->band_n; b++)
                     gui_present_band(state, state->band_y[b], state->band_h[b]);
                 if (ghost_y >= 0) gui_present_band(state, ghost_y, CUR_H);
+
+                if (state->clock_dirty)
+                    gui_present_band(state, state->clock_y, state->clock_h);
             }
             if (state->editing) intro_fade = 0;
             need_redraw = state->anim_active || state->page_anim || state->hp_anim;
@@ -3179,6 +3814,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
         if (!state->editing) {
             int menu_rd = 0;
             int pr = poll_pointer(state, &menu_rd);
+            if (pr || menu_rd) state->ss_last_input_ms = efi_get_tick();
             if (pr == 1) state->running = 0;
             else if (menu_rd) need_redraw = 1;
             else if (pr == 2 && state->cursor_active && !need_redraw)
@@ -3187,6 +3823,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
 
         status = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
         if (!EFI_ERROR(status)) {
+            state->ss_last_input_ms = efi_get_tick();
 
             if (state->timeout_active) { state->timeout_active = 0; need_redraw = 1; full_redraw = 1; }
 
@@ -3207,8 +3844,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 } else if (key.UnicodeChar == 0x0D) {
                     fb_entry_t *e = fb_cursor(bs);
                     if (e && e->is_dir) {
-                        fb_enter(bs);
-                        need_redraw = 1; full_redraw = 1;
+                        if (fb_enter(bs)) { need_redraw = 1; full_redraw = 1; }
                     } else if (e) {
                         int r = fb_boot_apply(bs, state);
                         if (r == 1) {
@@ -3222,19 +3858,47 @@ boot_entry_t* gui_run(gui_state_t *state) {
                         }
                     }
                 } else if (key.UnicodeChar == 0 &&
-                           (key.ScanCode == 0x01 || key.ScanCode == 0x04)) {
-                    if (key.ScanCode == 0x04) fb_up(bs);
-                    else fb_move(bs, -1);
-                    need_redraw = 1; full_redraw = 1;
-                } else if (key.UnicodeChar == 0 &&
-                           (key.ScanCode == 0x02 || key.ScanCode == 0x03)) {
-                    if (key.ScanCode == 0x03) fb_switch_volume(bs, 1);
-                    else fb_move(bs, 1);
+                           (key.ScanCode == 0x01 || key.ScanCode == 0x02 ||
+                            key.ScanCode == 0x05 || key.ScanCode == 0x06 ||
+                            key.ScanCode == 0x09 || key.ScanCode == 0x0A)) {
+                    UINTN before = bs->cursor;
+                    UINTN rows = browse_rows(state,
+                        state->name_size ? state->name_size : default_name_px(state));
+                    switch (key.ScanCode) {
+                        case 0x01: fb_move(bs, -1); break;
+                        case 0x02: fb_move(bs, 1); break;
+                        case 0x05: fb_move(bs, -(INTN)bs->entry_count - 1); break;
+                        case 0x06: fb_move(bs, (INTN)bs->entry_count + 1); break;
+                        case 0x09: fb_move(bs, -(INTN)rows); break;
+                        case 0x0A: fb_move(bs, (INTN)rows); break;
+                    }
+                    if (bs->cursor != before) {
+                        need_redraw = 1;
+                        full_redraw = browse_band_set(state) ? 0 : 1;
+                    }
+                } else if (key.UnicodeChar == 0 && key.ScanCode == 0x04) {
+                    if (fb_up(bs)) { need_redraw = 1; full_redraw = 1; }
+                } else if (key.UnicodeChar == 0 && key.ScanCode == 0x03) {
+                    fb_switch_volume(bs, 1);
                     need_redraw = 1; full_redraw = 1;
                 } else if (key.UnicodeChar == 0x08 || key.UnicodeChar == 0x09) {
-                    if (key.UnicodeChar == 0x09) fb_switch_volume(bs, 1);
-                    else fb_up(bs);
-                    need_redraw = 1; full_redraw = 1;
+                    if (key.UnicodeChar == 0x09) {
+                        fb_switch_volume(bs, 1);
+                        need_redraw = 1; full_redraw = 1;
+                    } else if (fb_up(bs)) {
+                        need_redraw = 1; full_redraw = 1;
+                    }
+                } else if (bu >= 'A' && bu <= 'Z') {
+                    UINTN before = bs->cursor;
+                    for (UINTN i = 0; i < bs->entry_count; i++) {
+                        CHAR16 c0 = bs->entries[i].name[0];
+                        if (c0 >= 'a' && c0 <= 'z') c0 -= 32;
+                        if (c0 == bu) { bs->cursor = i; break; }
+                    }
+                    if (bs->cursor != before) {
+                        need_redraw = 1;
+                        full_redraw = browse_band_set(state) ? 0 : 1;
+                    }
                 }
                 continue;
             }
@@ -3321,6 +3985,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                     fb_t *bs = efi_allocate_pool(sizeof(fb_t));
                     if (bs && fb_init(bs)) {
                         state->browse = bs;
+                        fb_list(bs);
                         need_redraw = 1; full_redraw = 1;
                     } else {
                         if (bs) efi_free_pool(bs);
@@ -3478,7 +4143,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
         }
 
-        if (!state->editing && anim_tick(state)) {
+        if (!state->editing && !state->browse && anim_tick(state)) {
             need_redraw = 1;
             full_redraw = 1;
         }
@@ -3493,6 +4158,11 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 need_redraw = 1;
                 full_redraw = 1;
             }
+        }
+
+        if (!need_redraw && !state->editing && clock_needs_tick(state)) {
+            need_redraw = 1;
+            if (!state->clock_drawn) full_redraw = 1;
         }
 
         efi_sleep((state->anim_active || state->page_anim ||
@@ -3607,4 +4277,3 @@ void gui_shutdown(gui_state_t *state) {
     }
     glyph_cache_flush();
 }
-

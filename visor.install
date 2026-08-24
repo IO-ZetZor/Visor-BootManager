@@ -20,6 +20,7 @@ post_install() {
   echo "::   visor doctor         Check everything"
   echo "::   visor encrypt        Encrypt kernel/initrd for the ESP"
   echo "::   visor sign           Sign for Secure Boot with sbctl"
+  echo "::   visor convert        Convert a video to an MJPEG background"
   echo "::"
   echo ":: Full config reference: https://visor-bootmanager.vercel.app/install"
   echo

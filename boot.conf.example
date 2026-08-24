@@ -381,6 +381,139 @@ background=\EFI\visor\backgrounds\default.png
 #accent_logo=tertiary
 #accent_variant=tonal
 
+# --- Clock -------------------------------------------------------------------
+# The graphical menu can show a real-time clock. Position, format, size and
+# decoration are configurable; the time is read from the firmware RTC each
+# repaint and only its own rectangle is presented, so a tick does not force a
+# full menu redraw.
+#
+# Clock visibility and color. Both take the unified color grammar described in
+# Colors above (0/off, 1/on, a palette role, or #RRGGBB). Either key does the
+# same thing; show_clock is the historical name.
+#   clock       = 1               on, tinted from the palette (default: off)
+#               = #C0CAF5         on, explicit color (always wins)
+#               = clock           on, explicit "clock" palette role
+#               = 0               off (default)
+#   accent_clock= 1               also from the palette (default 1 when clock is on)
+#   clock_color = #7AA2F7         explicit clock text color (wins over the palette;
+#                                 when set, it still respects show_clock=1/0)
+# Aliases: show_clock is an alias for clock.
+#clock=1
+#show_clock=1
+#accent_clock=1
+#clock_color=#C0CAF5
+#
+# Clock geometry and typography.
+#   clock_size      = 48          height in pixels (0 = scale with the title; alias: clock_px)
+#   clock_format    = 24h         24h (default) or 12h (with AM/PM, no leading zero)
+#   clock_seconds   = 0           also show seconds (extra detail, updates every second)
+#   clock_position  = topright    where it sits: topright | topleft | topcenter | topcentre | top |
+#                                 bottomright | bottomleft | bottomcenter | bottomcentre | bottom |
+#                                 center | centre | middle  (default topright)
+#                                 Hyphens, underscores and spaces are equivalent: "top-right",
+#                                 "top_right" and "top right" all parse the same.
+#   clock_date      = 0           also show the date under the time. Either true/false or a
+#                                 format name: long (default, "Monday, January 5"), iso
+#                                 ("2026-01-05"), dmy ("05/01/26"), mdy ("01/05/26"). Also
+#                                 accepts ymd/eu/us/full aliases and on/off.
+#   clock_date_format = long      format when the date is shown (default long). Same names
+#                                 as clock_date, but without the true/false toggle.
+#   clock_blur      = 0           frosted backing behind the clock text (default 0)
+#   clock_shadow    = 1           drop shadow for contrast (default 1)
+# Aliases: clock_size <-> clock_px, clock_position <-> clock_pos.
+#clock_size=48
+#clock_px=48
+#clock_format=24h
+#clock_seconds=0
+#clock_position=topright
+#clock_pos=topright
+#clock_date=0
+#clock_date_format=long
+#clock_blur=0
+#clock_shadow=1
+
+# --- Screensaver -------------------------------------------------------------
+# While the graphical menu is up Visor tracks input. After a period without
+# keys, pointer moves or clicks, the UI elements fade out leaving only the
+# background (plus the clock, if enabled and kept). After a longer idle time
+# the panel blanks to black and stops rendering entirely until the next input.
+# Idle tracking is suspended while the boot countdown is running, while the
+# text editor is open (e), or while the file browser is open — those are
+# active use even without new keystrokes.
+#   screensaver        = 0        master switch (default 0 = off). A bare number
+#                                 such as "screensaver=60" means "on, with a
+#                                 60-second dim delay" (same as screensaver=1 plus
+#                                 screensaver_delay=60).
+#   screensaver_delay  = 60       seconds idle before dimming (default 60; alias:
+#                                 screensaver_timeout)
+#   screensaver_blank  = 600      seconds idle before blanking to black after the
+#                                 dim; 0 disables the blank stage (dim only, default 600;
+#                                 alias: screensaver_blank_delay)
+#   screensaver_clock  = 1        keep the clock visible while dimmed (ignored while
+#                                 blanked, default 1)
+# Aliases: screensaver_delay <-> screensaver_timeout, screensaver_blank <-> screensaver_blank_delay.
+#screensaver=0
+#screensaver_delay=60
+#screensaver_timeout=60
+#screensaver_blank=600
+#screensaver_blank_delay=600
+#screensaver_clock=1
+
+# --- TPM2 measured boot ------------------------------------------------------
+# Measure boot artifacts into the TPM2 so a sealed disk or remote-attestation
+# policy can tell what Visor booted. Both measurements use the TCG2
+# HashLogExtendEvent protocol. When no TPM is present Visor logs and continues.
+#   tpm              = 1          master switch (default 1 = on when a TPM is
+#                                 present; alias: measure)
+#   tpm_pcr_config   = 5          PCR for the config file as it sits on disk
+#                                 (the raw boot.conf bytes; 0-23, default 5)
+#   tpm_pcr_cmdline  = 12         PCR for the kernel command line (the LoadOptions
+#                                 string including its terminating NUL, matching
+#                                 systemd's tpm_log_load_options layout so a
+#                                 sealed PCR 12 policy stays portable; 0-23,
+#                                 default 12)
+# Both PCRs publish their active bank list via the Boot Loader Interface variable
+# LoaderTpm2ActivePcrBanks when loader_vars is on. The TPM2 feature is advertised
+# in LoaderFeatures.  Alias: measure is an alias for tpm.
+#tpm=1
+#measure=1
+#tpm_pcr_config=5
+#tpm_pcr_cmdline=12
+
+# --- Boot Loader Interface (systemd) -----------------------------------------
+# Visor can export and honor the systemd Boot Loader Interface EFI variables so
+# OS tooling (bootctl, systemd, composers pinning a default entry) interoperates
+# with it. Variables live under vendor GUID 4a67b082-0a4c-41cf-b6c7-440b29bb8c4f.
+#   loader_vars      = 1          master switch (default 1 = on; alias:
+#                                 loader_interface)
+# When on, Visor:
+#   * exports LoaderInfo ("Visor <version>"), LoaderFirmwareInfo/Type
+#     (firmware vendor/type strings derived from the system table), and
+#     LoaderDevicePartUUID (the partition UUID of the ESP it booted from) if the
+#     firmware has not already published them.
+#   * exports LoaderImageIdentifier (the device path it was launched from) and
+#     LoaderFeatures (bits for ConfigTimeout, EntryDefault/OneShot, MenuDisabled,
+#     etc., plus TPM2 banks when a TPM is active).
+#   * captures LoaderTimeInitUSec at the earliest point in efi_main and
+#     LoaderTimeMenuUSec when the menu first becomes interactive.
+#   * exports LoaderEntries (the ordered list of menu entry identifiers, in
+#     on-screen order) and, just before handing off, LoaderEntrySelected plus
+#     LoaderTimeExecUSec.
+#   * respects LoaderConfigTimeout / LoaderConfigTimeoutOneShot (menu timeout
+#     overrides, with the OneShot consumed as it is read), and
+#     LoaderEntryDefault / LoaderEntryOneShot (preselecting an entry by its
+#     canonical id - the BLS .conf basename when present, otherwise a
+#     slugified display name - with the OneShot also autobooting and being
+#     consumed; the strongest override wins and remember_last is consulted only
+#     when none matched).
+#   * exports LoaderTpm2ActivePcrBanks (hex mask) when TPM is active.
+# 0 disables all of the above. For an OS agent the OneShot variables are the
+# one-boot mechanism: write LoaderEntryOneShot with an entry id and Visor boots
+# it immediately this once, then deletes the variable; ditto for
+# LoaderConfigTimeoutOneShot and the countdown.
+#loader_vars=1
+#loader_interface=1
+
 # --- Snapshots (boot into btrfs snapshots) ----------------------------------
 # Two sources, in priority order:
 #

@@ -8,6 +8,7 @@
 #define FB_PATH_MAX    1024
 #define FB_NAME_MAX    256
 #define FB_MAX_ENTRIES 4096
+#define FB_MAX_READS   2048
 
 typedef struct {
     CHAR16 *name;
@@ -30,6 +31,7 @@ typedef struct {
     UINTN entry_count;
     UINTN cursor;
     UINTN scroll;
+    int truncated;
 } fb_t;
 
 struct gui_state;

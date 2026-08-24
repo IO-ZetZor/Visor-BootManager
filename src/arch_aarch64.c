@@ -55,4 +55,3 @@ const CHAR16* arch_fb_make_wc(UINT64 base, UINT64 size) {
 
     return L"none";
 }
-

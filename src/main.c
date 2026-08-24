@@ -6,6 +6,8 @@
 #include "linux_boot.h"
 #include "windows_boot.h"
 #include "text_menu.h"
+#include "tcg2.h"
+#include "loader_iface.h"
 
 EFI_HANDLE IH;
 
@@ -32,7 +34,6 @@ static void wipe_password(CHAR16 **pw) {
     efi_free_pool(*pw);
     *pw = NULL;
 }
-
 
 static CHAR16* text_prompt_password(CHAR16 *label) {
     CHAR16 buf[512];
@@ -91,6 +92,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     RT = system_table->RuntimeServices;
     IH = image_handle;
 
+    loader_mark_init();
+
     efi_print(L"Visor loading...\r\n");
 
     efi_log_set_file(0);
@@ -106,6 +109,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
     gui_state_t gui = {0};
     int text_mode = 0;
+    UINTN loader_pick = (UINTN)-1;
     EFI_STATUS status = gui_init(&gui);
     if (EFI_ERROR(status)) {
         efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
@@ -123,7 +127,6 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
     config_t config;
 
-
     efi_fs_drivers_set_lazy(0);
     status = config_parse(&config);
     efi_log_set_file(config.file_log);
@@ -136,6 +139,34 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         (int)config.entry_count, config.entry_count == 1 ? L"y" : L"ies"); efi_log(d); }
     if (config.entry_count == 0)
         efi_log(L"WARN: no boot entries found - starting from zero");
+
+    if (config.tpm) {
+        tpm_set_pcrs(config.tpm_pcr_config, config.tpm_pcr_cmdline);
+        if (tpm_init()) {
+
+            efi_file_buffer_t *cfg_raw = efi_load_file(CONFIG_FILE);
+            if (cfg_raw) {
+                if (cfg_raw->data && cfg_raw->size)
+                    tpm_measure_config(cfg_raw->data, cfg_raw->size, L"boot.conf");
+                if (cfg_raw->data) efi_free_pool(cfg_raw->data);
+                efi_free_pool(cfg_raw);
+            } else {
+                efi_log(L"tpm: no boot.conf on disk - nothing to measure into the config PCR");
+            }
+        }
+    } else {
+        efi_log(L"main: tpm=0 in config - skipping measured boot");
+    }
+
+    if (config.loader_vars) {
+        loader_export_common(&config);
+        loader_export_entries(config.entries);
+        loader_pick = loader_apply_overrides(&config, config.entries,
+                                             config.entry_count, &config.timeout);
+        if (loader_pick != (UINTN)-1) config.default_entry = loader_pick;
+    } else {
+        efi_log(L"main: loader_vars=0 in config - not exporting Loader* variables");
+    }
 
     if (config.text_menu && !text_mode) {
         efi_log(L"main: text_menu=1 in config - using text mode despite available graphics");
@@ -226,6 +257,23 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.accent_text      = config.accent_text;
     gui.accent_os_icons  = config.accent_os_icons;
     gui.accent_variant   = config.accent_variant;
+    gui.show_clock       = config.show_clock;
+    gui.accent_clock     = config.accent_clock;
+    gui.clock_color      = config.has_clock_color ? config.clock_color
+                                                   : config.highlight_color;
+    gui.clock_size       = config.clock_size;
+    gui.sp_clock         = config.sp_clock;
+    gui.clock_24h        = config.clock_24h;
+    gui.clock_seconds    = config.clock_seconds;
+    gui.clock_position   = config.clock_position;
+    gui.clock_date       = config.clock_date;
+    gui.clock_date_format = config.clock_date_format;
+    gui.clock_blur       = config.clock_blur;
+    gui.clock_shadow     = config.clock_shadow;
+    gui.screensaver      = config.screensaver;
+    gui.ss_delay_ms      = config.screensaver_delay * 1000;
+    gui.ss_blank_ms      = config.screensaver_blank * 1000;
+    gui.ss_keep_clock    = config.screensaver_clock;
     gui.animation       = config.animation;
     gui.anim_speed      = config.anim_speed;
     gui.fade_speed      = config.fade_speed;
@@ -261,7 +309,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.mouse_enabled  = config.mouse;
     gui.pointer_speed  = config.pointer_speed;
 
-    if (config.remember_last) {
+    if (config.remember_last && loader_pick == (UINTN)-1) {
         CHAR16 *last = efi_get_var_str(L"VisorLastEntry");
         if (last) {
             UINTN i = 0;
@@ -334,6 +382,7 @@ select_entry:
         }
 
         efi_log(text_mode || gui_closed ? L"main: entering text menu loop" : L"main: entering menu loop");
+        if (config.loader_vars) loader_mark_menu();
         selected = (text_mode || gui_closed) ? text_menu_run(&gui) : gui_run(&gui);
         action = gui.action;
         force_menu = 0;
@@ -420,7 +469,6 @@ select_entry:
     }
 
 boot_selected:
-
 
     efi_fs_drivers_set_lazy(1);
     saved_cmdline = NULL;
@@ -611,6 +659,9 @@ boot_selected:
     if (config.remember_last)
         efi_set_var_str(L"VisorLastEntry", selected->name);
 
+    if (config.loader_vars)
+        loader_mark_selected(selected);
+
     efi_print(L"Booting: ");
     efi_print(selected->name);
     efi_print(L"\r\n");
@@ -728,4 +779,3 @@ void _exit(int status) {
     ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
     while (1);
 }
-

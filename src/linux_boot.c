@@ -4,6 +4,7 @@
 #include "hash_verify.h"
 #include "crypto.h"
 #include "path_compat.h"
+#include "tcg2.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -814,7 +815,6 @@ int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word) {
     return 0;
 }
 
-
 static void luks_strip_quiet(CHAR16 *cmdline) {
     if (!cmdline) return;
     static const CHAR16 *hide[] = { L"quiet", L"splash", NULL };
@@ -972,6 +972,8 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     } else {
         efi_log(L"boot: cmdline=(null)");
     }
+
+    tpm_measure_cmdline(boot_cmdline);
     if (entry->initrd_path) {
         efi_log(L"boot: initrd_path:");
         efi_log(entry->initrd_path);
@@ -1172,4 +1174,3 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     return EFI_UNSUPPORTED;
  #endif
 }
-

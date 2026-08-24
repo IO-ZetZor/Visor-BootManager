@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Report config keys that src/config.c accepts but the docs do not mention.
 
 The parser is the source of truth. Anything it accepts should appear in the
@@ -19,11 +18,9 @@ CONFIG_C = os.path.join(ROOT, "src", "config.c")
 SCHEMA = os.path.join(ROOT, "docs", "boot.conf.schema.json")
 EXAMPLE = os.path.join(ROOT, "boot.conf.example")
 
-
 def read(path):
     with open(path, encoding="utf-8", errors="replace") as fh:
         return fh.read()
-
 
 def parser_keys():
     """Keys compared in apply_global(), and in the entry-block parser."""
@@ -38,7 +35,6 @@ def parser_keys():
     entry = set(re.findall(r'efi_strcmp\(key, L"([a-z0-9_]+)"\)', head[entry_start:]))
 
     return glob, entry
-
 
 def schema_keys():
     doc = json.loads(read(SCHEMA))
@@ -55,10 +51,8 @@ def schema_keys():
     glob = expand({k: v for k, v in props.items() if k != "entry"})
     return glob, expand(entry_props)
 
-
 def mentioned(text, key):
     return re.search(r"\b%s\b" % re.escape(key), text) is not None
-
 
 def main():
     glob, entry = parser_keys()
@@ -87,7 +81,6 @@ def main():
 
     print("all keys documented in the schema and the example config")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

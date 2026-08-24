@@ -1077,9 +1077,10 @@ static const role_def_t ROLES_2021[ACCENT_ROLE_COUNT] = {
      { PAL_NEUT, 90, 100 },
      { PAL_NVAR, 80, 100 },
      { PAL_NVAR, 60, 100 },
+     { PAL_PRIM, 65, 100 },
 };
 static const UINT8 MONO_TONES[ACCENT_ROLE_COUNT] = {
-    100, 10, 85, 0, 80, 90, 60, 6, 12, 17, 90, 80, 60,
+    100, 10, 85, 0, 80, 90, 60, 6, 12, 17, 90, 80, 60, 65,
 };
 
 int accent_role_from_str(const CHAR16 *s) {
@@ -1096,6 +1097,7 @@ int accent_role_from_str(const CHAR16 *s) {
         { L"on_surface",          ROLE_ON_SURFACE },
         { L"on_surface_variant",  ROLE_ON_SURFACE_VARIANT },
         { L"outline",             ROLE_OUTLINE },
+        { L"clock",               ROLE_CLOCK },
         { NULL, 0 }
     };
     if (!s || !s[0]) return -1;
@@ -1237,6 +1239,7 @@ int accent_generate(icon_t *bg, int variant, color_t out[ACCENT_ROLE_COUNT]) {
          { PAL_NEUT, onSurfT,               textmul },
          { PAL_NEUT, foreground_tone(18, 60), textmul },
          { PAL_NEUT, foreground_tone(18, 30), textmul },
+         { PAL_PRIM, pT + 5 > 100 ? 100 : pT + 5, 100 },
     };
     for (int i = 0; i < ACCENT_ROLE_COUNT; i++)
         out[i] = hct_render(pal[spec[i].pal].hue,
@@ -1244,4 +1247,3 @@ int accent_generate(icon_t *bg, int variant, color_t out[ACCENT_ROLE_COUNT]) {
                             spec[i].tone);
     return 1;
 }
-

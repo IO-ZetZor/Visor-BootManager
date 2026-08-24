@@ -5345,4 +5345,3 @@ const font_t jetbrains_font = {
   128, 131, 39, 170, 32, 126,
   jetbrains_glyphs, jetbrains_pixels, 104782, 657464
 };
-

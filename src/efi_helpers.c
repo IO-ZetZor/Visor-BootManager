@@ -285,7 +285,6 @@ static int dp_node_is_harddrive(EFI_DEVICE_PATH *n) {
            DevicePathSubType(n) == MEDIA_HARDDRIVE_DP;
 }
 
-
 int efi_handles_same_disk(EFI_HANDLE a, EFI_HANDLE b) {
     if (!a || !b) return 0;
     if (a == b) return 1;
@@ -365,11 +364,9 @@ int efi_fs_drivers_deferred(void) {
     return g_deferred_count > 0 && !g_deferred_started;
 }
 
-
 int efi_fs_drivers_pending(void) {
     return efi_fs_drivers_deferred() || !efi_fs_probe_exhausted();
 }
-
 
 static int g_deferred_lazy = 1;
 
@@ -534,7 +531,7 @@ static efi_file_buffer_t* efi_read_open_file(efi_file_t *file) {
 
     UINT64 size = efi_file_size(file->handle);
 
-    if (size == 0 || size > 256ULL * 1024 * 1024) {
+    if (size == 0 || size > 512ULL * 1024 * 1024) {
         CHAR16 d[96];
         SPrint(d, sizeof(d), L"WARN: file size %ld is zero or implausibly large - skipping", size);
         efi_log(d);
@@ -581,7 +578,6 @@ efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
 efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return efi_load_file_uuid(path, NULL);
 }
-
 
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     if (!volume) return NULL;
@@ -665,7 +661,6 @@ int efi_handle_has_filesystem(EFI_HANDLE handle) {
                           &gEfiSimpleFileSystemProtocolGuid, &io)) && io;
 }
 
-
 void efi_start_deferred_images(void) {
     if (g_deferred_started) return;
     if (g_deferred_count == 0) { g_deferred_started = 1; return; }
@@ -686,7 +681,6 @@ void efi_start_deferred_images(void) {
     SPrint(msg, sizeof(msg), L"drivers: started %d filesystem driver(s)", started);
     efi_log(msg);
 }
-
 
 static EFI_HANDLE *g_probe_blk;
 static UINTN       g_probe_n;
@@ -924,11 +918,9 @@ void efi_log_close(void) {
     if (g_log_root) { g_log_root->Close(g_log_root); g_log_root = NULL; }
 }
 
-
 void efi_log_begin(void) {
     efi_log(LOG_MARKER_W);
 }
-
 
 void efi_log_rotate(void) {
     if (!visor_log_to_file) return;
@@ -1086,6 +1078,89 @@ void efi_set_var_u32(CHAR16 *name, UINT32 val) {
     RT->SetVariable(name, &visor_var_guid, VISOR_VAR_ATTRS, sizeof(val), &val);
 }
 
+static EFI_GUID loader_var_guid = { 0x4a67b082, 0x0a4c, 0x41cf,
+    { 0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f } };
+
+#define LOADER_VAR_VOLATILE (EFI_VARIABLE_BOOTSERVICE_ACCESS | \
+                             EFI_VARIABLE_RUNTIME_ACCESS)
+#define LOADER_VAR_PERSIST  (EFI_VARIABLE_NON_VOLATILE | LOADER_VAR_VOLATILE)
+
+CHAR16* efi_get_loader_var(CHAR16 *name) {
+    UINTN sz = 0;
+    UINT32 attr;
+    EFI_STATUS s = RT->GetVariable(name, &loader_var_guid, &attr, &sz, NULL);
+    if (s != EFI_BUFFER_TOO_SMALL || sz == 0) return NULL;
+    CHAR16 *buf = efi_allocate_pool(sz + sizeof(CHAR16));
+    if (!buf) return NULL;
+    s = RT->GetVariable(name, &loader_var_guid, &attr, &sz, buf);
+    if (EFI_ERROR(s)) { efi_free_pool(buf); return NULL; }
+    buf[sz / sizeof(CHAR16)] = 0;
+    return buf;
+}
+
+void efi_set_loader_var(CHAR16 *name, CHAR16 *val, int persist) {
+    if (!val) return;
+    UINTN len = 0;
+    while (val[len]) len++;
+    RT->SetVariable(name, &loader_var_guid,
+                    persist ? LOADER_VAR_PERSIST : LOADER_VAR_VOLATILE,
+                    (len + 1) * sizeof(CHAR16), val);
+}
+
+void efi_set_loader_var_raw(CHAR16 *name, void *data, UINTN size, int persist) {
+    if (!data || !size) return;
+    RT->SetVariable(name, &loader_var_guid,
+                    persist ? LOADER_VAR_PERSIST : LOADER_VAR_VOLATILE,
+                    size, data);
+}
+
+void efi_unset_loader_var(CHAR16 *name, int persist) {
+    RT->SetVariable(name, &loader_var_guid,
+                    persist ? LOADER_VAR_PERSIST : LOADER_VAR_VOLATILE,
+                    0, NULL);
+}
+
+int efi_loader_var_exists(CHAR16 *name) {
+    UINTN sz = 0;
+    UINT32 attr;
+    EFI_STATUS s = RT->GetVariable(name, &loader_var_guid, &attr, &sz, NULL);
+    return (s == EFI_BUFFER_TOO_SMALL || s == EFI_SUCCESS) ? 1 : 0;
+}
+
+void efi_set_loader_var_u64(CHAR16 *name, UINT64 val) {
+    UINT8 le[8];
+    for (UINTN i = 0; i < 8; i++) le[i] = (UINT8)(val >> (i * 8));
+    efi_set_loader_var_raw(name, le, sizeof(le), 0);
+}
+
+void efi_set_loader_var_usec(CHAR16 *name, UINT64 usec) {
+    if (!usec) return;
+    CHAR16 rev[24];
+    UINTN r = 0;
+    while (usec && r < 20) { rev[r++] = (CHAR16)('0' + (usec % 10)); usec /= 10; }
+    CHAR16 buf[24];
+    UINTN n = 0;
+    while (r) buf[n++] = rev[--r];
+    buf[n] = 0;
+    efi_set_loader_var(name, buf, 0);
+}
+
+int efi_parse_loader_timeout(CHAR16 *s, INTN *out) {
+    if (!s || !s[0]) return 0;
+    if (efi_strcmp(s, L"menu-force") == 0)    { *out = -1; return 1; }
+    if (efi_strcmp(s, L"menu-hidden") == 0)   { *out =  0; return 1; }
+    if (efi_strcmp(s, L"menu-disabled") == 0) { *out =  0; return 1; }
+
+    UINT64 v = 0;
+    for (UINTN i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (UINT64)(s[i] - '0');
+        if (v > 0xFFFF) { v = 0xFFFF; break; }
+    }
+    *out = (INTN)v;
+    return 1;
+}
+
 UINT32 efi_rand(void) {
     static UINT32 state = 0;
     if (!state) {
@@ -1099,4 +1174,3 @@ UINT32 efi_rand(void) {
     state = state * 1103515245u + 12345u;
     return state;
 }
-

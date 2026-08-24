@@ -62,6 +62,8 @@ Commands:
   drivers [options]             Install an EfiFs filesystem driver for /boot
   encrypt <kernel> [initrd]     Encrypt kernel (and initrd) with one password,
                                 install to the ESP, and set up the boot entry
+  convert <video> [options]     Convert video to animated background (MJPEG or
+                                compact VBG via --vbg, 10–20× smaller)
   uninstall [options]           Remove installed Visor files
   status [options]              Show install/source status
   config validate [options]      Validate a config file
@@ -355,6 +357,127 @@ find_encrypt_tool() {
         [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
     done
     return 1
+}
+
+find_vbg_tool() {
+    local c
+    local env="${VISOR_VBG_TOOL:-}"
+    if [ -n "$env" ] && [ -f "$env" ]; then printf '%s\n' "$env"; return 0; fi
+    for c in "$(script_dir)/tools/vbg_encode.py" \
+             "$(project_dir)/tools/vbg_encode.py" \
+             "$(source_dir_default)/tools/vbg_encode.py" \
+             "$PKG_DATA_DIR/tools/vbg_encode.py"; do
+        [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    return 1
+}
+
+cmd_convert() {
+    local input="" out="" esp="" scale="" quality="" threshold="" qshift="" tile="" keyint="" mvrange="" denoise="" fps="" vbg=0 force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out) out="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --scale) scale="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --quality) quality="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --threshold) threshold="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --qshift) qshift="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --tile) tile="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --keyint) keyint="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --mv-range) mvrange="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --denoise) denoise="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --fps) fps="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --vbg) vbg=1; shift ;;
+            --no-vbg) vbg=0; shift ;;
+            --force) force=1; shift ;;
+            -h|--help) cat <<'EOF'
+visor convert <video> [options]
+  Convert any video into an animated Visor background.
+  Without --vbg: MJPEG MP4 at the source frame rate.
+  With    --vbg: compact VBG (tiled delta + motion, 10–20× smaller).
+
+  --vbg              use VBG instead of MJPEG
+  --out PATH         output file (default: <input>.mp4 or .vbg with --vbg)
+  --esp PATH         install directly into \EFI\visor\backgrounds on the ESP
+  --scale WxH|H      scale, e.g. 1920x1080 or 1080 (default: keep original, match screen)
+  --quality N        MJPEG/VBG keyframe quality 2–31 (default 3, lower is better)
+  --force            overwrite existing output
+VBG only:
+  --fps N            output fps, 12 is plenty for ambient motion
+  --keyint N         frames between keyframes (default: single keyframe)
+  --no-motion|--mv-range 0  disable motion compensation
+  --mv-range N       motion search radius 0–127 (default 16)
+  --denoise SPEC|none temporal denoise (default mild)
+  --threshold T      per-channel dead zone
+  --qshift S         residual quantizer 0–7
+  --tile N           tile size power-of-two 4–64
+  --denoise SPEC     ffmpeg denoise filter
+EOF
+                exit 0 ;;
+            --*) die "unknown convert option: $1" ;;
+            *)
+                if [ -z "$input" ]; then input="$1"; shift
+                else die "unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    [ -n "$input" ] || die "usage: visor convert <video> [--vbg] [--out PATH|--esp PATH] [options]"
+    [ -f "$input" ] || die "input not found: $input"
+    if [ -n "$out" ] && [ -n "$esp" ]; then die "--out and --esp are mutually exclusive"; fi
+    if [ -n "$esp" ]; then
+        esp="$(resolve_esp "$esp")"
+        [ -n "$esp" ] || die "could not find ESP (pass --esp PATH)"
+        [ -d "$esp/EFI/visor" ] || die "Visor not installed at $esp/EFI/visor — run 'visor install' first"
+        local base
+        base="$(basename "$input")"
+        base="${base%.*}"
+        if [ "$vbg" -eq 1 ]; then base="$base.vbg"; else base="$base.mp4"; fi
+        out="$esp/EFI/visor/backgrounds/$base"
+        say "Will install to $out"
+    fi
+    if [ -z "$out" ]; then
+        if [ "$vbg" -eq 1 ]; then out="${input%.*}.vbg"; else out="${input%.*}.mp4"; fi
+    fi
+    if [ -f "$out" ] && [ "$force" -eq 0 ]; then die "output exists: $out (pass --force to overwrite)"; fi
+    mkdir -p "$(dirname "$out")"
+    if [ "$vbg" -eq 1 ]; then
+        local tool
+        tool="$(find_vbg_tool)" || die "vbg_encode.py not found (run from source tree or 'visor update')"
+        need_cmd python3
+        local pyargs=("$tool" "$input" "$out")
+        [ -n "$scale" ] && pyargs+=(--scale "$scale")
+        [ -n "$quality" ] && pyargs+=(--quality "$quality")
+        [ -n "$threshold" ] && pyargs+=(--threshold "$threshold")
+        [ -n "$qshift" ] && pyargs+=(--qshift "$qshift")
+        [ -n "$tile" ] && pyargs+=(--tile "$tile")
+        [ -n "$keyint" ] && pyargs+=(--keyint "$keyint")
+        [ -n "$mvrange" ] && pyargs+=(--mv-range "$mvrange")
+        [ -n "$denoise" ] && pyargs+=(--denoise "$denoise")
+        [ -n "$fps" ] && pyargs+=(--fps "$fps")
+        say "Encoding VBG: $input → $out"
+        python3 "${pyargs[@]}" || die "vbg_encode failed"
+        ok "VBG ready: $out ($(du -h "$out" | cut -f1))"
+        if [ -n "$esp" ]; then say "Installed: $out  — set background=$out in boot.conf (\\EFI\\visor\\backgrounds\\$(basename "$out"))"; fi
+    else
+        need_cmd ffmpeg
+        local vf=""
+        if [ -n "$scale" ]; then
+            case "$scale" in
+                *x*) vf="scale=$scale:flags=lanczos" ;;
+                *) vf="scale=-2:$scale:flags=lanczos" ;;
+            esac
+        fi
+        local q="${quality:-3}"
+        say "Encoding MJPEG: $input → $out"
+        if [ -n "$vf" ]; then
+            ffmpeg -y -i "$input" -vf "$vf" -c:v mjpeg -q:v "$q" -an "$out" || die "ffmpeg failed"
+        else
+            ffmpeg -y -i "$input" -c:v mjpeg -q:v "$q" -an "$out" || die "ffmpeg failed"
+        fi
+        ok "MJPEG ready: $out ($(du -h "$out" | cut -f1))"
+        if [ -n "$esp" ]; then say "Installed: $out"; fi
+    fi
 }
 
 cmd_build() {
@@ -1358,6 +1481,7 @@ main() {
         sign) shift; cmd_sign "$@" ;;
         drivers) shift; cmd_drivers "$@" ;;
         encrypt) shift; cmd_encrypt "$@" ;;
+        convert) shift; cmd_convert "$@" ;;
         uninstall) shift; cmd_uninstall "$@" ;;
         status) shift; cmd_status "$@" ;;
         config) shift; cmd_config "$@" ;;

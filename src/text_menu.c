@@ -1215,4 +1215,3 @@ int text_recovery_run(gui_state_t *state, boot_entry_t *failed,
     ST->ConOut->ClearScreen(ST->ConOut);
     return state->action;
 }
-

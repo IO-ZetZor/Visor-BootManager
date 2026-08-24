@@ -42,7 +42,8 @@
         "surface_container",
         "on_surface",
         "on_surface_variant",
-        "outline"
+        "outline",
+        "clock"
       ]
     },
     "colorSpec": {
@@ -126,6 +127,251 @@
         "monochrome"
       ],
       "default": "tonal"
+    },
+    "clock": {
+      "x-group": "clock",
+      "description": "Show a real-time clock in the top-right corner.",
+      "$ref": "#/$defs/colorSpec"
+    },
+    "show_clock": {
+      "x-group": "clock",
+      "$ref": "#/$defs/colorSpec",
+      "x-alias-of": "clock",
+      "description": "Alias for clock."
+    },
+    "accent_clock": {
+      "x-group": "clock",
+      "description": "Tint the clock from the palette.",
+      "$ref": "#/$defs/colorSpec"
+    },
+    "clock_color": {
+      "x-group": "clock",
+      "$ref": "#/$defs/colorSpec",
+      "description": "Explicit color for the clock text."
+    },
+    "clock_size": {
+      "x-group": "clock",
+      "x-aliases": [
+        "clock_px"
+      ],
+      "$ref": "#/$defs/pixels",
+      "description": "Clock text size in pixels. Falls back to the title size."
+    },
+    "clock_px": {
+      "x-group": "clock",
+      "$ref": "#/$defs/pixels",
+      "x-alias-of": "clock_size",
+      "description": "Alias for clock_size."
+    },
+    "clock_format": {
+      "x-group": "clock",
+      "description": "Clock hour format: 12h or 24h.",
+      "type": "string",
+      "enum": [
+        "12h",
+        "24h",
+        "12",
+        "24"
+      ],
+      "default": "24h"
+    },
+    "clock_seconds": {
+      "x-group": "clock",
+      "description": "Show seconds in the clock.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
+    "clock_position": {
+      "x-group": "clock",
+      "x-aliases": [
+        "clock_pos"
+      ],
+      "description": "Clock position on screen. Accepts top/bottom plus left/right/center, or center/middle.",
+      "type": "string",
+      "enum": [
+        "topright",
+        "topleft",
+        "topcenter",
+        "topcentre",
+        "top",
+        "bottomright",
+        "bottomleft",
+        "bottomcenter",
+        "bottomcentre",
+        "bottom",
+        "center",
+        "centre",
+        "middle"
+      ],
+      "default": "topright"
+    },
+    "clock_pos": {
+      "x-group": "clock",
+      "type": "string",
+      "enum": [
+        "topright",
+        "topleft",
+        "topcenter",
+        "bottomright",
+        "bottomleft",
+        "bottomcenter",
+        "center"
+      ],
+      "x-alias-of": "clock_position",
+      "description": "Alias for clock_position."
+    },
+    "clock_date": {
+      "x-group": "clock",
+      "description": "Show the date below the clock. Accepts 1/0, true/false, long, iso, dmy or mdy (aliases: full, ymd, eu, us, on, off).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/bool"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "long",
+            "full",
+            "iso",
+            "ymd",
+            "dmy",
+            "eu",
+            "mdy",
+            "us",
+            "on",
+            "off"
+          ]
+        }
+      ],
+      "default": false
+    },
+    "clock_date_format": {
+      "x-group": "clock",
+      "description": "Date format when the clock date is shown.",
+      "type": "string",
+      "enum": [
+        "long",
+        "full",
+        "iso",
+        "ymd",
+        "dmy",
+        "eu",
+        "mdy",
+        "us"
+      ],
+      "default": "long"
+    },
+    "clock_blur": {
+      "x-group": "clock",
+      "description": "Draw a frosted glass panel behind the clock text. Requires a background image; with none it falls back to a translucent tint.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
+    "clock_shadow": {
+      "x-group": "clock",
+      "description": "Draw a subtle drop shadow behind the clock text for contrast.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "screensaver": {
+      "x-group": "screensaver",
+      "description": "Enable the idle screensaver. A bare number means 'on, with this idle delay in seconds' (e.g. screensaver=60 enables with a 60-second delay).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/bool"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ],
+      "default": false
+    },
+    "screensaver_delay": {
+      "x-group": "screensaver",
+      "x-aliases": [
+        "screensaver_timeout"
+      ],
+      "description": "Seconds of idle time before the UI fades out, leaving only the background (and the clock if enabled).",
+      "type": "integer",
+      "minimum": 0,
+      "default": 60
+    },
+    "screensaver_timeout": {
+      "x-group": "screensaver",
+      "type": "integer",
+      "minimum": 0,
+      "x-alias-of": "screensaver_delay",
+      "description": "Alias for screensaver_delay."
+    },
+    "screensaver_blank": {
+      "x-group": "screensaver",
+      "x-aliases": [
+        "screensaver_blank_delay"
+      ],
+      "description": "Seconds of idle time before the screen blanks to black. 0 disables the blank stage (dim only). The blank turns back on at the first key or pointer activity.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 600
+    },
+    "screensaver_blank_delay": {
+      "x-group": "screensaver",
+      "type": "integer",
+      "minimum": 0,
+      "x-alias-of": "screensaver_blank",
+      "description": "Alias for screensaver_blank."
+    },
+    "screensaver_clock": {
+      "x-group": "screensaver",
+      "description": "Keep the clock visible while the screensaver is dimmed (ignored once the screen is blanked).",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "tpm": {
+      "x-group": "tpm",
+      "x-aliases": [
+        "measure"
+      ],
+      "description": "Enable TPM2 measured boot. Measures the config file into PCR 5 and the booted kernel command line into PCR 12, and publishes the active PCR banks to the Boot Loader Interface.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "measure": {
+      "x-group": "tpm",
+      "$ref": "#/$defs/bool",
+      "x-alias-of": "tpm",
+      "description": "Alias for tpm."
+    },
+    "tpm_pcr_config": {
+      "x-group": "tpm",
+      "description": "PCR index for the config file measurement (0-23).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 23,
+      "default": 5
+    },
+    "tpm_pcr_cmdline": {
+      "x-group": "tpm",
+      "description": "PCR index for the kernel command line measurement (0-23).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 23,
+      "default": 12
+    },
+    "loader_vars": {
+      "x-group": "loader",
+      "x-aliases": [
+        "loader_interface"
+      ],
+      "description": "Export and honor the systemd Boot Loader Interface EFI variables (LoaderInfo, LoaderEntries, LoaderEntrySelected, LoaderDevicePartUUID, LoaderFirmwareInfo/Type, LoaderTimeInitUSec and related timeout and OneShot overrides).",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "loader_interface": {
+      "x-group": "loader",
+      "$ref": "#/$defs/bool",
+      "x-alias-of": "loader_vars",
+      "description": "Alias for loader_vars."
     },
     "anim_speed": {
       "x-group": "animation",

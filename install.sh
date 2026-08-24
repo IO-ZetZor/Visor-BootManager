@@ -18,6 +18,7 @@ EFIFS_VERSION="${EFIFS_VERSION:-v1.12}"
 EFIFS_URL_OVERRIDDEN="${EFIFS_URL:-}"
 EFIFS_URL="${EFIFS_URL:-https://github.com/pbatard/efifs/releases/download/$EFIFS_VERSION}"
 CLI_DIR="${CLI_DIR:-/usr/local/bin}"
+DATA_DIR="${DATA_DIR:-/usr/share/visor}"
 
 VISOR_DIR_REL="EFI/visor"
 CLI_NAME="visor"
@@ -135,6 +136,7 @@ Usage: ./install.sh [options]
   --fs-driver PATH   copy a local EFI filesystem driver into \EFI\visor\drivers
   --no-cli           do not install the host-side 'visor' command
   --cli-dir PATH     directory for the host-side command (default: /usr/local/bin)
+  --data-dir PATH    directory for host-side tools (default: /usr/share/visor)
   --force-config     overwrite an existing boot.conf with the default
   --color / --no-color   force or disable coloured output
   -h, --help         show this help
@@ -173,6 +175,7 @@ while [ $# -gt 0 ]; do
         --fs-driver)    FS_DRIVER="${2:-}"; shift 2 ;;
         --no-cli)       INSTALL_CLI=0; shift ;;
         --cli-dir)      CLI_DIR="${2:-}"; shift 2 ;;
+        --data-dir)     DATA_DIR="${2:-}"; shift 2 ;;
         --force-config) FORCE_CONFIG=1; shift ;;
         --color)        USE_COLOR=1; shift ;;
         --no-color)     USE_COLOR=0; shift ;;
@@ -429,6 +432,18 @@ if [ "$INSTALL_CLI" -eq 1 ] && [ -f "$CLI_NAME" ]; then
         ok "Command: $CLI_INSTALLED"
     else
         warn "Could not install $CLI_NAME command to $CLI_DIR"
+    fi
+
+    if [ -d tools ]; then
+        if mkdir -p "$DATA_DIR/tools" 2>/dev/null; then
+            for t in tools/vbg_encode.py tools/visor_encrypt.py; do
+                [ -f "$t" ] || continue
+                install -m 0755 "$t" "$DATA_DIR/tools/$(basename "$t")" 2>/dev/null || true
+            done
+            ok "Host tools: $DATA_DIR/tools"
+        else
+            warn "Could not install host tools to $DATA_DIR/tools"
+        fi
     fi
 fi
 

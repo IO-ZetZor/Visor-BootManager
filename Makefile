@@ -2,6 +2,9 @@ ARCH ?= x86_64
 BUILD_DIR = build
 SRC_DIR = src
 
+VISOR_VERSION ?= $(shell sed -n 's/^pkgver=//p' PKGBUILD 2>/dev/null | head -1)
+VISOR_VERSION := $(if $(VISOR_VERSION),$(VISOR_VERSION),1.4)
+
 ifeq ($(ARCH),x86_64)
   TARGET       ?= visor_x64.efi
   CC_CANDIDATES = x86_64-linux-gnu-gcc gcc
@@ -39,6 +42,7 @@ EFI_CFLAGS = -ffreestanding -fno-stack-protector -fno-strict-aliasing \
              -fno-asynchronous-unwind-tables -fno-unwind-tables \
              $(CF_PROTECTION) -fno-PIE \
              -fpic -fshort-wchar -fvisibility=hidden $(ARCH_CFLAGS) \
+             -DVISOR_VERSION='L"$(VISOR_VERSION)"' \
              -Wall -Wextra -O2 -I $(SRC_DIR)/include -MMD -MP
 
 GNU_EFI_INC ?= $(firstword $(wildcard \
@@ -63,7 +67,7 @@ EFI_LDFLAGS = -nostdlib -znocombreloc -z notext -T $(LDS) -shared \
 
 SRCS = main.c efi_helpers.c gui.c config.c linux_boot.c windows_boot.c \
        png_decoder.c gif_decoder.c mp4_decoder.c font_jetbrains.c sha256.c hash_verify.c crypto.c text_menu.c \
-       accent.c filebrowse.c $(ARCH_SRC)
+       accent.c filebrowse.c tcg2.c loader_iface.c $(ARCH_SRC)
 OBJDIR = $(BUILD_DIR)/$(ARCH)
 OBJS = $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 

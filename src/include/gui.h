@@ -4,7 +4,7 @@
 #include <efi.h>
 #include <efilib.h>
 
-#define GUI_ACCENT_ROLES 13
+#define GUI_ACCENT_ROLES 14
 
 #define ICON_SIZE 64
 #define ICON_SPACING 20
@@ -66,6 +66,20 @@ typedef struct {
 #define POWER_POS_BOTTOMLEFT   1
 #define POWER_POS_TOPRIGHT     2
 #define POWER_POS_TOPLEFT      3
+
+#define CLOCK_POS_TOPRIGHT     0
+#define CLOCK_POS_TOPLEFT      1
+#define CLOCK_POS_TOPCENTER    2
+#define CLOCK_POS_BOTTOMRIGHT  3
+#define CLOCK_POS_BOTTOMLEFT   4
+#define CLOCK_POS_BOTTOMCENTER 5
+#define CLOCK_POS_CENTER       6
+
+#define CLOCK_DATE_OFF   0
+#define CLOCK_DATE_LONG  1
+#define CLOCK_DATE_ISO   2
+#define CLOCK_DATE_DMY   3
+#define CLOCK_DATE_MDY   4
 
 #define FOCUS_ENTRIES  0
 #define FOCUS_POWER    1
@@ -261,6 +275,33 @@ typedef struct gui_state {
     color_t os_icon_tint;   int os_icon_tint_on;
     int     pwr_tint_on[3];
 
+    int     show_clock;
+    int     accent_clock;
+    color_t clock_color;
+    UINTN   clock_size;
+    accent_spec_t sp_clock;
+    int     clock_24h;
+    int     clock_seconds;
+    int     clock_position;
+    int     clock_date;
+    int     clock_date_format;
+    int     clock_blur;
+    int     clock_shadow;
+
+    INTN    clock_last_key;
+
+    INTN    clock_x, clock_y, clock_w, clock_h;
+    int     clock_drawn;
+    int     clock_dirty;
+
+    int     screensaver;
+    UINTN   ss_delay_ms;
+    UINTN   ss_blank_ms;
+    int     ss_keep_clock;
+
+    int     ss_level;
+    UINT64  ss_last_input_ms;
+
     icon_t *background;
     CHAR16 *background_path;
     anim_t *bg_anim;
@@ -354,11 +395,17 @@ int gif_advance(anim_t *a);
 
 void gif_free(anim_t *a);
 
-anim_t* mp4_load(UINT8 *data, UINTN size);
+EFI_STATUS png_decompress(UINT8 *input, UINTN input_size,
+                           UINT8 *output, UINTN *output_size);
+
+anim_t* vbg_load(UINT8 *data, UINTN size);
+
+anim_t* mp4_load(UINT8 *data, UINTN size, UINTN tgt_w, UINTN tgt_h);
 
 int anim_advance(anim_t *a);
+
+int anim_advance_n(anim_t *a, UINTN n);
 
 void anim_free(anim_t *a);
 
 #endif
-

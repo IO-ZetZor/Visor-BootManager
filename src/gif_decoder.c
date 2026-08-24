@@ -3,7 +3,6 @@
 #include <efi.h>
 #include <efilib.h>
 
-
 #define GIF_MAX_DIM    8192
 #define GIF_MAX_PIXELS (16u * 1024u * 1024u)
 #define GIF_MAX_FRAMES 4096
@@ -178,7 +177,17 @@ static int gif_lzw_decode(anim_t *a, UINTN *off, UINT8 min_code_size,
             if (next_code >= (1u << code_size) && code_size < 12) code_size++;
         }
 
-        while (sp > 0) sink_put(sink, stack[--sp]);
+        while (sp > 0) {
+            if (!sink->interlace) {
+                UINTN avail = sink->total - sink->written;
+                UINTN cnt = sp < avail ? sp : avail;
+                UINT8 *o = sink->out + sink->written;
+                for (UINTN i = 0; i < cnt; i++) o[i] = stack[sp - 1 - i];
+                sink->written += cnt;
+                break;
+            }
+            sink_put(sink, stack[--sp]);
+        }
 
         prev = (INTN)code;
         prev_first = first;
@@ -399,9 +408,14 @@ static UINTN gif_scan(const UINT8 *d, UINTN size, UINTN start, UINTN *loops_out)
 }
 
 anim_t* gif_load(UINT8 *data, UINTN size) {
-    if (size < 13) { efi_log(L"  ERROR: GIF too small"); return NULL; }
+    if (size < 13) {
+        efi_log(L"  ERROR: GIF too small");
+        efi_free_pool(data);
+        return NULL;
+    }
     if (data[0] != 'G' || data[1] != 'I' || data[2] != 'F') {
         efi_log(L"  ERROR: bad GIF signature");
+        efi_free_pool(data);
         return NULL;
     }
 
@@ -411,6 +425,7 @@ anim_t* gif_load(UINT8 *data, UINTN size) {
 
     if (W == 0 || H == 0 || W > GIF_MAX_DIM || H > GIF_MAX_DIM) {
         efi_log(L"  ERROR: unsupported GIF dimensions");
+        efi_free_pool(data);
         return NULL;
     }
 
@@ -418,44 +433,44 @@ anim_t* gif_load(UINT8 *data, UINTN size) {
     if (gif_mul_overflow(W, H, &canvas_px) || canvas_px > GIF_MAX_PIXELS ||
         gif_mul_overflow(canvas_px, sizeof(UINT32), &canvas_bytes)) {
         efi_log(L"  ERROR: GIF canvas too large");
+        efi_free_pool(data);
         return NULL;
     }
 
     anim_t *a = efi_allocate_pool(sizeof(anim_t));
-    if (!a) return NULL;
+    if (!a) { efi_free_pool(data); return NULL; }
     ZeroMem(a, sizeof(anim_t));
 
     a->width  = W;
     a->height = H;
+    a->data   = data;
+    a->size   = size;
 
     UINTN off = 13;
     if (lsd_packed & 0x80) {
         a->gct_n = (UINTN)1 << ((lsd_packed & 0x07) + 1);
         if (off + a->gct_n * 3 > size) {
             efi_log(L"  ERROR: GIF global colour table truncated");
-            efi_free_pool(a);
+            gif_free(a);
             return NULL;
         }
         CopyMem(a->gct, data + off, a->gct_n * 3);
         off += a->gct_n * 3;
     }
 
-    a->data       = efi_allocate_pool(size);
     a->canvas     = efi_allocate_pool(canvas_bytes);
     a->plane      = efi_allocate_pool(canvas_px);
     a->lzw_prefix = efi_allocate_pool(LZW_MAX_CODES * sizeof(UINT16));
     a->lzw_suffix = efi_allocate_pool(LZW_MAX_CODES);
     a->lzw_stack  = efi_allocate_pool(LZW_MAX_CODES);
 
-    if (!a->data || !a->canvas || !a->plane ||
+    if (!a->canvas || !a->plane ||
         !a->lzw_prefix || !a->lzw_suffix || !a->lzw_stack) {
         efi_log(L"  ERROR: out of memory decoding GIF");
         gif_free(a);
         return NULL;
     }
 
-    CopyMem(a->data, data, size);
-    a->size = size;
     ZeroMem(a->canvas, canvas_bytes);
     ZeroMem(a->lzw_prefix, LZW_MAX_CODES * sizeof(UINT16));
     ZeroMem(a->lzw_suffix, LZW_MAX_CODES);
@@ -478,5 +493,3 @@ anim_t* gif_load(UINT8 *data, UINTN size) {
 
     return a;
 }
-
-

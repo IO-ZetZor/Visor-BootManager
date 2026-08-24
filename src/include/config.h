@@ -86,6 +86,27 @@ typedef struct {
     int     accent_text;
     int     accent_os_icons;
     int     accent_variant;
+    int     show_clock;
+    int     accent_clock;
+    color_t clock_color;
+    int     has_clock_color;
+    UINTN   clock_size;
+    accent_spec_t sp_clock;
+    int     clock_24h;
+    int     clock_seconds;
+    int     clock_position;
+    int     clock_date;
+    int     clock_date_format;
+    int     clock_blur;
+    int     clock_shadow;
+    int     screensaver;
+    UINTN   screensaver_delay;
+    UINTN   screensaver_blank;
+    int     screensaver_clock;
+    int     tpm;
+    UINTN   tpm_pcr_config;
+    UINTN   tpm_pcr_cmdline;
+    int     loader_vars;
     int     animation;
     int     anim_speed;
     int     fade_speed;
@@ -112,4 +133,3 @@ void config_free(config_t *config);
 void bls_decrement(boot_entry_t *e);
 
 #endif
-

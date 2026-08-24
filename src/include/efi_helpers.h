@@ -101,7 +101,15 @@ void efi_set_var_str(CHAR16 *name, CHAR16 *val);
 int efi_get_var_u32(CHAR16 *name, UINT32 *out);
 void efi_set_var_u32(CHAR16 *name, UINT32 val);
 
+CHAR16* efi_get_loader_var(CHAR16 *name);
+void efi_set_loader_var(CHAR16 *name, CHAR16 *val, int persist);
+void efi_set_loader_var_raw(CHAR16 *name, void *data, UINTN size, int persist);
+void efi_unset_loader_var(CHAR16 *name, int persist);
+int  efi_loader_var_exists(CHAR16 *name);
+void efi_set_loader_var_u64(CHAR16 *name, UINT64 val);
+void efi_set_loader_var_usec(CHAR16 *name, UINT64 usec);
+int  efi_parse_loader_timeout(CHAR16 *s, INTN *out);
+
 UINT32 efi_rand(void);
 
 #endif
-

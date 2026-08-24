@@ -104,8 +104,8 @@ static INTN br_exhausted(bit_reader_t *br) {
     return br->bit_pos >= br->input_size * 8;
 }
 
-static EFI_STATUS png_decompress(UINT8 *input, UINTN input_size,
-                                  UINT8 *output, UINTN *output_size) {
+EFI_STATUS png_decompress(UINT8 *input, UINTN input_size,
+                           UINT8 *output, UINTN *output_size) {
     bit_reader_t br = {input, input_size, 0};
     UINTN out_pos = 0;
     UINT8 bfinal  = 0;
@@ -584,4 +584,3 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     efi_free_pool(uncomp);
     return icon;
 }
-

@@ -4,6 +4,9 @@
 
 extern EFI_BOOT_SERVICES *BS;
 
+static inline void x_cpuid(UINT32 leaf, UINT32 *a, UINT32 *b, UINT32 *c, UINT32 *d){
+    __asm__ volatile("cpuid":"=a"(*a),"=b"(*b),"=c"(*c),"=d"(*d):"a"(leaf),"c"(0)); }
+
 static UINT64 tsc_per_us = 0;
 
 void arch_clock_init(void) {
@@ -18,6 +21,12 @@ void arch_clock_init(void) {
 UINT64 arch_now_us(void) {
     if (!tsc_per_us) arch_clock_init();
     return __builtin_ia32_rdtsc() / tsc_per_us;
+}
+
+int arch_clock_since_power_on(void) {
+    UINT32 a, b, c, d;
+    x_cpuid(1, &a, &b, &c, &d);
+    return (c & (1u << 31)) ? 0 : 1;
 }
 
 typedef struct visor_cpu_arch visor_cpu_arch_t;
@@ -56,8 +65,6 @@ static inline UINT64 x_rdcr3(void){ UINT64 v; __asm__ volatile("mov %%cr3,%0":"=
 static inline void   x_wrcr3(UINT64 v){ __asm__ volatile("mov %0,%%cr3"::"r"(v):"memory"); }
 static inline UINT64 x_rdcr4(void){ UINT64 v; __asm__ volatile("mov %%cr4,%0":"=r"(v)); return v; }
 static inline void   x_wrcr4(UINT64 v){ __asm__ volatile("mov %0,%%cr4"::"r"(v):"memory"); }
-static inline void   x_cpuid(UINT32 leaf, UINT32 *a, UINT32 *b, UINT32 *c, UINT32 *d){
-    __asm__ volatile("cpuid":"=a"(*a),"=b"(*b),"=c"(*c),"=d"(*d):"a"(leaf),"c"(0)); }
 
 static int mtrr_add_wc(UINT64 base, UINT64 size) {
     UINT64 cap = x_rdmsr(MSR_MTRRCAP);
@@ -187,4 +194,3 @@ const CHAR16* arch_fb_make_wc(UINT64 base, UINT64 size) {
     if (method[0] == L'n' && cpu) method = L"cpu-arch";
     return method;
 }
-

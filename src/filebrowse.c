@@ -116,6 +116,7 @@ static void fb_clear_entries(fb_t *s) {
     s->entry_count = 0;
     s->cursor = 0;
     s->scroll = 0;
+    s->truncated = 0;
 }
 
 static void fb_free_volumes(fb_t *s) {
@@ -156,9 +157,10 @@ int fb_init(fb_t *s) {
     for (UINTN i = 0; i < n; i++) {
         if (hs[i] == boot_h) { boot_idx = i; break; }
     }
-    for (UINTN i = 0; i < n; i++) {
-        if (volume_has_path(hs[i], L"\\EFI\\visor\\boot.conf")) { boot_idx = i; break; }
-    }
+    if (boot_idx >= n)
+        for (UINTN i = 0; i < n; i++) {
+            if (volume_has_path(hs[i], L"\\EFI\\visor\\boot.conf")) { boot_idx = i; break; }
+        }
     if (boot_idx >= n)
         for (UINTN i = 0; i < n; i++) {
             if (volume_has_path(hs[i], L"\\EFI")) { boot_idx = i; break; }
@@ -258,61 +260,67 @@ int fb_list(fb_t *s) {
     UINTN cap = 0;
     fb_entry_t *arr = NULL;
     UINTN count = 0;
+    int truncated = 0;
+    int stop = 0;
 
     UINT8 sbuf[1024] __attribute__((aligned(8)));
-    UINTN reads = 0;
-    for (;;) {
-        if (count >= FB_MAX_ENTRIES || reads++ > 262144) break;
+    for (UINTN reads = 0; reads < FB_MAX_READS && !stop; reads++) {
+        if (count >= FB_MAX_ENTRIES) { truncated = 1; break; }
         UINT8 *buf = sbuf;
         UINT8 *heap = NULL;
         UINTN size = sizeof(sbuf);
+        UINTN bufsize = sizeof(sbuf);
         EFI_STATUS st = dir->Read(dir, &size, buf);
         if (st == EFI_BUFFER_TOO_SMALL && size > sizeof(sbuf)) {
-            if (size > 65536) break;
+            if (size > 65536) { truncated = 1; break; }
             heap = efi_allocate_pool(size);
             if (!heap) break;
             buf = heap;
+            bufsize = size;
             st = dir->Read(dir, &size, buf);
         }
         if (EFI_ERROR(st) || size == 0) {
             if (heap) efi_free_pool(heap);
             break;
         }
-        if (size < SIZE_OF_EFI_FILE_INFO + sizeof(CHAR16)) {
-            if (heap) efi_free_pool(heap);
-            continue;
-        }
-        EFI_FILE_INFO *info = (EFI_FILE_INFO *)buf;
-        CHAR16 *fn = info->FileName;
-        UINTN fn_max = (size - SIZE_OF_EFI_FILE_INFO) / sizeof(CHAR16);
+        if (size > bufsize) size = bufsize;
 
-        if (fn_max >= 2 && fn[0] == '.' &&
-            (fn[1] == 0 || (fn_max >= 3 && fn[1] == '.' && fn[2] == 0))) {
-            if (heap) efi_free_pool(heap);
-            continue;
+        UINT8 *ptr = buf;
+        UINT8 *end = buf + size;
+        while (ptr + SIZE_OF_EFI_FILE_INFO + sizeof(CHAR16) <= end &&
+               count < FB_MAX_ENTRIES && !stop) {
+            EFI_FILE_INFO *info = (EFI_FILE_INFO *)ptr;
+            UINTN avail = (UINTN)(end - ptr);
+            CHAR16 *fn = info->FileName;
+            UINTN fn_max = (avail - SIZE_OF_EFI_FILE_INFO) / sizeof(CHAR16);
+            int keep = 1;
+            if (fn_max >= 2 && fn[0] == '.' &&
+                (fn[1] == 0 || (fn_max >= 3 && fn[1] == '.' && fn[2] == 0)))
+                keep = 0;
+            if (keep) {
+                UINTN nlen = 0;
+                while (nlen < fn_max && fn[nlen]) nlen++;
+                if (nlen > 0 && nlen < FB_NAME_MAX) {
+                    if (count == cap && !fb_grow(&arr, &cap, count + 1)) {
+                        truncated = 1; stop = 1; break;
+                    }
+                    fb_entry_t *e = &arr[count++];
+                    e->name = efi_allocate_pool((nlen + 1) * sizeof(CHAR16));
+                    if (!e->name) {
+                        count--; truncated = 1; stop = 1; break;
+                    }
+                    for (UINTN i = 0; i <= nlen; i++) e->name[i] = fn[i];
+                    e->size = info->FileSize;
+                    e->is_dir = (info->Attribute & EFI_FILE_DIRECTORY) != 0;
+                }
+            }
+            UINTN step = info->Size;
+            if (step < SIZE_OF_EFI_FILE_INFO + sizeof(CHAR16) ||
+                step > (UINTN)(end - ptr)) break;
+            ptr += step;
         }
-        UINTN nlen = 0;
-        while (nlen < fn_max && fn[nlen]) nlen++;
-        if (nlen == 0 || nlen >= FB_NAME_MAX) {
-            if (heap) efi_free_pool(heap);
-            continue;
-        }
-
-        if (count == cap && !fb_grow(&arr, &cap, count + 1)) {
-            if (heap) efi_free_pool(heap);
-            break;
-        }
-        fb_entry_t *e = &arr[count++];
-        e->name = efi_allocate_pool((nlen + 1) * sizeof(CHAR16));
-        if (!e->name) {
-            count--;
-            if (heap) efi_free_pool(heap);
-            break;
-        }
-        for (UINTN i = 0; i <= nlen; i++) e->name[i] = fn[i];
-        e->size = info->FileSize;
-        e->is_dir = (info->Attribute & EFI_FILE_DIRECTORY) != 0;
         if (heap) efi_free_pool(heap);
+        if (count >= FB_MAX_ENTRIES) truncated = 1;
     }
 
     dir->Close(dir);
@@ -341,6 +349,7 @@ int fb_list(fb_t *s) {
 
     s->entries = arr;
     s->entry_count = count;
+    s->truncated = truncated;
     return count > 0;
 }
 
@@ -367,7 +376,8 @@ int fb_enter(fb_t *s) {
     tmp[t] = 0;
     for (UINTN i = 0; i <= t; i++) s->path[i] = tmp[i];
 
-    return fb_list(s);
+    fb_list(s);
+    return 1;
 }
 
 int fb_up(fb_t *s) {
@@ -383,7 +393,8 @@ int fb_up(fb_t *s) {
     } else {
         s->path[cut] = 0;
     }
-    return fb_list(s);
+    fb_list(s);
+    return 1;
 }
 
 void fb_switch_volume(fb_t *s, int dir) {
