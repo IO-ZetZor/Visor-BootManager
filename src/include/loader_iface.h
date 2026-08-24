@@ -4,7 +4,6 @@
 #include <efi.h>
 #include "gui.h"
 #include "config.h"
-#include "version.h"
 
 #define VISOR_LOADER_INFO L"Visor " VISOR_VERSION
 
