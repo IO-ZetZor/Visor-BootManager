@@ -1,7 +1,7 @@
 # Maintainer: IO-ZetZor <swag100iq111@gmail.com>
 
 pkgname=visor
-pkgver=1.5
+pkgver=1.5.1
 pkgrel=1
 pkgdesc="A minimal, fast, graphical UEFI boot manager"
 arch=('x86_64' 'aarch64')
@@ -17,7 +17,7 @@ optdepends=('sbctl: Secure Boot signing with sbctl'
             'python-numpy: VBG backgrounds (visor convert --vbg)')
 install=visor.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a5ea624df0a35a04043dcff06ad231c7c48490bf894eeb4a0d991b959e82e1ff')
+sha256sums=('70638e7b36a9824e918114e7bda30b25f160421081207cfa832c0e1a6c4013ac')
 
 _dir="Visor-BootManager-$pkgver"
 
