@@ -2,6 +2,7 @@
 #include <efilib.h>
 #include "gui.h"
 #include "config.h"
+#include "crypto.h"
 #include "efi_helpers.h"
 #include "linux_boot.h"
 #include "windows_boot.h"
@@ -611,7 +612,7 @@ boot_selected:
 
             if (!confirm) break;
 
-            if (pw && again && efi_strcmp(pw, again) == 0) {
+            if (pw && again && mem_equal(pw, again, (efi_strlen16(pw) + 1) * sizeof(CHAR16))) {
                 wipe_password(&again);
                 break;
             }

@@ -96,14 +96,8 @@ static int              g_present   = 0;
 static UINTN            g_pcr_config  = TPM_PCR_CONFIG_DEFAULT;
 static UINTN            g_pcr_cmdline = TPM_PCR_CMDLINE_DEFAULT;
 
-static UINTN strlen16_(CHAR16 *s) {
-    UINTN n = 0;
-    while (s && s[n]) n++;
-    return n;
-}
-
 static UINTN strsize16_(CHAR16 *s) {
-    return (strlen16_(s) + 1) * sizeof(CHAR16);
+    return (efi_strlen16(s) + 1) * sizeof(CHAR16);
 }
 
 void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {

@@ -81,6 +81,9 @@ void sha256_final(sha256_ctx *ctx, UINT8 out[32]) {
         out[j * 4 + 2] = (UINT8)(ctx->state[j] >> 8);
         out[j * 4 + 3] = (UINT8)(ctx->state[j]);
     }
+
+    volatile UINT8 *vp = (volatile UINT8*)ctx;
+    for (UINTN j = 0; j < sizeof(*ctx); j++) vp[j] = 0;
 }
 
 void sha256(const UINT8 *data, UINTN len, UINT8 out[32]) {

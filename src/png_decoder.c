@@ -323,6 +323,31 @@ static void apply_filter(UINT8 filter, UINT8 *row, UINT8 *prev, UINTN bpp, UINTN
     }
 }
 
+static const UINT8 adam7_xstart[7] = {0, 4, 0, 2, 0, 1, 0};
+static const UINT8 adam7_ystart[7] = {0, 0, 4, 0, 2, 0, 1};
+static const UINT8 adam7_xstep[7]  = {8, 8, 4, 4, 2, 2, 1};
+static const UINT8 adam7_ystep[7]  = {8, 8, 8, 4, 4, 2, 2};
+
+static void adam7_sub_size(UINTN W, UINTN H, UINTN pass,
+                           UINTN *sub_w, UINTN *sub_h) {
+    UINTN xs = adam7_xstart[pass], ys = adam7_ystart[pass];
+    UINTN dx = adam7_xstep[pass],  dy = adam7_ystep[pass];
+    *sub_w = (W > xs) ? (W - xs + dx - 1) / dx : 0;
+    *sub_h = (H > ys) ? (H - ys + dy - 1) / dy : 0;
+}
+
+static UINTN adam7_pass_bytes(UINTN W, UINTN H, UINTN pass, UINTN bpp) {
+    UINTN sw, sh;
+    adam7_sub_size(W, H, pass, &sw, &sh);
+    return sh * (1 + sw * bpp);
+}
+
+static UINTN adam7_offset(UINTN W, UINTN H, UINTN pass, UINTN bpp) {
+    UINTN off = 0;
+    for (UINTN p = 0; p < pass; p++) off += adam7_pass_bytes(W, H, p, bpp);
+    return off;
+}
+
 icon_t* png_load(UINT8 *data, UINTN size) {
     efi_log(L"  png: decoding");
     UINT8 png_sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
@@ -409,8 +434,9 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     }
 
     { CHAR16 d[96]; SPrint(d, sizeof(d),
-        L"  png: %dx%d colortype=%d depth=%d idat=%d bytes",
-        (int)width, (int)height, (int)color_type, (int)bit_depth, (int)idat_size);
+        L"  png: %dx%d colortype=%d depth=%d idat=%d bytes%s",
+        (int)width, (int)height, (int)color_type, (int)bit_depth, (int)idat_size,
+        interlace ? L" interlaced" : L"");
       efi_log(d); }
 
     if (width == 0 || height == 0 || !idat_data || idat_size < 2) {
@@ -432,9 +458,10 @@ icon_t* png_load(UINT8 *data, UINTN size) {
         return NULL;
     }
 
-    if (interlace != 0) {
-        efi_log(L"  ERROR: interlaced (Adam7) PNG is not supported - "
-                L"re-save the image without interlacing");
+    int is_interlaced = (interlace == 1);
+
+    if (interlace != 0 && interlace != 1) {
+        efi_log(L"  ERROR: unsupported PNG interlace method");
         efi_free_pool(idat_data);
         return NULL;
     }
@@ -482,12 +509,17 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     UINTN row_payload = 0;
     UINTN row_bytes = 0;
     UINTN uncomp_size = 0;
-    if (mul_overflow_uintn((UINTN)width, bpp, &row_payload) ||
-        add_overflow_uintn(row_payload, 1, &row_bytes) ||
-        mul_overflow_uintn((UINTN)height, row_bytes, &uncomp_size)) {
-        efi_log(L"  ERROR: PNG dimensions overflow scratch size");
-        efi_free_pool(idat_data);
-        return NULL;
+    if (is_interlaced) {
+        for (UINTN p = 0; p < 7; p++)
+            uncomp_size += adam7_pass_bytes((UINTN)width, (UINTN)height, p, bpp);
+    } else {
+        if (mul_overflow_uintn((UINTN)width, bpp, &row_payload) ||
+            add_overflow_uintn(row_payload, 1, &row_bytes) ||
+            mul_overflow_uintn((UINTN)height, row_bytes, &uncomp_size)) {
+            efi_log(L"  ERROR: PNG dimensions overflow scratch size");
+            efi_free_pool(idat_data);
+            return NULL;
+        }
     }
 
     UINT8 *uncomp      = efi_allocate_pool(uncomp_size);
@@ -537,48 +569,107 @@ icon_t* png_load(UINT8 *data, UINTN size) {
     icon->pixels   = efi_allocate_pool(pixel_bytes);
     if (!icon->pixels) { efi_free_pool(icon); efi_free_pool(uncomp); return NULL; }
 
-    UINT8 *prev_row = NULL;
+    if (is_interlaced) {
+        for (UINTN pass = 0; pass < 7; pass++) {
+            UINTN sw, sh;
+            adam7_sub_size((UINTN)width, (UINTN)height, pass, &sw, &sh);
+            if (sw == 0 || sh == 0) continue;
 
-    for (UINTN y = 0; y < height; y++) {
-        UINT8 *row        = uncomp + y * row_bytes;
-        UINT8  filter     = row[0];
-        UINT8 *pixel_data = row + 1;
+            UINTN sub_row_bytes = 1 + sw * bpp;
+            UINTN prev_off = 0;
 
-        if (filter > 4) {
-            efi_log(L"  ERROR: PNG has an invalid scanline filter - corrupt");
-            efi_free_pool(icon->pixels);
-            efi_free_pool(icon);
-            efi_free_pool(uncomp);
-            return NULL;
+            for (UINTN sy = 0; sy < sh; sy++) {
+                UINTN off = adam7_offset((UINTN)width, (UINTN)height, pass, bpp)
+                          + sy * sub_row_bytes;
+                UINT8  filter = uncomp[off];
+                UINT8 *pixel_data = uncomp + off + 1;
+
+                UINT8 *prev = (sy > 0) ? uncomp + prev_off + 1 : NULL;
+                if (filter > 4) {
+                    efi_log(L"  ERROR: PNG has an invalid scanline filter - corrupt");
+                    efi_free_pool(icon->pixels);
+                    efi_free_pool(icon);
+                    efi_free_pool(uncomp);
+                    return NULL;
+                }
+                if (filter != 0)
+                    apply_filter(filter, pixel_data, prev, bpp, sw);
+                prev_off = off;
+
+                UINTN fx = adam7_xstart[pass];
+                UINTN fy = adam7_ystart[pass];
+                UINTN dx = adam7_xstep[pass];
+                UINTN dy = adam7_ystep[pass];
+                UINTN py = fy + sy * dy;
+
+                for (UINTN sx = 0; sx < sw; sx++) {
+                    UINTN px = fx + sx * dx;
+                    UINTN idx = sx * bpp;
+                    UINT8 r, g, b, a = 255;
+
+                    if (color_type == 2) {
+                        r = pixel_data[idx]; g = pixel_data[idx+1]; b = pixel_data[idx+2];
+                    } else if (color_type == 6) {
+                        r = pixel_data[idx]; g = pixel_data[idx+1];
+                        b = pixel_data[idx+2]; a = pixel_data[idx+3];
+                    } else if (color_type == 4) {
+                        UINT8 gray = pixel_data[idx]; a = pixel_data[idx+1];
+                        r = g = b = gray;
+                    } else if (color_type == 0) {
+                        r = pixel_data[idx]; g = b = r;
+                    } else {
+                        r = g = b = pixel_data[idx];
+                    }
+
+                    icon->pixels[py * width + px] = ((UINT32)a << 24) |
+                        ((UINT32)r << 16) | ((UINT32)g << 8) | b;
+                }
+            }
         }
-        if (filter != 0) {
-            apply_filter(filter, pixel_data, prev_row, bpp, width);
-        }
+    } else {
+        UINT8 *prev_row = NULL;
 
-        for (UINTN x = 0; x < width; x++) {
-            UINT8 r, g, b, a = 255;
-            UINTN idx = x * bpp;
+        for (UINTN y = 0; y < height; y++) {
+            UINT8 *row        = uncomp + y * row_bytes;
+            UINT8  filter     = row[0];
+            UINT8 *pixel_data = row + 1;
 
-            if (color_type == 2) {
-                r = pixel_data[idx]; g = pixel_data[idx+1]; b = pixel_data[idx+2];
-            } else if (color_type == 6) {
-                r = pixel_data[idx]; g = pixel_data[idx+1];
-                b = pixel_data[idx+2]; a = pixel_data[idx+3];
-            } else if (color_type == 4) {
-                UINT8 gray = pixel_data[idx]; a = pixel_data[idx+1];
-                r = g = b = gray;
-            } else if (color_type == 0) {
-                r = pixel_data[idx];
-                g = b = r;
-            } else {
-                r = g = b = pixel_data[idx];
+            if (filter > 4) {
+                efi_log(L"  ERROR: PNG has an invalid scanline filter - corrupt");
+                efi_free_pool(icon->pixels);
+                efi_free_pool(icon);
+                efi_free_pool(uncomp);
+                return NULL;
+            }
+            if (filter != 0) {
+                apply_filter(filter, pixel_data, prev_row, bpp, width);
             }
 
-            icon->pixels[y * width + x] = ((UINT32)a << 24) | ((UINT32)r << 16) |
-                                           ((UINT32)g <<  8) | b;
-        }
+            for (UINTN x = 0; x < width; x++) {
+                UINT8 r, g, b, a = 255;
+                UINTN idx = x * bpp;
 
-        prev_row = pixel_data;
+                if (color_type == 2) {
+                    r = pixel_data[idx]; g = pixel_data[idx+1]; b = pixel_data[idx+2];
+                } else if (color_type == 6) {
+                    r = pixel_data[idx]; g = pixel_data[idx+1];
+                    b = pixel_data[idx+2]; a = pixel_data[idx+3];
+                } else if (color_type == 4) {
+                    UINT8 gray = pixel_data[idx]; a = pixel_data[idx+1];
+                    r = g = b = gray;
+                } else if (color_type == 0) {
+                    r = pixel_data[idx];
+                    g = b = r;
+                } else {
+                    r = g = b = pixel_data[idx];
+                }
+
+                icon->pixels[y * width + x] = ((UINT32)a << 24) | ((UINT32)r << 16) |
+                                               ((UINT32)g <<  8) | b;
+            }
+
+            prev_row = pixel_data;
+        }
     }
 
     efi_free_pool(uncomp);

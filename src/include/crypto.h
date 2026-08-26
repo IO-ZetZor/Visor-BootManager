@@ -8,8 +8,11 @@
 #define VISOR_CRYPT_SALT_SIZE 16
 #define VISOR_CRYPT_NONCE_SIZE 12
 #define VISOR_CRYPT_HASH_SIZE 32
+#define VISOR_CRYPT_MIN_ITERATIONS 100000U
 #define VISOR_CRYPT_MAX_ITERATIONS 5000000U
 #define VISOR_CRYPT_HEADER_AUTH_SIZE 52
+
+int mem_equal(const void *a, const void *b, UINTN n);
 
 typedef struct {
     UINT8  magic[8];

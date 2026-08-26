@@ -3208,7 +3208,21 @@ typedef struct {
     CHAR16 *cl;
     snapshot_t arr[AUTO_SNAP_MAX];
     UINTN made;
+    UINT64 deadline_ms;
+    int    timed_out;
 } snap_ctx_t;
+
+#define SNAP_SCAN_BUDGET_MS 8000
+
+static int snap_out_of_time(snap_ctx_t *c) {
+    if (c->timed_out) return 1;
+    if (!c->deadline_ms) return 0;
+    if (efi_get_tick() < c->deadline_ms) return 0;
+    c->timed_out = 1;
+    efi_log(L"WARN: snapshot auto-detection hit its time budget - "
+            L"giving up (set snapshots=0 or use snapshots.conf)");
+    return 1;
+}
 
 static void snap_add(snap_ctx_t *c, CHAR16 *sv, CHAR16 *id, CHAR16 *date, CHAR16 *desc) {
     if (c->made >= AUTO_SNAP_MAX || !id) {
@@ -3236,6 +3250,7 @@ static void snap_add(snap_ctx_t *c, CHAR16 *sv, CHAR16 *id, CHAR16 *date, CHAR16
 }
 
 static UINTN scan_snapper(snap_ctx_t *c, const CHAR16 *base) {
+    if (snap_out_of_time(c)) return 0;
     CHAR16 dirp[MAX_PATH];
     SPrint(dirp, sizeof(dirp), L"%s\\.snapshots", base);
     EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, dirp);
@@ -3246,6 +3261,7 @@ static UINTN scan_snapper(snap_ctx_t *c, const CHAR16 *base) {
     CHAR16 name[64];
     int is_dir;
     while (efi_read_dirent(d, name, 64, &is_dir) && n < MAX_SNAPS) {
+        if (snap_out_of_time(c)) break;
         if (!is_dir || !is_digits(name)) continue;
         CHAR16 sp[MAX_PATH];
         SPrint(sp, sizeof(sp), L"%s\\%s\\snapshot", dirp, name);
@@ -3291,6 +3307,7 @@ static UINTN scan_snapper(snap_ctx_t *c, const CHAR16 *base) {
 }
 
 static UINTN scan_timeshift(snap_ctx_t *c) {
+    if (snap_out_of_time(c)) return 0;
     EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, L"\\timeshift-btrfs\\snapshots");
     if (!d) return 0;
 
@@ -3299,6 +3316,7 @@ static UINTN scan_timeshift(snap_ctx_t *c) {
     CHAR16 name[64];
     int is_dir;
     while (efi_read_dirent(d, name, 64, &is_dir) && n < 32) {
+        if (snap_out_of_time(c)) break;
         if (!is_dir || !ts_tag_ok(name)) continue;
         CHAR16 sp[MAX_PATH];
         SPrint(sp, sizeof(sp), L"\\timeshift-btrfs\\snapshots\\%s\\@", name);
@@ -3353,6 +3371,7 @@ static UINTN scan_timeshift(snap_ctx_t *c) {
 }
 
 static UINTN scan_plain_dir(snap_ctx_t *c, const CHAR16 *base, const CHAR16 *dirname) {
+    if (snap_out_of_time(c)) return 0;
     CHAR16 dirp[MAX_PATH];
     SPrint(dirp, sizeof(dirp), L"%s\\%s", base, dirname);
     EFI_FILE_PROTOCOL *d = efi_open_dir(c->root, dirp);
@@ -3363,6 +3382,7 @@ static UINTN scan_plain_dir(snap_ctx_t *c, const CHAR16 *base, const CHAR16 *dir
     CHAR16 name[64];
     int is_dir;
     while (efi_read_dirent(d, name, 64, &is_dir) && n < 32) {
+        if (snap_out_of_time(c)) break;
         if (!is_dir) continue;
         for (UINTN i = 0; i < 64; i++) names[n][i] = name[i];
         n++;
@@ -3431,25 +3451,35 @@ static void snapshots_autodetect(config_t *config) {
     snap_ctx_t ctx;
     ctx.cl = cl;
     ctx.made = 0;
+    ctx.timed_out = 0;
+    ctx.deadline_ms = efi_get_tick() + SNAP_SCAN_BUDGET_MS;
     const CHAR16 *src = L"";
 
     int have_uuid = e->uuid && e->uuid[0];
-    for (int pass = have_uuid ? 0 : 1; pass < 2 && !ctx.made; pass++) {
-        for (UINTN v = 0; v < nvol && !ctx.made; v++) {
+    for (int pass = have_uuid ? 0 : 1; pass < 2 && !ctx.made && !ctx.timed_out; pass++) {
+        for (UINTN v = 0; v < nvol && !ctx.made && !ctx.timed_out; v++) {
             if (pass == 0 &&
                 !efi_handle_matches_partition_uuid(vols[v], e->uuid))
                 continue;
+
+            BS->SetWatchdogTimer(0, 0, 0, NULL);
+            CHAR16 d[80];
+            SPrint(d, sizeof(d), L"config: snapshot scan on volume %d of %d",
+                   (int)v + 1, (int)nvol);
+            efi_log(d);
+
             EFI_FILE_PROTOCOL *root = root_from_handle(vols[v]);
             if (!root) continue;
             ctx.root = root;
 
-            for (UINTN b = 0; b < nb; b++) scan_snapper(&ctx, bases[b]);
+            for (UINTN b = 0; b < nb && !ctx.timed_out; b++)
+                scan_snapper(&ctx, bases[b]);
             if (ctx.made) src = L"snapper";
 
             if (!ctx.made && scan_timeshift(&ctx)) src = L"timeshift";
 
             if (!ctx.made) {
-                for (UINTN b = 0; b < nb && !ctx.made; b++) {
+                for (UINTN b = 0; b < nb && !ctx.made && !ctx.timed_out; b++) {
                     scan_plain_dir(&ctx, bases[b], L".snapshots");
                     scan_plain_dir(&ctx, bases[b], L"snapshots");
                     scan_plain_dir(&ctx, bases[b], L"@snapshots");
@@ -3458,12 +3488,16 @@ static void snapshots_autodetect(config_t *config) {
             }
             root->Close(root);
         }
-        if (pass == 0 && !ctx.made)
+        if (pass == 0 && !ctx.made && !ctx.timed_out)
             efi_log(L"config: no snapshots on uuid= volume - trying all volumes");
     }
     efi_free_pool(vols);
 
-    if (!ctx.made) return;
+    if (!ctx.made) {
+        if (!ctx.timed_out)
+            efi_log(L"config: no snapshots found on any volume - continuing");
+        return;
+    }
 
     snapshot_t *arr = efi_allocate_pool(ctx.made * sizeof(snapshot_t));
     if (!arr) {

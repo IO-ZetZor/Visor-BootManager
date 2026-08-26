@@ -15,12 +15,6 @@ extern EFI_HANDLE IH;
 #define LUKS_DEFAULT_KEY_PATH      L"/crypto_keyfile.bin"
 #define CPIO_NEWC_HEADER_SIZE      110u
 
-static UINTN strlen16(CHAR16 *s) {
-    UINTN len = 0;
-    while (s[len]) len++;
-    return len;
-}
-
 static int linux_is_pe_image(const UINT8 *data, UINTN size) {
     if (!data || size < 0x40 || data[0] != 'M' || data[1] != 'Z') return 0;
     UINT32 pe_offset = (UINT32)data[0x3C] |
@@ -229,7 +223,7 @@ static EFI_STATUS linux_make_cmdline(CHAR16 *cmdline, UINT32 max_size,
     *pages = 0;
     if (!cmdline || !cmdline[0]) return EFI_SUCCESS;
 
-    UINTN len = strlen16(cmdline);
+    UINTN len = efi_strlen16(cmdline);
     if (len > LINUX_MAX_RAW_CMDLINE || (max_size && len > max_size))
         return EFI_INVALID_PARAMETER;
     if (len == ~(UINTN)0) return EFI_INVALID_PARAMETER;
@@ -798,7 +792,7 @@ static EFI_STATUS luks_append_keyfile(boot_entry_t *entry, efi_file_buffer_t **b
 
 int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word) {
     if (!cmdline || !word) return 0;
-    UINTN wl = strlen16(word);
+    UINTN wl = efi_strlen16(word);
     if (!wl) return 0;
 
     UINTN i = 0;
@@ -826,7 +820,7 @@ static void luks_strip_quiet(CHAR16 *cmdline) {
         while (cmdline[i] && cmdline[i] != L' ') i++;
         UINTN len = i - start;
         for (int h = 0; hide[h]; h++) {
-            UINTN hl = strlen16((CHAR16*)hide[h]);
+            UINTN hl = efi_strlen16((CHAR16*)hide[h]);
             if (hl != len) continue;
             UINTN k = 0;
             while (k < len && cmdline[start + k] == hide[h][k]) k++;
@@ -860,8 +854,8 @@ static EFI_STATUS luks_effective_cmdline(boot_entry_t *entry,
         efi_log(L"WARN: luks=1 with quiet/splash - a rejected passphrase will "
                 L"reprompt invisibly; set luks_verbose=1");
 
-    UINTN base_len = entry->cmdline ? strlen16(entry->cmdline) : 0;
-    UINTN extra_len = strlen16(entry->luks_cmdline);
+    UINTN base_len = entry->cmdline ? efi_strlen16(entry->cmdline) : 0;
+    UINTN extra_len = efi_strlen16(entry->luks_cmdline);
     UINTN sep = base_len ? 1 : 0;
     CHAR16 *out = efi_allocate_pool((base_len + sep + extra_len + 1) * sizeof(CHAR16));
     if (!out) return EFI_OUT_OF_RESOURCES;
@@ -1056,7 +1050,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             status = BS->HandleProtocol(kernel_handle, &gEfiLoadedImageProtocolGuid, (void**)&loaded);
             if (!EFI_ERROR(status)) {
                 loaded->LoadOptions     = boot_cmdline;
-                loaded->LoadOptionsSize = (UINT32)((strlen16(boot_cmdline) + 1) * sizeof(CHAR16));
+                loaded->LoadOptionsSize = (UINT32)((efi_strlen16(boot_cmdline) + 1) * sizeof(CHAR16));
                 efi_log(L"linux: cmdline set via LoadOptions");
             }
         }

@@ -4,9 +4,10 @@
 #include <efi.h>
 #include <efilib.h>
 
-static int memeq_ct(const UINT8 *a, const UINT8 *b, UINTN n) {
+int mem_equal(const void *a, const void *b, UINTN n) {
+    const UINT8 *x = (const UINT8*)a, *y = (const UINT8*)b;
     UINT8 diff = 0;
-    for (UINTN i = 0; i < n; i++) diff |= a[i] ^ b[i];
+    for (UINTN i = 0; i < n; i++) diff |= x[i] ^ y[i];
     return diff == 0;
 }
 
@@ -184,7 +185,8 @@ EFI_STATUS visor_decrypt_buffer(const void *input, UINTN input_size,
         h->version != VISOR_CRYPT_VERSION)
         return EFI_UNSUPPORTED;
 
-    if (h->iterations == 0 || h->iterations > VISOR_CRYPT_MAX_ITERATIONS)
+    if (h->iterations < VISOR_CRYPT_MIN_ITERATIONS ||
+        h->iterations > VISOR_CRYPT_MAX_ITERATIONS)
         return EFI_INVALID_PARAMETER;
 
     if (h->plain_size == 0 || h->plain_size > 256ULL * 1024 * 1024)
@@ -204,7 +206,7 @@ EFI_STATUS visor_decrypt_buffer(const void *input, UINTN input_size,
     hmac_sha256(mac_key, 32, (const UINT8*)h,
                 VISOR_CRYPT_HEADER_AUTH_SIZE, cipher, cipher_size, tag);
 
-    if (!memeq_ct(tag, h->tag, sizeof(tag))) {
+    if (!mem_equal(tag, h->tag, sizeof(tag))) {
         secure_zero(keys, sizeof(keys));
         secure_zero(tag, sizeof(tag));
         return EFI_SECURITY_VIOLATION;

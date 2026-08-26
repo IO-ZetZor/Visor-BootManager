@@ -70,6 +70,13 @@ int efi_strcmp(CHAR16 *s1, CHAR16 *s2) {
     return *s1 - *s2;
 }
 
+UINTN efi_strlen16(CHAR16 *s) {
+    if (!s) return 0;
+    UINTN n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
 CHAR16* efi_strchr(CHAR16 *s, CHAR16 c) {
     while (*s && *s != c) s++;
     return (*s == c) ? s : NULL;
@@ -421,10 +428,9 @@ void efi_fclose(efi_file_t *file) {
 
 UINTN efi_fread(efi_file_t *file, void *buf, UINTN size) {
     if (!file || !file->handle || !buf) return 0;
-    UINTN requested = size;
     EFI_STATUS status = file->handle->Read(file->handle, &size, buf);
     if (EFI_ERROR(status)) return 0;
-    return size > requested ? requested : size;
+    return size;
 }
 
 int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path) {

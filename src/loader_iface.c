@@ -10,12 +10,6 @@ extern EFI_HANDLE IH;
 
 static UINT64 g_init_usec = 0;
 
-static UINTN strlen16_(CHAR16 *s) {
-    UINTN n = 0;
-    while (s && s[n]) n++;
-    return n;
-}
-
 static UINT64 loader_now_usec(void) {
     EFI_TIME t;
     if (EFI_ERROR(RT->GetTime(&t, NULL))) return 0;
@@ -50,7 +44,7 @@ void loader_mark_menu(void) {
 
 static CHAR16* id_from_bls_path(CHAR16 *path) {
     if (!path || !path[0]) return NULL;
-    UINTN n = strlen16_(path);
+    UINTN n = efi_strlen16(path);
 
     UINTN start = 0;
     for (UINTN i = 0; i < n; i++)
@@ -76,7 +70,7 @@ static CHAR16* id_from_bls_path(CHAR16 *path) {
 
 static CHAR16* id_from_name(CHAR16 *name) {
     if (!name || !name[0]) return NULL;
-    UINTN n = strlen16_(name);
+    UINTN n = efi_strlen16(name);
     CHAR16 *out = efi_allocate_pool((n + 1) * sizeof(CHAR16));
     if (!out) return NULL;
 
@@ -198,7 +192,7 @@ void loader_export_entries(boot_entry_t *entries) {
     for (boot_entry_t *e = entries; e; e = e->next) {
         CHAR16 *id = loader_entry_id(e);
         if (!id) continue;
-        total += (strlen16_(id) + 1) * sizeof(CHAR16);
+        total += (efi_strlen16(id) + 1) * sizeof(CHAR16);
         efi_free_pool(id);
     }
     if (!total) {
@@ -213,7 +207,7 @@ void loader_export_entries(boot_entry_t *entries) {
     for (boot_entry_t *e = entries; e; e = e->next) {
         CHAR16 *id = loader_entry_id(e);
         if (!id) continue;
-        UINTN bytes = (strlen16_(id) + 1) * sizeof(CHAR16);
+        UINTN bytes = (efi_strlen16(id) + 1) * sizeof(CHAR16);
         if (off + bytes <= total) {
             CopyMem(buf + off, id, bytes);
             off += bytes;

@@ -9,6 +9,7 @@ void efi_free_pool(void *ptr);
 
 CHAR16* efi_strdup(CHAR16 *src);
 int efi_strcmp(CHAR16 *s1, CHAR16 *s2);
+UINTN efi_strlen16(CHAR16 *s);
 CHAR16* efi_strchr(CHAR16 *s, CHAR16 c);
 
 typedef struct {
