@@ -29,15 +29,12 @@ static int is_space16(CHAR16 c) {
 
 static void strip_inline_comment(CHAR16 *s) {
     int in_quote = 0;
-    UINTN first = 0;
-    while (s[first] && is_space16(s[first])) first++;
-
     for (UINTN i = 0; s[i]; i++) {
         if (s[i] == '"') {
             in_quote = !in_quote;
             continue;
         }
-        if (!in_quote && s[i] == '#' && (i == 0 || is_space16(s[i - 1]))) {
+        if (!in_quote && s[i] == '#' && i > 0 && is_space16(s[i - 1])) {
             s[i] = '\0';
             return;
         }
