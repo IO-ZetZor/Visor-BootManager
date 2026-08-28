@@ -77,6 +77,25 @@ UINTN efi_strlen16(CHAR16 *s) {
     return n;
 }
 
+void efi_strcpy16(CHAR16 *dst, CHAR16 *src) {
+    if (!dst || !src) return;
+    while ((*dst++ = *src++) != 0) ;
+}
+
+static CHAR16 efi_ci_char(CHAR16 c) {
+    if (c >= L'a' && c <= L'z') return c - (L'a' - L'A');
+    return c;
+}
+
+int efi_strcmp16_ci(CHAR16 *s1, CHAR16 *s2) {
+    if (!s1 || !s2) return 1;
+    while (*s1 && *s2 && efi_ci_char(*s1) == efi_ci_char(*s2)) {
+        s1++;
+        s2++;
+    }
+    return efi_ci_char(*s1) - efi_ci_char(*s2);
+}
+
 CHAR16* efi_strchr(CHAR16 *s, CHAR16 c) {
     while (*s && *s != c) s++;
     return (*s == c) ? s : NULL;
@@ -381,6 +400,8 @@ void efi_fs_drivers_set_lazy(int enabled) {
     g_deferred_lazy = enabled ? 1 : 0;
 }
 
+static int fs_probe_in_progress(void);
+
 efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid) {
     CHAR16 nbuf[NORM_PATH_MAX];
     path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
@@ -388,10 +409,13 @@ efi_file_t* efi_fopen_uuid(CHAR16 *path, CHAR16 *uuid) {
     efi_file_t *file = efi_fopen_inner(path, uuid);
     if (file) return file;
 
-    if (g_deferred_lazy && !g_deferred_started && g_deferred_count > 0) {
-        efi_start_deferred_images();
-        file = efi_fopen_inner(path, uuid);
-        if (file) return file;
+    int start_pending = !g_deferred_started && g_deferred_count > 0;
+    if (g_deferred_lazy && (start_pending || fs_probe_in_progress())) {
+        if (start_pending) {
+            efi_start_deferred_images();
+            file = efi_fopen_inner(path, uuid);
+            if (file) return file;
+        }
 
         UINTN probed = 0;
         while (efi_connect_next_block(uuid)) {
@@ -532,6 +556,21 @@ UINT64 efi_file_size(EFI_FILE_PROTOCOL *fh) {
     return size;
 }
 
+#define BIG_READ_MIN   (16ULL * 1024 * 1024)
+#define BIG_READ_CHUNK (8ULL  * 1024 * 1024)
+
+static int big_read_console(void) {
+    return visor_log_to_console && !visor_quiet && ST && ST->ConOut;
+}
+
+static void big_read_progress(UINTN done, UINT64 size) {
+    if (!big_read_console()) return;
+    CHAR16 line[64];
+    SPrint(line, sizeof(line), L"\r  reading %d of %d MB ",
+           (int)(done / (1024 * 1024)), (int)(size / (1024 * 1024)));
+    ST->ConOut->OutputString(ST->ConOut, line);
+}
+
 static efi_file_buffer_t* efi_read_open_file(efi_file_t *file) {
     if (!file) return NULL;
 
@@ -558,13 +597,37 @@ static efi_file_buffer_t* efi_read_open_file(efi_file_t *file) {
         return NULL;
     }
 
+    int big = size >= BIG_READ_MIN;
+    if (big) {
+        CHAR16 d[112];
+        SPrint(d, sizeof(d),
+               L"read: %d MB to load - a non-FAT filesystem driver makes this slow",
+               (int)(size / (1024 * 1024)));
+        efi_log(d);
+    }
+
+    UINT64 t0 = arch_now_us();
     UINTN total = 0;
     while (total < (UINTN)size) {
-        UINTN n = efi_fread(file, (UINT8*)buf->data + total, (UINTN)size - total);
+        UINTN want = (UINTN)size - total;
+        if (big && want > (UINTN)BIG_READ_CHUNK) want = (UINTN)BIG_READ_CHUNK;
+        UINTN n = efi_fread(file, (UINT8*)buf->data + total, want);
         if (n == 0) break;
         total += n;
+        if (big) big_read_progress(total, size);
     }
     efi_fclose(file);
+
+    if (big) {
+        if (big_read_console()) ST->ConOut->OutputString(ST->ConOut, L"\r\n");
+        UINT64 ms = (arch_now_us() - t0) / 1000;
+        if (ms == 0) ms = 1;
+        CHAR16 d[96];
+        SPrint(d, sizeof(d), L"read: %d MB in %d ms (%d MB/s)",
+               (int)(total / (1024 * 1024)), (int)ms,
+               (int)((total / 1024) * 1000 / ms / 1024));
+        efi_log(d);
+    }
 
     if (total != (UINTN)size) {
         efi_log(L"WARN: short file read - skipping incomplete data");
@@ -583,6 +646,87 @@ efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid) {
 
 efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return efi_load_file_uuid(path, NULL);
+}
+
+static efi_file_buffer_t *g_pf_kernel = NULL;
+static efi_file_buffer_t *g_pf_initrd = NULL;
+static CHAR16 *g_pf_kuid = NULL;
+static CHAR16 *g_pf_iuid = NULL;
+
+static void prefetch_buf_free(efi_file_buffer_t **b) {
+    if (*b) {
+        if ((*b)->data) efi_free_pool((*b)->data);
+        efi_free_pool(*b);
+        *b = NULL;
+    }
+}
+
+void efi_prefetch_cancel(void) {
+    prefetch_buf_free(&g_pf_kernel);
+    prefetch_buf_free(&g_pf_initrd);
+    if (g_pf_kuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; }
+    if (g_pf_iuid) { efi_free_pool(g_pf_iuid); g_pf_iuid = NULL; }
+}
+
+void efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid) {
+    efi_prefetch_cancel();
+    if (!kernel_path || !kernel_path[0]) return;
+
+    CHAR16 nbuf[NORM_PATH_MAX];
+    CHAR16 *kp = collapse_backslashes(kernel_path, nbuf, NORM_PATH_MAX);
+    if (!kp) return;
+
+    g_pf_kuid = efi_allocate_pool((efi_strlen16(kp) + 1) * sizeof(CHAR16));
+    if (!g_pf_kuid) return;
+    efi_strcpy16(g_pf_kuid, kp);
+
+    if (initrd_path && initrd_path[0]) {
+        g_pf_iuid = efi_allocate_pool((efi_strlen16(initrd_path) + 1) * sizeof(CHAR16));
+        if (!g_pf_iuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; return; }
+        efi_strcpy16(g_pf_iuid, initrd_path);
+    }
+
+    g_pf_kernel = efi_load_file_uuid(kernel_path, uuid);
+    if (g_pf_initrd) prefetch_buf_free(&g_pf_initrd);
+    if (g_pf_iuid)
+        g_pf_initrd = efi_load_file_uuid(initrd_path, uuid);
+
+    if (!g_pf_kernel && !g_pf_initrd) {
+        efi_prefetch_cancel();
+        return;
+    }
+    if (g_pf_kernel)
+        efi_log(L"prefetch: kernel read ahead during the menu countdown");
+    if (g_pf_initrd)
+        efi_log(L"prefetch: initrd read ahead during the menu countdown");
+}
+
+int efi_prefetch_matches(CHAR16 *kernel_path, CHAR16 *initrd_path) {
+    if (!g_pf_kernel || !g_pf_kuid || !kernel_path) return 0;
+    CHAR16 nbuf[NORM_PATH_MAX];
+    CHAR16 *kp = collapse_backslashes(kernel_path, nbuf, NORM_PATH_MAX);
+    if (!kp || efi_strcmp16_ci(kp, g_pf_kuid) != 0) return 0;
+    if (initrd_path && initrd_path[0]) {
+        if (!g_pf_iuid || !g_pf_initrd) return 0;
+        CHAR16 ibuf[NORM_PATH_MAX];
+        CHAR16 *ip = collapse_backslashes(initrd_path, ibuf, NORM_PATH_MAX);
+        if (!ip || efi_strcmp16_ci(ip, g_pf_iuid) != 0) return 0;
+    }
+    return 1;
+}
+
+int efi_prefetch_take(efi_file_buffer_t **kernel, efi_file_buffer_t **initrd) {
+    if (kernel) *kernel = NULL;
+    if (initrd) *initrd = NULL;
+    if (!g_pf_kernel) {
+        efi_prefetch_cancel();
+        return 0;
+    }
+    if (kernel) *kernel = g_pf_kernel;
+    if (initrd) *initrd = g_pf_initrd;
+    g_pf_kernel = NULL;
+    g_pf_initrd = NULL;
+    return 1;
 }
 
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
@@ -723,6 +867,10 @@ int efi_fs_probe_exhausted(void) {
     return g_probe_ready && g_probe_i >= g_probe_n;
 }
 
+static int fs_probe_in_progress(void) {
+    return g_probe_ready && g_probe_i < g_probe_n;
+}
+
 int efi_connect_next_block(CHAR16 *prefer_uuid) {
     probe_init(prefer_uuid);
     while (g_probe_i < g_probe_n) {
@@ -745,6 +893,18 @@ void efi_start_deferred_drivers(void) {
         L"drivers: deferred start complete (probed %d of %d block device(s))",
         (int)connected, (int)g_probe_n);
       efi_log(m); }
+}
+
+int efi_fs_warmup_step(CHAR16 *prefer_uuid) {
+    if (!g_deferred_started) {
+        if (g_deferred_count == 0) {
+            g_deferred_started = 1;
+        } else {
+            efi_start_deferred_images();
+            return 1;
+        }
+    }
+    return efi_connect_next_block(prefer_uuid);
 }
 
 void efi_load_fs_drivers(void) {
@@ -822,19 +982,16 @@ void efi_print(CHAR16 *msg, ...) {
 #define LOG_MAX_BYTES (128 * 1024)
 
 static UINTN log_elapsed_cs(void) {
-    static EFI_EVENT lt = NULL;
-    static UINTN cs = 0;
-    if (!lt) {
-        if (EFI_ERROR(BS->CreateEvent(EVT_TIMER, TPL_APPLICATION, NULL, NULL, &lt))) {
-            lt = NULL;
-            return 0;
-        }
-        BS->SetTimer(lt, TimerPeriodic, 100000ULL);
-        cs = 0;
+    static UINT64 base_us = 0;
+    static int based = 0;
+    UINT64 now = arch_now_us();
+    if (!based) {
+        based = 1;
+        base_us = now;
         return 0;
     }
-    while (BS->CheckEvent(lt) == EFI_SUCCESS) cs++;
-    return cs;
+    if (now < base_us) return 0;
+    return (UINTN)((now - base_us) / 10000);
 }
 
 static EFI_FILE_PROTOCOL *log_open_root(void) {

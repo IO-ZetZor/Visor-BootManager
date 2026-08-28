@@ -18,14 +18,73 @@ static boot_entry_t* main_entry_at(gui_state_t *state, UINTN idx) {
     return e;
 }
 
+static gui_state_t *menu_gui;
+static int fs_warmup_pending;
+static CHAR16 *fs_warmup_uuid;
+static int prefetch_pending;
+static CHAR16 *prefetch_kpath;
+static CHAR16 *prefetch_ipath;
+static CHAR16 *prefetch_uuid;
+
+static void start_prefetch_for_entry(boot_entry_t *e) {
+    efi_prefetch_cancel();
+    prefetch_pending = 0;
+    if (!e || !e->kernel_path || !e->kernel_path[0]) return;
+    if (e->encrypted || e->luks || e->initrd_encrypted) return;
+    if (e->has_sha256) return;
+    prefetch_kpath = e->kernel_path;
+    prefetch_ipath = e->initrd_path;
+    prefetch_uuid  = e->uuid;
+    prefetch_pending = 1;
+}
+
+static void do_prefetch_step(void) {
+    if (!prefetch_pending) return;
+    prefetch_pending = 0;
+    efi_prefetch_begin(prefetch_kpath, prefetch_ipath, prefetch_uuid);
+}
+
 static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
                            UINTN *first_new) {
     config_t *cfg = (config_t*)ctx;
+
+    if (fs_warmup_pending) {
+        if (menu_gui && menu_gui->timeout_active && menu_gui->timeout > 0) {
+            UINTN guard = 0;
+            while (fs_warmup_pending && guard++ < 64) {
+                if (!efi_fs_warmup_step(fs_warmup_uuid)) {
+                    fs_warmup_pending = 0;
+                    efi_log(L"drivers: filesystem volumes are ready (warmed up while the "
+                            L"menu counted down)");
+                }
+            }
+            if (fs_warmup_pending) return 0;
+        } else {
+            fs_warmup_pending = 0;
+            efi_log(L"drivers: menu is being used - leaving the filesystem "
+                    L"warm-up to the boot handoff");
+        }
+    }
+
+    if (prefetch_pending) do_prefetch_step();
+
+    if (!cfg->hotplug) return 0;
     int mask = config_hotplug_poll(cfg, first_new);
     if (!mask) return 0;
     *head  = cfg->entries;
     *count = cfg->entry_count;
     return mask;
+}
+
+static int entries_need_fs_warmup(config_t *cfg) {
+    for (boot_entry_t *e = cfg->entries; e; e = e->next) {
+        if (!e->kernel_path || !e->kernel_path[0]) continue;
+        if (e->hp_volume) continue;
+        efi_file_t *f = efi_fopen_uuid(e->kernel_path, e->uuid);
+        if (f) { efi_fclose(f); continue; }
+        return 1;
+    }
+    return 0;
 }
 
 static void wipe_password(CHAR16 **pw) {
@@ -190,8 +249,6 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     if (config.hotplug) {
         config_hotplug_arm(&config);
-        gui.hotplug_poll = hotplug_poll_cb;
-        gui.hotplug_ctx  = &config;
         efi_log(L"main: hotplug volume watch armed");
     }
     gui.entries         = config.entries;
@@ -320,6 +377,22 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
             efi_free_pool(last);
             efi_log(L"main: remember_last - preselected previously booted entry");
         }
+    }
+
+    menu_gui = &gui;
+    boot_entry_t *pick = main_entry_at(&gui, gui.selected);
+    if (config.timeout > 0) {
+        start_prefetch_for_entry(pick);
+        if (entries_need_fs_warmup(&config)) {
+            fs_warmup_uuid = pick ? pick->uuid : NULL;
+            fs_warmup_pending = 1;
+            efi_log(L"main: a configured kernel path is not readable yet - warming up "
+                    L"filesystem drivers while the menu counts down");
+        }
+    }
+    if (config.hotplug || fs_warmup_pending || prefetch_pending) {
+        gui.hotplug_poll = hotplug_poll_cb;
+        gui.hotplug_ctx  = &config;
     }
 
     boot_entry_t *selected = NULL;

@@ -47,6 +47,8 @@ typedef struct {
 static void  *g_initrd_data = NULL;
 static UINTN  g_initrd_size = 0;
 
+static efi_file_buffer_t *g_prefetch_initrd = NULL;
+
 static EFI_STATUS EFIAPI initrd_load_file(visor_lf2_protocol_t *This,
                                           EFI_DEVICE_PATH_PROTOCOL *FilePath,
                                           BOOLEAN BootPolicy, UINTN *BufferSize, VOID *Buffer) {
@@ -396,6 +398,13 @@ static void free_file_buffer_wipe(efi_file_buffer_t *buf) {
 static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive) {
     if (sensitive) free_file_buffer_wipe(buf);
     else free_file_buffer(buf);
+}
+
+static void drop_pending_prefetch_initrd(int sensitive) {
+    if (g_prefetch_initrd) {
+        free_file_buffer_maybe_wipe(g_prefetch_initrd, sensitive);
+        g_prefetch_initrd = NULL;
+    }
 }
 
 static int entry_file_path_exists(CHAR16 *path, CHAR16 *uuid) {
@@ -915,12 +924,27 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     efi_log(L"boot: loading kernel/image file");
     efi_log(entry->kernel_path);
     CHAR16 *kernel_load_path = entry->kernel_path;
-    efi_file_buffer_t *kernel_buf = load_entry_file(entry->kernel_path,
-                                                    entry->uuid,
-                                                    entry->hp_volume,
-                                                    entry->encrypted,
-                                                    entry->decrypt_password,
-                                                    &kernel_load_path);
+    efi_file_buffer_t *kernel_buf = NULL;
+    if (!entry->hp_volume && !entry->encrypted &&
+        efi_prefetch_matches(entry->kernel_path, entry->initrd_path)) {
+        efi_file_buffer_t *pf_initrd = NULL;
+        if (efi_prefetch_take(&kernel_buf, &pf_initrd)) {
+            if (g_prefetch_initrd) {
+                free_file_buffer_maybe_wipe(g_prefetch_initrd, entry->initrd_encrypted);
+                g_prefetch_initrd = NULL;
+            }
+            if (pf_initrd && entry->initrd_path && entry->initrd_path[0])
+                g_prefetch_initrd = pf_initrd;
+            efi_log(L"boot: using kernel pre-fetched during the menu countdown");
+        }
+    }
+    if (!kernel_buf)
+        kernel_buf = load_entry_file(entry->kernel_path,
+                                     entry->uuid,
+                                     entry->hp_volume,
+                                     entry->encrypted,
+                                     entry->decrypt_password,
+                                     &kernel_load_path);
     if (!kernel_buf) {
         efi_log(L"ERROR: kernel file not found or unreadable");
         efi_print(L"Failed to load kernel\r\n");
@@ -931,6 +955,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     kernel_size = kernel_buf->size;
 
     if (!visor_hash_ok(entry, kernel_data, kernel_size)) {
+        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -941,6 +966,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     if (shim == 0) {
         efi_log(L"ERROR: SHIM_LOCK verification failed - refusing to boot image");
         efi_print(L"Secure Boot: image verification failed\r\n");
+        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -951,6 +977,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     int boot_cmdline_owned = 0;
     status = luks_effective_cmdline(entry, &boot_cmdline, &boot_cmdline_owned);
     if (EFI_ERROR(status)) {
+        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return status;
@@ -981,13 +1008,9 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
         efi_log(L"boot: PE image (Windows/UKI/EFI-stub), LoadImage()");
         EFI_DEVICE_PATH *kernel_dp = NULL;
-        if (entry->has_sha256) {
-            efi_log(L"secure: sha256 pin set - loading the verified buffer, "
-                    L"not re-reading the file by device path");
-            if (!entry->initrd_path && !entry->cmdline)
-                efi_log(L"WARN: a pinned chainload (e.g. bootmgfw.efi) loses its "
-                        L"device path; Windows may not find its BCD");
-        } else if (!entry->encrypted) {
+
+        int dp_may_be_reread = !entry->has_sha256 && !entry->encrypted;
+        if (!entry->encrypted) {
             if (entry->hp_volume) {
                 kernel_dp = efi_file_device_path_on_handle(entry->hp_volume,
                                                            kernel_load_path);
@@ -1001,8 +1024,29 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
                             L"another volume may answer first");
             }
         }
+        if (entry->has_sha256)
+            efi_log(L"secure: sha256 pin set - the verified buffer is what runs, "
+                    L"the file is not read again");
+        if (!kernel_dp && !entry->initrd_path && !entry->cmdline)
+            efi_log(L"WARN: this chainload (e.g. bootmgfw.efi) has no device path; "
+                    L"Windows may not find its BCD");
+
         if (kernel_dp) {
-            status = BS->LoadImage(FALSE, IH, kernel_dp, NULL, 0, &kernel_handle);
+
+            efi_log(L"boot: LoadImage() from the copy already in memory");
+            status = BS->LoadImage(FALSE, IH, kernel_dp, kernel_data, kernel_size,
+                                   &kernel_handle);
+            if (EFI_ERROR(status) && status != EFI_SECURITY_VIOLATION &&
+                status != EFI_ACCESS_DENIED && dp_may_be_reread) {
+
+                CHAR16 m[112];
+                SPrint(m, sizeof(m),
+                       L"WARN: LoadImage(devpath+buffer) failed (status=0x%lx) - "
+                       L"letting the firmware read the file",
+                       (long)status);
+                efi_log(m);
+                status = BS->LoadImage(FALSE, IH, kernel_dp, NULL, 0, &kernel_handle);
+            }
             efi_free_pool(kernel_dp);
             if (EFI_ERROR(status) && status != EFI_SECURITY_VIOLATION &&
                 status != EFI_ACCESS_DENIED) {
@@ -1038,6 +1082,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             }
 #endif
             efi_print(L"LoadImage failed\r\n");
+            drop_pending_prefetch_initrd(entry->initrd_encrypted);
             free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
             if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
             clear_entry_password(entry);
@@ -1060,10 +1105,16 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         if (entry->initrd_path) {
             efi_log(L"linux: loading initrd for stub (LINUX_EFI_INITRD_MEDIA)");
             efi_log(entry->initrd_path);
-            initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
-                                         entry->hp_volume,
-                                         entry->initrd_encrypted,
-                                         entry->decrypt_password, NULL);
+            if (g_prefetch_initrd) {
+                initrd_buf = g_prefetch_initrd;
+                g_prefetch_initrd = NULL;
+                efi_log(L"linux: using initrd pre-fetched during the countdown");
+            } else {
+                initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
+                                             entry->hp_volume,
+                                             entry->initrd_encrypted,
+                                             entry->decrypt_password, NULL);
+            }
             if (initrd_buf && initrd_buf->data && initrd_buf->size) {
                 status = luks_append_keyfile(entry, &initrd_buf);
                 if (EFI_ERROR(status)) {
