@@ -38,12 +38,6 @@ static void start_prefetch_for_entry(boot_entry_t *e) {
     prefetch_pending = 1;
 }
 
-static void do_prefetch_step(void) {
-    if (!prefetch_pending) return;
-    prefetch_pending = 0;
-    efi_prefetch_begin(prefetch_kpath, prefetch_ipath, prefetch_uuid);
-}
-
 static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
                            UINTN *first_new) {
     config_t *cfg = (config_t*)ctx;
@@ -66,7 +60,14 @@ static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
         }
     }
 
-    if (prefetch_pending) do_prefetch_step();
+    if (prefetch_pending && !fs_warmup_pending) {
+        prefetch_pending = 0;
+        if (!efi_prefetch_begin(prefetch_kpath, prefetch_ipath, prefetch_uuid)) {
+            int retry = menu_gui && menu_gui->timeout_active && menu_gui->timeout > 0;
+            if (retry) prefetch_pending = 1;
+            efi_log(L"prefetch: volume not ready yet - will try again while the menu counts down");
+        }
+    }
 
     if (!cfg->hotplug) return 0;
     int mask = config_hotplug_poll(cfg, first_new);

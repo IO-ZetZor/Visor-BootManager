@@ -668,21 +668,21 @@ void efi_prefetch_cancel(void) {
     if (g_pf_iuid) { efi_free_pool(g_pf_iuid); g_pf_iuid = NULL; }
 }
 
-void efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid) {
+int efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid) {
     efi_prefetch_cancel();
-    if (!kernel_path || !kernel_path[0]) return;
+    if (!kernel_path || !kernel_path[0]) return 0;
 
     CHAR16 nbuf[NORM_PATH_MAX];
     CHAR16 *kp = collapse_backslashes(kernel_path, nbuf, NORM_PATH_MAX);
-    if (!kp) return;
+    if (!kp) return 0;
 
     g_pf_kuid = efi_allocate_pool((efi_strlen16(kp) + 1) * sizeof(CHAR16));
-    if (!g_pf_kuid) return;
+    if (!g_pf_kuid) return 0;
     efi_strcpy16(g_pf_kuid, kp);
 
     if (initrd_path && initrd_path[0]) {
         g_pf_iuid = efi_allocate_pool((efi_strlen16(initrd_path) + 1) * sizeof(CHAR16));
-        if (!g_pf_iuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; return; }
+        if (!g_pf_iuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; return 0; }
         efi_strcpy16(g_pf_iuid, initrd_path);
     }
 
@@ -693,12 +693,13 @@ void efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid) 
 
     if (!g_pf_kernel && !g_pf_initrd) {
         efi_prefetch_cancel();
-        return;
+        return 0;
     }
     if (g_pf_kernel)
         efi_log(L"prefetch: kernel read ahead during the menu countdown");
     if (g_pf_initrd)
         efi_log(L"prefetch: initrd read ahead during the menu countdown");
+    return 1;
 }
 
 int efi_prefetch_matches(CHAR16 *kernel_path, CHAR16 *initrd_path) {

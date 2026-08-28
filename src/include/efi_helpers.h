@@ -50,7 +50,7 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path);
 efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid);
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path);
 
-void efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid);
+int  efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid);
 void efi_prefetch_cancel(void);
 int  efi_prefetch_matches(CHAR16 *kernel_path, CHAR16 *initrd_path);
 int  efi_prefetch_take(efi_file_buffer_t **kernel, efi_file_buffer_t **initrd);
