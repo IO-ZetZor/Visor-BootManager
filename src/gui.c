@@ -2936,6 +2936,23 @@ static void ss_transition_to_menu(gui_state_t *state, int was_blank) {
     if (state->cursor_active) cursor_overlay(state);
 }
 
+static void draw_hp_scan_overlay(gui_state_t *state) {
+    UINTN W = state->screen_width, H = state->screen_height;
+    fill_rect_alpha(state, 0, 0, (INTN)W, (INTN)H, COLOR_BLACK, 150);
+
+    INTN bw = (INTN)(W * 7 / 10), bx = (INTN)((W - (UINTN)bw) / 2);
+    INTN bh = (INTN)(state->name_size ? state->name_size : 26) * 3 + 30;
+    INTN by = (INTN)((H - (UINTN)bh) / 2);
+    fill_round_rect(state, bx, by, bw, bh,
+                    state->box_radius ? (INTN)state->box_radius : 14,
+                    COLOR_BLACK, 215);
+
+    CHAR16 msg[] = L"Scanning USB drive...";
+    UINTN th = state->name_size ? state->name_size : 26;
+    if (th < 22) th = 22;
+    draw_text_centered_px(state, msg, bx, (UINTN)bw, by + 14, COLOR_WHITE, th);
+}
+
 void gui_draw_menu(gui_state_t *state, int partial) {
 
     layout_power(state);
@@ -2955,6 +2972,9 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         draw_header(state);
 
         draw_power_actions(state, -1, 0);
+
+        if (state->hp_scanning)
+            draw_hp_scan_overlay(state);
 
         if (state->scene_cache) {
             CopyMem(state->scene_cache, state->backbuffer, px * sizeof(UINT32));
@@ -4121,8 +4141,14 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 boot_entry_t *head = state->entries;
                 UINTN cnt = state->entry_count;
                 UINTN first = state->entry_count;
+
+                state->hp_scanning = 1;
+                gui_draw_menu(state, 0);
+                gui_present(state);
+
                 int mask = state->hotplug_poll(state->hotplug_ctx,
                                                &head, &cnt, &first);
+                state->hp_scanning = 0;
                 if (mask == 1 && cnt > state->entry_count) {
                     gui_entries_added(state, head, cnt, first);
                 } else if (mask == 2) {
@@ -4136,10 +4162,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
                     if (state->selected >= cnt && cnt)
                         state->selected = cnt - 1;
                 }
-                if (mask) {
-                    need_redraw = 1;
-                    full_redraw = 1;
-                }
+                need_redraw = 1;
+                full_redraw = 1;
             }
         }
 

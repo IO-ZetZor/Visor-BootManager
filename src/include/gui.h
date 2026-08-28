@@ -337,6 +337,7 @@ typedef struct gui_state {
                           UINTN *first_new);
     void   *hotplug_ctx;
     UINT64  hp_last_ms;
+    int     hp_scanning;
     int     hp_anim;
     int     hp_frame;
     UINTN   hp_first;
