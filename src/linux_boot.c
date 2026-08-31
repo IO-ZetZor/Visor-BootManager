@@ -97,13 +97,19 @@ static void initrd_unregister(EFI_HANDLE h) {
     g_initrd_size = 0;
 }
 
+typedef struct {
+    EFI_HANDLE volume;
+    EFI_FILE_PROTOCOL *root;
+} entry_volume_t;
+
 #if defined(__x86_64__)
 
 static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive);
 static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
                                            EFI_HANDLE volume,
                                            int encrypted, CHAR16 *password,
-                                           CHAR16 **resolved_path);
+                                           CHAR16 **resolved_path,
+                                           entry_volume_t *keep);
 static void clear_entry_password(boot_entry_t *entry);
 static EFI_STATUS luks_append_keyfile(boot_entry_t *entry,
                                       efi_file_buffer_t **buf_io);
@@ -304,7 +310,7 @@ static EFI_STATUS linux_raw_handover(boot_entry_t *entry, EFI_SYSTEM_TABLE *st,
         initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
                                      entry->hp_volume,
                                      entry->initrd_encrypted,
-                                     entry->decrypt_password, NULL);
+                                     entry->decrypt_password, NULL, NULL);
         if (!initrd_buf) {
             status = (entry->initrd_encrypted || entry->luks)
                 ? EFI_SECURITY_VIOLATION : EFI_NOT_FOUND;
@@ -398,61 +404,98 @@ static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive) {
     else free_file_buffer(buf);
 }
 
-static int entry_file_path_exists(CHAR16 *path, CHAR16 *uuid) {
-    efi_file_t *file = efi_fopen_uuid(path, uuid);
-    if (!file) return 0;
-    efi_fclose(file);
-    return 1;
+static void entry_volume_close(entry_volume_t *keep) {
+    if (!keep || !keep->root) return;
+    keep->root->Close(keep->root);
+    keep->root = NULL;
+    keep->volume = NULL;
+}
+
+static void entry_volume_keep(entry_volume_t *keep, EFI_HANDLE volume,
+                              EFI_FILE_PROTOCOL *root) {
+    if (!root) return;
+    if (!keep || keep->root) {
+        root->Close(root);
+        return;
+    }
+    keep->volume = volume;
+    keep->root = root;
+}
+
+static efi_file_buffer_t* load_from_open_root(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                                              CHAR16 *root_path,
+                                              CHAR16 **resolved_path) {
+    int opened = 0;
+    efi_file_buffer_t *buf = efi_load_file_from_root(root, path, &opened);
+    /* Only fall back to the stripped path when the configured one could not be
+     * opened at all. If it opened and the read failed, a read error must not
+     * silently boot a different file. */
+    if (buf || opened || !root_path) return buf;
+
+    buf = efi_load_file_from_root(root, root_path, NULL);
+    if (buf) {
+        if (resolved_path) *resolved_path = root_path;
+        efi_log(L"boot: resolved path after removing host /boot mount prefix");
+        efi_log(root_path);
+    }
+    return buf;
 }
 
 static efi_file_buffer_t* load_entry_file(CHAR16 *path, CHAR16 *uuid,
                                           EFI_HANDLE volume,
                                           int encrypted, CHAR16 *password,
-                                          CHAR16 **resolved_path) {
+                                          CHAR16 **resolved_path,
+                                          entry_volume_t *keep) {
 
     if (resolved_path) *resolved_path = path;
     CHAR16 *root_path = visor_path_without_boot_mount(path);
 
     efi_file_buffer_t *buf = NULL;
-    if (volume) {
-        buf = efi_load_file_on_handle(volume, path);
-        if (!buf && root_path) {
-            buf = efi_load_file_on_handle(volume, root_path);
-            if (buf) {
-                if (resolved_path) *resolved_path = root_path;
-                efi_log(L"boot: resolved path after removing host /boot mount prefix");
-                efi_log(root_path);
-            }
-        }
+
+    if (keep && keep->root) {
+        buf = load_from_open_root(keep->root, path, root_path, resolved_path);
         if (buf) {
-            efi_log(L"boot: file loaded from the volume this entry was detected on");
+            efi_log(L"boot: file read from the volume already open for this entry");
             goto have_buffer;
+        }
+        efi_log(L"WARN: file not on the volume the kernel came from - searching by path");
+    }
+
+    if (volume) {
+        EFI_FILE_PROTOCOL *root = efi_open_volume_root(volume);
+        if (root) {
+            buf = load_from_open_root(root, path, root_path, resolved_path);
+            if (buf) {
+                efi_log(L"boot: file loaded from the volume this entry was detected on");
+                entry_volume_keep(keep, volume, root);
+                goto have_buffer;
+            }
+            root->Close(root);
         }
         efi_log(L"WARN: file not found on the entry's own volume - searching by path");
     }
 
-    buf = efi_load_file_uuid(path, uuid);
-
-    if (!buf && root_path && !entry_file_path_exists(path, uuid)) {
-        buf = efi_load_file_uuid(root_path, uuid);
-        if (buf) {
-            if (resolved_path) *resolved_path = root_path;
-            efi_log(L"boot: resolved path after removing host /boot mount prefix");
-            efi_log(root_path);
+    for (int pass = 0; pass < 2 && !buf; pass++) {
+        CHAR16 *want = (pass == 0) ? uuid : NULL;
+        if (pass == 1) {
+            if (!uuid || !uuid[0]) break;
+            efi_log(L"WARN: file not found on partition uuid= - searching all volumes");
         }
-    }
 
-    if (!buf && uuid && uuid[0]) {
-        efi_log(L"WARN: file not found on partition uuid= - searching all volumes");
-        buf = efi_load_file(path);
-        if (!buf && root_path && !entry_file_path_exists(path, NULL)) {
-            buf = efi_load_file(root_path);
+        EFI_HANDLE found_vol = NULL;
+        EFI_FILE_PROTOCOL *found_root = NULL;
+        int opened = 0;
+        buf = efi_load_file_keep_volume(path, want, &found_vol, &found_root, &opened);
+        if (!buf && !opened && root_path) {
+            buf = efi_load_file_keep_volume(root_path, want, &found_vol, &found_root, NULL);
             if (buf) {
                 if (resolved_path) *resolved_path = root_path;
                 efi_log(L"boot: resolved path after removing host /boot mount prefix");
                 efi_log(root_path);
             }
         }
+        if (buf) entry_volume_keep(keep, found_vol, found_root);
+        else if (found_root) found_root->Close(found_root);
     }
 
 have_buffer:
@@ -914,18 +957,20 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
     efi_log(L"boot: loading kernel/image file");
     efi_log(entry->kernel_path);
+    UINTN volume_opens_at_handoff = efi_volume_open_count();
     CHAR16 *kernel_load_path = entry->kernel_path;
-    efi_file_buffer_t *kernel_buf = NULL;
-    if (!kernel_buf)
-        kernel_buf = load_entry_file(entry->kernel_path,
-                                     entry->uuid,
-                                     entry->hp_volume,
-                                     entry->encrypted,
-                                     entry->decrypt_password,
-                                     &kernel_load_path);
+    entry_volume_t entry_vol = { NULL, NULL };
+    efi_file_buffer_t *kernel_buf = load_entry_file(entry->kernel_path,
+                                                    entry->uuid,
+                                                    entry->hp_volume,
+                                                    entry->encrypted,
+                                                    entry->decrypt_password,
+                                                    &kernel_load_path,
+                                                    &entry_vol);
     if (!kernel_buf) {
         efi_log(L"ERROR: kernel file not found or unreadable");
         efi_print(L"Failed to load kernel\r\n");
+        entry_volume_close(&entry_vol);
         clear_entry_password(entry);
         return EFI_NOT_FOUND;
     }
@@ -933,6 +978,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     kernel_size = kernel_buf->size;
 
     if (!visor_hash_ok(entry, kernel_data, kernel_size)) {
+        entry_volume_close(&entry_vol);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -943,6 +989,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     if (shim == 0) {
         efi_log(L"ERROR: SHIM_LOCK verification failed - refusing to boot image");
         efi_print(L"Secure Boot: image verification failed\r\n");
+        entry_volume_close(&entry_vol);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -953,6 +1000,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     int boot_cmdline_owned = 0;
     status = luks_effective_cmdline(entry, &boot_cmdline, &boot_cmdline_owned);
     if (EFI_ERROR(status)) {
+        entry_volume_close(&entry_vol);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return status;
@@ -986,7 +1034,12 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
 
         int dp_may_be_reread = !entry->has_sha256 && !entry->encrypted;
         if (!entry->encrypted) {
-            if (entry->hp_volume) {
+            if (entry_vol.volume) {
+                kernel_dp = efi_make_file_path(entry_vol.volume, kernel_load_path);
+                if (kernel_dp)
+                    efi_log(L"boot: LoadImage() pinned to the volume the kernel was read from");
+            }
+            if (!kernel_dp && entry->hp_volume) {
                 kernel_dp = efi_file_device_path_on_handle(entry->hp_volume,
                                                            kernel_load_path);
                 if (kernel_dp)
@@ -1057,6 +1110,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             }
 #endif
             efi_print(L"LoadImage failed\r\n");
+            entry_volume_close(&entry_vol);
             free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
             if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
             clear_entry_password(entry);
@@ -1082,10 +1136,12 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
                                          entry->hp_volume,
                                          entry->initrd_encrypted,
-                                         entry->decrypt_password, NULL);
+                                         entry->decrypt_password, NULL,
+                                         &entry_vol);
             if (initrd_buf && initrd_buf->data && initrd_buf->size) {
                 status = luks_append_keyfile(entry, &initrd_buf);
                 if (EFI_ERROR(status)) {
+                    entry_volume_close(&entry_vol);
                     free_file_buffer_maybe_wipe(initrd_buf, entry->initrd_encrypted || entry->luks);
                     if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
                     clear_entry_password(entry);
@@ -1102,6 +1158,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
                     if (entry->luks) {
                         efi_log(L"ERROR: luks=1 requires initrd LoadFile2 registration");
                         efi_print(L"LUKS initrd setup failed\r\n");
+                        entry_volume_close(&entry_vol);
                         free_file_buffer_maybe_wipe(initrd_buf, entry->initrd_encrypted || entry->luks);
                         if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
                         clear_entry_password(entry);
@@ -1111,6 +1168,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             } else {
                 if (entry->initrd_encrypted || entry->luks) {
                     efi_log(L"ERROR: required initrd failed - refusing to boot");
+                    entry_volume_close(&entry_vol);
                     free_file_buffer_maybe_wipe(initrd_buf, entry->initrd_encrypted || entry->luks);
                     if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
                     clear_entry_password(entry);
@@ -1124,6 +1182,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             efi_log(L"linux: building supplemental LUKS keyfile initrd for PE/UKI");
             status = luks_build_keyfile_archive(entry, &initrd_buf);
             if (EFI_ERROR(status)) {
+                entry_volume_close(&entry_vol);
                 if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
                 clear_entry_password(entry);
                 return status;
@@ -1132,6 +1191,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             if (!initrd_handle) {
                 efi_log(L"ERROR: could not install supplemental LUKS initrd LoadFile2 protocol");
                 efi_print(L"LUKS initrd setup failed\r\n");
+                entry_volume_close(&entry_vol);
                 free_file_buffer_wipe(initrd_buf);
                 if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
                 clear_entry_password(entry);
@@ -1145,6 +1205,12 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             initrd_handle ? 1 : 0,
             initrd_buf ? (int)initrd_buf->size : 0);
           efi_log(m); }
+        { CHAR16 m[80]; SPrint(m, sizeof(m),
+            L"linux: %d volume open(s) for this boot, %d this session",
+            (int)(efi_volume_open_count() - volume_opens_at_handoff),
+            (int)efi_volume_open_count());
+          efi_log(m); }
+        entry_volume_close(&entry_vol);
         efi_log(L"linux: StartImage() - handing control to kernel stub");
         efi_log_close();
         clear_entry_password(entry);
@@ -1164,12 +1230,14 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     if (sb && shim != 1) {
         efi_log(L"ERROR: Secure Boot on but raw kernel is unverifiable (no SHIM_LOCK) - refusing");
         efi_print(L"Secure Boot: refusing unverified kernel\r\n");
+        entry_volume_close(&entry_vol);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
     }
 
+    entry_volume_close(&entry_vol);
     status = linux_raw_handover(entry, st, kernel_buf, boot_cmdline, NULL);
     if (!visor_boot_services_active) return status;
     efi_print(L"Raw kernel handover failed\r\n");
@@ -1181,6 +1249,7 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     (void)sb; (void)st;
     efi_log(L"ERROR: image is not an EFI application; only EFI-stub kernels/UKIs are supported");
     efi_print(L"Not an EFI-stub kernel (use a UKI or stub kernel)\r\n");
+    entry_volume_close(&entry_vol);
     free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
     if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
     clear_entry_password(entry);

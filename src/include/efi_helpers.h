@@ -15,6 +15,7 @@ CHAR16* efi_strchr(CHAR16 *s, CHAR16 c);
 typedef struct {
     EFI_FILE_PROTOCOL *root;
     EFI_FILE_PROTOCOL *handle;
+    EFI_HANDLE volume;
 } efi_file_t;
 
 EFI_FILE_PROTOCOL* efi_boot_volume_root(void);
@@ -49,6 +50,14 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path);
 
 efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid);
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path);
+
+EFI_FILE_PROTOCOL* efi_open_volume_root(EFI_HANDLE volume);
+efi_file_buffer_t* efi_load_file_keep_volume(CHAR16 *path, CHAR16 *uuid,
+                                             EFI_HANDLE *volume_out,
+                                             EFI_FILE_PROTOCOL **root_out,
+                                             int *opened_out);
+efi_file_buffer_t* efi_load_file_from_root(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                                           int *opened_out);
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
 
@@ -86,6 +95,10 @@ void efi_log_begin(void);
 void efi_log_rotate(void);
 
 void efi_log_close(void);
+
+/* Number of OpenVolume calls issued so far. Logged once at handoff; each open
+ * can cost tens of seconds on third-party EFI filesystem drivers. */
+UINTN efi_volume_open_count(void);
 
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count);
 

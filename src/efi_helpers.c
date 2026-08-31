@@ -19,12 +19,23 @@ static EFI_HANDLE boot_device_handle(void) {
     return cached;
 }
 
+/* Counts every OpenVolume we issue. On volumes served by third-party EFI FS
+ * drivers a single open can cost tens of seconds, so the count is the metric
+ * that matters when diagnosing slow boots. Never log from the open path
+ * itself: the logger opens a volume too, and would recurse. */
+static UINTN g_volume_opens = 0;
+
+UINTN efi_volume_open_count(void) {
+    return g_volume_opens;
+}
+
 static EFI_FILE_PROTOCOL *open_root_on_handle(EFI_HANDLE h) {
     if (!h) return NULL;
     EFI_FILE_IO_INTERFACE *io = NULL;
     if (EFI_ERROR(BS->HandleProtocol(h, &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
         return NULL;
     EFI_FILE_PROTOCOL *root = NULL;
+    g_volume_opens++;
     if (EFI_ERROR(io->OpenVolume(io, &root))) return NULL;
     return root;
 }
@@ -75,25 +86,6 @@ UINTN efi_strlen16(CHAR16 *s) {
     UINTN n = 0;
     while (s[n]) n++;
     return n;
-}
-
-void efi_strcpy16(CHAR16 *dst, CHAR16 *src) {
-    if (!dst || !src) return;
-    while ((*dst++ = *src++) != 0) ;
-}
-
-static CHAR16 efi_ci_char(CHAR16 c) {
-    if (c >= L'a' && c <= L'z') return c - (L'a' - L'A');
-    return c;
-}
-
-int efi_strcmp16_ci(CHAR16 *s1, CHAR16 *s2) {
-    if (!s1 || !s2) return 1;
-    while (*s1 && *s2 && efi_ci_char(*s1) == efi_ci_char(*s2)) {
-        s1++;
-        s2++;
-    }
-    return efi_ci_char(*s1) - efi_ci_char(*s2);
 }
 
 CHAR16* efi_strchr(CHAR16 *s, CHAR16 c) {
@@ -284,6 +276,7 @@ EFI_DEVICE_PATH* efi_file_device_path(CHAR16 *path, CHAR16 *partition_uuid) {
             continue;
 
         EFI_FILE_PROTOCOL *r = NULL;
+        g_volume_opens++;
         if (EFI_ERROR(io->OpenVolume(io, &r)) || !r)
             continue;
 
@@ -340,6 +333,7 @@ static efi_file_t* efi_fopen_inner(CHAR16 *path, CHAR16 *uuid) {
     if (!file) return NULL;
     file->root = NULL;
     file->handle = NULL;
+    file->volume = NULL;
 
     EFI_HANDLE boot_handle = boot_device_handle();
     if (efi_handle_matches_partition_uuid(boot_handle, uuid)) {
@@ -347,6 +341,7 @@ static efi_file_t* efi_fopen_inner(CHAR16 *path, CHAR16 *uuid) {
         if (root) {
             if (!EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
                 file->root = root;
+                file->volume = boot_handle;
                 return file;
             }
             root->Close(root);
@@ -365,10 +360,12 @@ static efi_file_t* efi_fopen_inner(CHAR16 *path, CHAR16 *uuid) {
                     &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io)
                 continue;
             EFI_FILE_PROTOCOL *r = NULL;
+            g_volume_opens++;
             if (EFI_ERROR(io->OpenVolume(io, &r)) || !r)
                 continue;
             if (!EFI_ERROR(r->Open(r, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
                 file->root = r;
+                file->volume = handles[i];
                 efi_free_pool(handles);
                 return file;
             }
@@ -648,6 +645,58 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return efi_load_file_uuid(path, NULL);
 }
 
+EFI_FILE_PROTOCOL* efi_open_volume_root(EFI_HANDLE volume) {
+    return open_root_on_handle(volume);
+}
+
+efi_file_buffer_t* efi_load_file_keep_volume(CHAR16 *path, CHAR16 *uuid,
+                                             EFI_HANDLE *volume_out,
+                                             EFI_FILE_PROTOCOL **root_out,
+                                             int *opened_out) {
+    if (volume_out) *volume_out = NULL;
+    if (root_out) *root_out = NULL;
+    if (opened_out) *opened_out = 0;
+
+    efi_file_t *file = efi_fopen_uuid(path, uuid);
+    if (!file) return NULL;
+    if (opened_out) *opened_out = 1;
+
+    EFI_HANDLE volume = file->volume;
+    EFI_FILE_PROTOCOL *root = file->root;
+    file->root = NULL;
+
+    efi_file_buffer_t *buf = efi_read_open_file(file);
+    if (!buf) {
+        if (root) root->Close(root);
+        return NULL;
+    }
+    if (volume_out) *volume_out = volume;
+    if (root_out) *root_out = root;
+    else if (root) root->Close(root);
+    return buf;
+}
+
+efi_file_buffer_t* efi_load_file_from_root(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                                           int *opened_out) {
+    if (opened_out) *opened_out = 0;
+    if (!root || !path) return NULL;
+    CHAR16 nbuf[NORM_PATH_MAX];
+    path = collapse_backslashes(path, nbuf, NORM_PATH_MAX);
+
+    efi_file_t *file = efi_allocate_pool(sizeof(efi_file_t));
+    if (!file) return NULL;
+    file->root = NULL;
+    file->handle = NULL;
+    file->volume = NULL;
+    if (EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0)) ||
+        !file->handle) {
+        efi_free_pool(file);
+        return NULL;
+    }
+    if (opened_out) *opened_out = 1;
+    return efi_read_open_file(file);
+}
+
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     if (!volume) return NULL;
     CHAR16 nbuf[NORM_PATH_MAX];
@@ -660,6 +709,7 @@ efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     if (!file) { root->Close(root); return NULL; }
     file->root = root;
     file->handle = NULL;
+    file->volume = volume;
     if (EFI_ERROR(root->Open(root, &file->handle, path, EFI_FILE_MODE_READ, 0))) {
         root->Close(root);
         efi_free_pool(file);
@@ -677,6 +727,7 @@ int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
         EFI_FILE_IO_INTERFACE *io = NULL;
         if (EFI_ERROR(BS->HandleProtocol(h[i], &gEfiSimpleFileSystemProtocolGuid, (void**)&io)) || !io) continue;
         EFI_FILE_PROTOCOL *root = NULL;
+        g_volume_opens++;
         if (EFI_ERROR(io->OpenVolume(io, &root)) || !root) continue;
         EFI_FILE_PROTOCOL *fh = NULL;
         if (!EFI_ERROR(root->Open(root, &fh, oldp, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && fh) {
@@ -915,6 +966,7 @@ static EFI_FILE_PROTOCOL *log_open_root(void) {
     for (UINTN i = 0; i < count; i++) {
         if (!EFI_ERROR(BS->HandleProtocol(handles[i],
                 &gEfiSimpleFileSystemProtocolGuid, (void**)&io))) {
+            g_volume_opens++;
             if (!EFI_ERROR(io->OpenVolume(io, &root))) break;
         }
         io = NULL; root = NULL;
