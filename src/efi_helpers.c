@@ -648,88 +648,6 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path) {
     return efi_load_file_uuid(path, NULL);
 }
 
-static efi_file_buffer_t *g_pf_kernel = NULL;
-static efi_file_buffer_t *g_pf_initrd = NULL;
-static CHAR16 *g_pf_kuid = NULL;
-static CHAR16 *g_pf_iuid = NULL;
-
-static void prefetch_buf_free(efi_file_buffer_t **b) {
-    if (*b) {
-        if ((*b)->data) efi_free_pool((*b)->data);
-        efi_free_pool(*b);
-        *b = NULL;
-    }
-}
-
-void efi_prefetch_cancel(void) {
-    prefetch_buf_free(&g_pf_kernel);
-    prefetch_buf_free(&g_pf_initrd);
-    if (g_pf_kuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; }
-    if (g_pf_iuid) { efi_free_pool(g_pf_iuid); g_pf_iuid = NULL; }
-}
-
-int efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid) {
-    efi_prefetch_cancel();
-    if (!kernel_path || !kernel_path[0]) return 0;
-
-    CHAR16 nbuf[NORM_PATH_MAX];
-    CHAR16 *kp = collapse_backslashes(kernel_path, nbuf, NORM_PATH_MAX);
-    if (!kp) return 0;
-
-    g_pf_kuid = efi_allocate_pool((efi_strlen16(kp) + 1) * sizeof(CHAR16));
-    if (!g_pf_kuid) return 0;
-    efi_strcpy16(g_pf_kuid, kp);
-
-    if (initrd_path && initrd_path[0]) {
-        g_pf_iuid = efi_allocate_pool((efi_strlen16(initrd_path) + 1) * sizeof(CHAR16));
-        if (!g_pf_iuid) { efi_free_pool(g_pf_kuid); g_pf_kuid = NULL; return 0; }
-        efi_strcpy16(g_pf_iuid, initrd_path);
-    }
-
-    g_pf_kernel = efi_load_file_uuid(kernel_path, uuid);
-    if (g_pf_initrd) prefetch_buf_free(&g_pf_initrd);
-    if (g_pf_iuid)
-        g_pf_initrd = efi_load_file_uuid(initrd_path, uuid);
-
-    if (!g_pf_kernel && !g_pf_initrd) {
-        efi_prefetch_cancel();
-        return 0;
-    }
-    if (g_pf_kernel)
-        efi_log(L"prefetch: kernel read ahead during the menu countdown");
-    if (g_pf_initrd)
-        efi_log(L"prefetch: initrd read ahead during the menu countdown");
-    return 1;
-}
-
-int efi_prefetch_matches(CHAR16 *kernel_path, CHAR16 *initrd_path) {
-    if (!g_pf_kernel || !g_pf_kuid || !kernel_path) return 0;
-    CHAR16 nbuf[NORM_PATH_MAX];
-    CHAR16 *kp = collapse_backslashes(kernel_path, nbuf, NORM_PATH_MAX);
-    if (!kp || efi_strcmp16_ci(kp, g_pf_kuid) != 0) return 0;
-    if (initrd_path && initrd_path[0]) {
-        if (!g_pf_iuid || !g_pf_initrd) return 0;
-        CHAR16 ibuf[NORM_PATH_MAX];
-        CHAR16 *ip = collapse_backslashes(initrd_path, ibuf, NORM_PATH_MAX);
-        if (!ip || efi_strcmp16_ci(ip, g_pf_iuid) != 0) return 0;
-    }
-    return 1;
-}
-
-int efi_prefetch_take(efi_file_buffer_t **kernel, efi_file_buffer_t **initrd) {
-    if (kernel) *kernel = NULL;
-    if (initrd) *initrd = NULL;
-    if (!g_pf_kernel) {
-        efi_prefetch_cancel();
-        return 0;
-    }
-    if (kernel) *kernel = g_pf_kernel;
-    if (initrd) *initrd = g_pf_initrd;
-    g_pf_kernel = NULL;
-    g_pf_initrd = NULL;
-    return 1;
-}
-
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     if (!volume) return NULL;
     CHAR16 nbuf[NORM_PATH_MAX];
@@ -894,18 +812,6 @@ void efi_start_deferred_drivers(void) {
         L"drivers: deferred start complete (probed %d of %d block device(s))",
         (int)connected, (int)g_probe_n);
       efi_log(m); }
-}
-
-int efi_fs_warmup_step(CHAR16 *prefer_uuid) {
-    if (!g_deferred_started) {
-        if (g_deferred_count == 0) {
-            g_deferred_started = 1;
-        } else {
-            efi_start_deferred_images();
-            return 1;
-        }
-    }
-    return efi_connect_next_block(prefer_uuid);
 }
 
 void efi_load_fs_drivers(void) {

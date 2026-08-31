@@ -47,8 +47,6 @@ typedef struct {
 static void  *g_initrd_data = NULL;
 static UINTN  g_initrd_size = 0;
 
-static efi_file_buffer_t *g_prefetch_initrd = NULL;
-
 static EFI_STATUS EFIAPI initrd_load_file(visor_lf2_protocol_t *This,
                                           EFI_DEVICE_PATH_PROTOCOL *FilePath,
                                           BOOLEAN BootPolicy, UINTN *BufferSize, VOID *Buffer) {
@@ -398,13 +396,6 @@ static void free_file_buffer_wipe(efi_file_buffer_t *buf) {
 static void free_file_buffer_maybe_wipe(efi_file_buffer_t *buf, int sensitive) {
     if (sensitive) free_file_buffer_wipe(buf);
     else free_file_buffer(buf);
-}
-
-static void drop_pending_prefetch_initrd(int sensitive) {
-    if (g_prefetch_initrd) {
-        free_file_buffer_maybe_wipe(g_prefetch_initrd, sensitive);
-        g_prefetch_initrd = NULL;
-    }
 }
 
 static int entry_file_path_exists(CHAR16 *path, CHAR16 *uuid) {
@@ -925,19 +916,6 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     efi_log(entry->kernel_path);
     CHAR16 *kernel_load_path = entry->kernel_path;
     efi_file_buffer_t *kernel_buf = NULL;
-    if (!entry->hp_volume && !entry->encrypted &&
-        efi_prefetch_matches(entry->kernel_path, entry->initrd_path)) {
-        efi_file_buffer_t *pf_initrd = NULL;
-        if (efi_prefetch_take(&kernel_buf, &pf_initrd)) {
-            if (g_prefetch_initrd) {
-                free_file_buffer_maybe_wipe(g_prefetch_initrd, entry->initrd_encrypted);
-                g_prefetch_initrd = NULL;
-            }
-            if (pf_initrd && entry->initrd_path && entry->initrd_path[0])
-                g_prefetch_initrd = pf_initrd;
-            efi_log(L"boot: using kernel pre-fetched during the menu countdown");
-        }
-    }
     if (!kernel_buf)
         kernel_buf = load_entry_file(entry->kernel_path,
                                      entry->uuid,
@@ -955,7 +933,6 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     kernel_size = kernel_buf->size;
 
     if (!visor_hash_ok(entry, kernel_data, kernel_size)) {
-        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -966,7 +943,6 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     if (shim == 0) {
         efi_log(L"ERROR: SHIM_LOCK verification failed - refusing to boot image");
         efi_print(L"Secure Boot: image verification failed\r\n");
-        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return EFI_SECURITY_VIOLATION;
@@ -977,7 +953,6 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     int boot_cmdline_owned = 0;
     status = luks_effective_cmdline(entry, &boot_cmdline, &boot_cmdline_owned);
     if (EFI_ERROR(status)) {
-        drop_pending_prefetch_initrd(entry->initrd_encrypted);
         free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
         clear_entry_password(entry);
         return status;
@@ -1082,7 +1057,6 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
             }
 #endif
             efi_print(L"LoadImage failed\r\n");
-            drop_pending_prefetch_initrd(entry->initrd_encrypted);
             free_file_buffer_maybe_wipe(kernel_buf, entry->encrypted);
             if (boot_cmdline_owned) efi_free_pool(boot_cmdline);
             clear_entry_password(entry);
@@ -1105,16 +1079,10 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
         if (entry->initrd_path) {
             efi_log(L"linux: loading initrd for stub (LINUX_EFI_INITRD_MEDIA)");
             efi_log(entry->initrd_path);
-            if (g_prefetch_initrd) {
-                initrd_buf = g_prefetch_initrd;
-                g_prefetch_initrd = NULL;
-                efi_log(L"linux: using initrd pre-fetched during the countdown");
-            } else {
-                initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
-                                             entry->hp_volume,
-                                             entry->initrd_encrypted,
-                                             entry->decrypt_password, NULL);
-            }
+            initrd_buf = load_entry_file(entry->initrd_path, entry->uuid,
+                                         entry->hp_volume,
+                                         entry->initrd_encrypted,
+                                         entry->decrypt_password, NULL);
             if (initrd_buf && initrd_buf->data && initrd_buf->size) {
                 status = luks_append_keyfile(entry, &initrd_buf);
                 if (EFI_ERROR(status)) {

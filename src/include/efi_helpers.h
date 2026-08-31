@@ -50,11 +50,6 @@ efi_file_buffer_t* efi_load_file(CHAR16 *path);
 efi_file_buffer_t* efi_load_file_uuid(CHAR16 *path, CHAR16 *uuid);
 efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path);
 
-int  efi_prefetch_begin(CHAR16 *kernel_path, CHAR16 *initrd_path, CHAR16 *uuid);
-void efi_prefetch_cancel(void);
-int  efi_prefetch_matches(CHAR16 *kernel_path, CHAR16 *initrd_path);
-int  efi_prefetch_take(efi_file_buffer_t **kernel, efi_file_buffer_t **initrd);
-
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
 
 void efi_load_fs_drivers(void);
@@ -65,8 +60,6 @@ int  efi_fs_drivers_pending(void);
 int  efi_fs_probe_exhausted(void);
 
 void efi_start_deferred_drivers(void);
-
-int  efi_fs_warmup_step(CHAR16 *prefer_uuid);
 
 void efi_start_deferred_images(void);
 
