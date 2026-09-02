@@ -4,6 +4,7 @@
 #include "arch.h"
 #include "path_compat.h"
 #include "tcg2.h"
+#include "efi_selfheal.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -1240,7 +1241,8 @@ static int scope_wants_volume(int quick, EFI_HANDLE vol);
 #define MAX_BLS 48
 
 typedef struct {
-    CHAR16 *title, *version, *kernel, *initrd, *options, *machine, *conf;
+    CHAR16 *title, *version, *kernel, *efi, *initrd, *options, *machine, *conf;
+    CHAR16 *arch, *sort_key;
     int tries_left, tries_done, ot_idx;
     EFI_HANDLE volume;
 } bls_rec_t;
@@ -1280,6 +1282,64 @@ static CHAR16* bls_path_dup(CHAR16 *p) {
     for (UINTN i = 0; i < n; i++) o[i] = (p[i] == '/') ? '\\' : p[i];
     o[n] = 0;
     return o;
+}
+
+/* BLS allows multiple initrd/options lines; concatenate in order with space. */
+static void bls_accum(CHAR16 **dst, CHAR16 *val) {
+    if (!val || !val[0]) return;
+    if (!*dst) { *dst = efi_strdup(val); return; }
+    UINTN la = 0; while ((*dst)[la]) la++;
+    UINTN lb = 0; while (val[lb]) lb++;
+    CHAR16 *buf = efi_allocate_pool((la + 1 + lb + 1) * sizeof(CHAR16));
+    if (!buf) return;
+    for (UINTN i = 0; i < la; i++) buf[i] = (*dst)[i];
+    buf[la] = ' ';
+    for (UINTN i = 0; i <= lb; i++) buf[la + 1 + i] = val[i];
+    efi_free_pool(*dst);
+    *dst = buf;
+}
+
+static int wcs16casecmp(CHAR16 *a, CHAR16 *b) {
+    while (*a && *b) {
+        CHAR16 ca = *a, cb = *b;
+        if (ca >= L'A' && ca <= L'Z') ca += 32;
+        if (cb >= L'A' && cb <= L'Z') cb += 32;
+        if (ca != cb) return (int)ca - (int)cb;
+        a++; b++;
+    }
+    return (int)*a - (int)*b;
+}
+
+static int bls_arch_ok(CHAR16 *arch) {
+    if (!arch || !arch[0]) return 1;
+#if defined(__x86_64__)
+    return (wcs16casecmp(arch, L"x64") == 0 ||
+            wcs16casecmp(arch, L"IA32") == 0);
+#elif defined(__aarch64__)
+    return (wcs16casecmp(arch, L"AA64") == 0);
+#elif defined(__riscv)
+    return (wcs16casecmp(arch, L"RISCV64") == 0);
+#else
+    return 1;
+#endif
+}
+
+/* Ordering of deployments within a group:
+ *  - OSTree entries rank by ostree index first (higher = newer = on top)
+ *  - otherwise sort_key decides (alphabetical, entries with sort_key first)
+ *  - ties keep discovery order (smaller scan index first) */
+static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
+    int oa = a->ot_idx, ob = b->ot_idx;
+    if (oa >= 0 || ob >= 0) {
+        if (oa != ob) return oa > ob;
+    }
+    if (a->sort_key && b->sort_key) {
+        int c = efi_strcmp(a->sort_key, b->sort_key);
+        if (c != 0) return c < 0;
+    }
+    if (a->sort_key && !b->sort_key) return 1;
+    if (!a->sort_key && b->sort_key) return 0;
+    return ia < ib;
 }
 
 static void bls_tries(CHAR16 *name, int *left, int *done) {
@@ -1347,7 +1407,7 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
         if (!buf) continue;
 
         bls_rec_t r = {
-            NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, 0, -1, volume
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, -1, 0, -1, volume
         };
         CHAR16 *start = buf;
         while (*start) {
@@ -1359,18 +1419,25 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
             CHAR16 *line = trim(start);
             CHAR16 *v;
             if (line[0] && line[0] != '#') {
-                if      ((v = bls_field(line, L"title")))      { if (!r.title)   r.title   = efi_strdup(v); }
-                else if ((v = bls_field(line, L"version")))    { if (!r.version) r.version = efi_strdup(v); }
-                else if ((v = bls_field(line, L"linux")))      { if (!r.kernel)  r.kernel  = efi_strdup(v); }
-                else if ((v = bls_field(line, L"initrd")))     { if (!r.initrd)  r.initrd  = efi_strdup(v); }
-                else if ((v = bls_field(line, L"options")))    { if (!r.options) r.options = efi_strdup(v); }
-                else if ((v = bls_field(line, L"machine-id"))) { if (!r.machine) r.machine = efi_strdup(v); }
+                if      ((v = bls_field(line, L"title")))         { if (!r.title)   r.title   = efi_strdup(v); }
+                else if ((v = bls_field(line, L"version")))       { if (!r.version) r.version = efi_strdup(v); }
+                else if ((v = bls_field(line, L"linux")))         { if (!r.kernel)  r.kernel  = efi_strdup(v); }
+                else if ((v = bls_field(line, L"efi")))           { if (!r.efi)     r.efi     = efi_strdup(v); }
+                else if ((v = bls_field(line, L"uki")))            { if (!r.efi)     r.efi     = efi_strdup(v); }
+                else if ((v = bls_field(line, L"initrd")))        { bls_accum(&r.initrd, v); }
+                else if ((v = bls_field(line, L"options")))       { bls_accum(&r.options, v); }
+                else if ((v = bls_field(line, L"machine-id")))    { if (!r.machine) r.machine = efi_strdup(v); }
+                else if ((v = bls_field(line, L"architecture")))  { if (!r.arch)    r.arch    = efi_strdup(v); }
+                else if ((v = bls_field(line, L"sort-key")))      { if (!r.sort_key) r.sort_key = efi_strdup(v); }
             }
             start = end + 1;
         }
         efi_free_pool(buf);
 
-        if (r.title && r.kernel) {
+        /* Accept entries with either linux or efi field (BLS spec requires at least one).
+         * EFI-only entries: map efi path -> kernel so visor_boot() chainloads them. */
+        if (!r.kernel && r.efi) { r.kernel = r.efi; r.efi = NULL; }
+        if (r.title && r.kernel && bls_arch_ok(r.arch)) {
             r.conf = efi_strdup(path);
             bls_tries(name, &r.tries_left, &r.tries_done);
             r.ot_idx = bls_ostree_idx(r.title);
@@ -1379,9 +1446,12 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
             if (r.title) efi_free_pool(r.title);
             if (r.version) efi_free_pool(r.version);
             if (r.kernel) efi_free_pool(r.kernel);
+            if (r.efi) efi_free_pool(r.efi);
             if (r.initrd) efi_free_pool(r.initrd);
             if (r.options) efi_free_pool(r.options);
             if (r.machine) efi_free_pool(r.machine);
+            if (r.arch) efi_free_pool(r.arch);
+            if (r.sort_key) efi_free_pool(r.sort_key);
         }
     }
     d->Close(d);
@@ -1419,11 +1489,8 @@ static int bls_detect(config_t *config, int quick) {
 
         for (int a = 1; a < n; a++) {
             int key = idx[a];
-            int ra = recs[key].ot_idx >= 0 ? recs[key].ot_idx : 1000 + key;
             int b = a - 1;
-            while (b >= 0) {
-                int rb = recs[idx[b]].ot_idx >= 0 ? recs[idx[b]].ot_idx : 1000 + idx[b];
-                if (rb <= ra) break;
+            while (b >= 0 && bls_deploy_precedes(&recs[key], &recs[idx[b]], key, idx[b])) {
                 idx[b + 1] = idx[b]; b--;
             }
             idx[b + 1] = key;
@@ -2373,6 +2440,7 @@ int config_early_file_log_enabled(void) {
 static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     if (efi_strcmp(key, L"timeout") == 0) {
         config->timeout = (*value == '-') ? -1 : (INTN)parse_uint(value);
+        config->timeout_set = 1;
     } else if (efi_strcmp(key, L"default") == 0) {
         config->default_entry = (INTN)parse_uint(value);
     } else if (efi_strcmp(key, L"quiet") == 0) {
@@ -2392,6 +2460,26 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->autoboot = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"remember_last") == 0 || efi_strcmp(key, L"remember") == 0) {
         config->remember_last = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"selfheal") == 0) {
+        config->selfheal = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"boot_order") == 0 || efi_strcmp(key, L"selfheal_order") == 0) {
+        if (efi_strcmp(value, L"off") == 0 || efi_strcmp(value, L"no") == 0 ||
+            *value == '0')
+            config->selfheal_order = NVSH_ORDER_OFF;
+        else if (efi_strcmp(value, L"ensure") == 0 || efi_strcmp(value, L"readd") == 0 ||
+                 efi_strcmp(value, L"repair") == 0)
+            config->selfheal_order = NVSH_ORDER_ENSURE;
+        else if (efi_strcmp(value, L"first") == 0 || efi_strcmp(value, L"visor_first") == 0 ||
+                 efi_strcmp(value, L"on") == 0 || efi_strcmp(value, L"yes") == 0 ||
+                 *value == '1')
+            config->selfheal_order = NVSH_ORDER_FIRST;
+        else {
+            CHAR16 d[96];
+            SPrint(d, sizeof(d), L"WARN: invalid boot_order '%s' (off/ensure/first)", value);
+            efi_log(d);
+        }
+    } else if (efi_strcmp(key, L"restore_fallback") == 0) {
+        config->restore_fallback = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"recovery_entries") == 0 || efi_strcmp(key, L"recovery") == 0) {
         config->recovery_entries = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"snapshots") == 0) {
@@ -3525,6 +3613,7 @@ static void snapshots_apply(config_t *config) {
 EFI_STATUS config_parse(config_t *config) {
 
     config->timeout = 5;
+    config->timeout_set = 0;
     config->default_entry = 0;
     config->quiet = 0;
     config->text_menu = 0;
@@ -3536,6 +3625,9 @@ EFI_STATUS config_parse(config_t *config) {
     config->center_info = 0;
     config->box_radius = 0;
     config->remember_last = 0;
+    config->selfheal = 1;
+    config->selfheal_order = NVSH_ORDER_FIRST;
+    config->restore_fallback = 1;
     config->recovery_entries = 0;
     config->snapshots_mode = 1;
     config->autoboot = 0;

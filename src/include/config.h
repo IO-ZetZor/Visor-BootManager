@@ -14,6 +14,7 @@
 
 typedef struct {
     INTN  timeout;
+    int   timeout_set;      /* boot.conf stated timeout= explicitly */
     UINTN default_entry;
     int   quiet;
     int   text_menu;
@@ -25,6 +26,9 @@ typedef struct {
     int   center_info;
     UINTN box_radius;
     int   remember_last;
+    int   selfheal;          /* master switch for the NVRAM/file self-heal pass */
+    int   selfheal_order;    /* NVSH_ORDER_OFF / ENSURE / FIRST */
+    int   restore_fallback;  /* re-copy our binary to \EFI\BOOT\BOOTx64.EFI */
     int   recovery_entries;
     int   snapshots_mode;
     int   mouse;

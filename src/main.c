@@ -9,6 +9,7 @@
 #include "text_menu.h"
 #include "tcg2.h"
 #include "loader_iface.h"
+#include "efi_selfheal.h"
 
 EFI_HANDLE IH;
 
@@ -167,6 +168,17 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         if (loader_pick != (UINTN)-1) config.default_entry = loader_pick;
     } else {
         efi_log(L"main: loader_vars=0 in config - not exporting Loader* variables");
+    }
+
+    if (config.selfheal) {
+        efi_log(L"main: running boot self-heal (NVRAM boot entries + fallback copy)");
+        nvsh_policy_t pol;
+        nvsh_policy_defaults(&pol);
+        pol.order_mode       = config.selfheal_order;
+        pol.restore_fallback = config.restore_fallback;
+        nvram_self_heal(&pol);
+    } else {
+        efi_log(L"main: selfheal=0 in config - boot self-heal disabled");
     }
 
     if (config.text_menu && !text_mode) {

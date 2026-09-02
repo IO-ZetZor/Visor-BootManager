@@ -224,6 +224,11 @@ UINTN loader_apply_overrides(config_t *config, boot_entry_t *entries,
     UINTN pick = (UINTN)-1;
     (void)entry_count;
 
+    /* LoaderConfigTimeoutOneShot is a deliberate, transient request
+     * (systemctl reboot --boot-loader-menu=N), so it always wins.
+     * LoaderConfigTimeout is persistent NVRAM state that another boot loader
+     * may have left behind, so an explicit timeout= in boot.conf beats it -
+     * editing the config file has to be what actually decides the countdown. */
     CHAR16 *t1 = efi_get_loader_var(L"LoaderConfigTimeoutOneShot");
     if (t1) {
         INTN v;
@@ -239,11 +244,18 @@ UINTN loader_apply_overrides(config_t *config, boot_entry_t *entries,
         CHAR16 *t0 = efi_get_loader_var(L"LoaderConfigTimeout");
         if (t0) {
             INTN v;
-            if (timeout_io && efi_parse_loader_timeout(t0, &v)) {
+            if (!timeout_io || !efi_parse_loader_timeout(t0, &v)) {
+                efi_log(L"WARN: LoaderConfigTimeout is not a valid timeout - ignored");
+            } else if (config && config->timeout_set) {
+                CHAR16 m[112];
+                SPrint(m, sizeof(m),
+                       L"loader: LoaderConfigTimeout=%d in NVRAM ignored - "
+                       L"boot.conf sets timeout=%d",
+                       (int)v, (int)config->timeout);
+                efi_log(m);
+            } else {
                 *timeout_io = v;
                 efi_log(L"loader: LoaderConfigTimeout applied");
-            } else {
-                efi_log(L"WARN: LoaderConfigTimeout is not a valid timeout - ignored");
             }
             efi_free_pool(t0);
         }
