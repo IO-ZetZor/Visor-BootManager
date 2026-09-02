@@ -4810,8 +4810,6 @@ boot_entry_t* gui_run(gui_state_t *state) {
                     if (state->selected >= cnt && cnt)
                         state->selected = cnt - 1;
                 }
-                if (mask && !state->gptw_suppressed)
-                    gpt_warn_run(state);
                 need_redraw = 1;
                 full_redraw = 1;
             }
