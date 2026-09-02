@@ -3,6 +3,8 @@
 #include "efi_helpers.h"
 #include "arch.h"
 #include "accent.h"
+#include "capture.h"
+#include "gpt_disk.h"
 #include <efi.h>
 #include <efilib.h>
 
@@ -3606,6 +3608,391 @@ static int editor_key(gui_state_t *state, EFI_INPUT_KEY *key) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* GPT corruption warning modal                                        */
+/* ------------------------------------------------------------------ */
+
+static void gptw_close(gui_state_t *state) {
+    gpt_result_free(&state->gptw_res);
+    ZeroMem(&state->gptw_res, sizeof(state->gptw_res));
+    gpt_plan_free(&state->gptw_plan);
+    ZeroMem(&state->gptw_plan, sizeof(state->gptw_plan));
+    gpt_diag_free(&state->gptw_diag);
+    ZeroMem(&state->gptw_diag, sizeof(state->gptw_diag));
+    if (state->gptw_have_dev) {
+        gpt_disk_close(&state->gptw_dev);
+        state->gptw_have_dev = 0;
+    }
+}
+
+static int gptw_eq_ci(CHAR16 *a, const CHAR16 *b) {
+    while (*a && *b) {
+        CHAR16 ca = *a++; if (ca >= L'a' && ca <= L'z') ca = (CHAR16)(ca - 32);
+        CHAR16 cb = *b++; if (cb >= L'a' && cb <= L'z') cb = (CHAR16)(cb - 32);
+        if (ca != cb) return 0;
+    }
+    return *a == *b;
+}
+
+static UINTN gptw_len(const CHAR16 *s) {
+    UINTN n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static void gptw_draw_line(gui_state_t *state, CHAR16 *line, UINTN tx,
+                           UINTN *ty, UINTN px, color_t col, UINTN gap) {
+    draw_text_px_a(state, line, (INTN)tx, (INTN)*ty, col, px, 230);
+    *ty += px + gap;
+}
+
+static void gptw_draw(gui_state_t *state) {
+    UINTN W = state->screen_width, H = state->screen_height;
+    fill_rect_alpha(state, 0, 0, (INTN)W, (INTN)H, COLOR_BLACK, 170);
+
+    UINTN th = state->name_size ? state->name_size : 20;
+    if (th < 18) th = 18;
+    UINTN small = th * 7 / 10;
+    if (small < 14) small = 14;
+
+    UINTN bh = th * 10;
+    if (state->gptw_state == 3) bh = th * 15;
+    UINTN bw = W * 9 / 10, bx = (W - bw) / 2;
+    if (bh > H * 9 / 10) bh = H * 9 / 10;
+    UINTN by = (H - bh) / 2;
+
+    if (state->blur)
+        draw_frost(state, (INTN)bx, (INTN)by, (INTN)bw, (INTN)bh, 255);
+    else
+        fill_round_rect(state, (INTN)bx, (INTN)by, (INTN)bw, (INTN)bh,
+                        state->box_radius ? (INTN)state->box_radius : 16,
+                        COLOR_BLACK, 235);
+
+    UINTN tx = bx + 24, ty = by + 18;
+    CHAR16 line[120];
+    gpt_diag_t *dg = &state->gptw_diag;
+    gpt_plan_t  *pl = &state->gptw_plan;
+
+    if (state->gptw_state == 2) {                       /* overview */
+        draw_text_px_a(state, L"Possible disk corruption detected",
+                       (INTN)tx, (INTN)ty, COLOR_RED, th, 255);
+        ty += th + 12;
+        SPrint(line, sizeof(line), L"Disk: %s  -  %lld sectors x %d bytes",
+               state->gptw_disk, (long long)dg->total_sectors,
+               (int)dg->sector_size);
+        gptw_draw_line(state, line, tx, &ty, th, COLOR_WHITE, 10);
+        gptw_draw_line(state,
+            L"The primary partition table on this disk fails validation.",
+            tx, &ty, small, COLOR_WHITE, 3);
+        gptw_draw_line(state,
+            L"A verified backup copy exists and has passed all safety checks.",
+            tx, &ty, small, COLOR_WHITE, 3);
+        gptw_draw_line(state,
+            L"Repair restores the primary table from the backup. The backup",
+            tx, &ty, small, COLOR_WHITE, 3);
+        gptw_draw_line(state, L"copy is never written.",
+            tx, &ty, small, COLOR_WHITE, 10);
+        SPrint(line, sizeof(line),
+               L"Backup header @LBA %lld  -  %d partition(s), %d x %d-byte entries",
+               (long long)pl->src_header_lba, (int)pl->part_count,
+               (int)pl->entry_count, (int)pl->entry_size);
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 14);
+        gptw_draw_line(state,
+            L"[Enter] Review & repair      [D] Details      [Esc] Boot anyway",
+            tx, &ty, small, COLOR_GRAY, 2);
+        return;
+    }
+
+    if (state->gptw_state == 3) {                       /* details */
+        draw_text_px_a(state, L"Recovery details",
+                       (INTN)tx, (INTN)ty, COLOR_ORANGE, th, 255);
+        ty += th + 10;
+        SPrint(line, sizeof(line), L"MBR: %s%s   overall: %s",
+               gpt_status_text(dg->mbr_status),
+               dg->mbr_protective ? L" (protective)" : L"",
+               gpt_status_text(dg->overall));
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 3);
+        SPrint(line, sizeof(line),
+               L"%lld usable sectors [%lld..%lld], sector %d bytes",
+               (long long)dg->total_sectors,
+               (long long)pl->first_usable_lba,
+               (long long)pl->last_usable_lba, (int)dg->sector_size);
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 8);
+
+        gpt_table_t *ts[2] = { &dg->primary, &dg->backup };
+        const CHAR16 *nm[2] = { L"Primary", L"Backup" };
+        for (int c = 0; c < 2 && ty < by + bh - th * 4; c++) {
+            SPrint(line, sizeof(line),
+                   L"%s: present=%d  header=%s(%s)  entries=%s(%s)  layout=%s",
+                   nm[c], ts[c]->present,
+                   gpt_status_text(ts[c]->header_status),
+                   gpt_reason_text(ts[c]->header_reason),
+                   gpt_status_text(ts[c]->entries_status),
+                   gpt_reason_text(ts[c]->entries_reason),
+                   gpt_status_text(ts[c]->layout_status));
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 3);
+            SPrint(line, sizeof(line),
+                   L"  entries @LBA %lld  %d x %d bytes  crc=0x%08x  parts=%d",
+                   (long long)ts[c]->hdr.entry_lba, (int)ts[c]->hdr.entry_count,
+                   (int)ts[c]->hdr.entry_size,
+                   (unsigned)ts[c]->hdr.entries_crc32,
+                   (int)ts[c]->used_count);
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_GRAY, 6);
+        }
+        for (UINTN i = 0; i < dg->note_count && ty < by + bh - th * 4; i++) {
+            gpt_note_text(&dg->notes[i], line, sizeof(line) / sizeof(CHAR16));
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_GRAY, 2);
+        }
+        ty += 8;
+        gptw_draw_line(state,
+            L"[B]ack      [R]eview & repair      [Esc] Boot anyway",
+            tx, &ty, small, COLOR_GRAY, 2);
+        return;
+    }
+
+    if (state->gptw_state == 6) {                       /* typed-YES confirm */
+        draw_text_px_a(state, L"Confirm repair",
+                       (INTN)tx, (INTN)ty, COLOR_RED, th, 255);
+        ty += th + 12;
+        SPrint(line, sizeof(line), L"Disk: %s  (media %d)",
+               state->gptw_disk, (int)dg->media_id);
+        gptw_draw_line(state, line, tx, &ty, th, COLOR_WHITE, 10);
+        gptw_draw_line(state,
+            L"The primary header and partition entries will be rewritten",
+            tx, &ty, small, COLOR_WHITE, 3);
+        gptw_draw_line(state,
+            L"from the verified backup. The backup copy itself is never touched.",
+            tx, &ty, small, COLOR_WHITE, 3);
+        SPrint(line, sizeof(line),
+               L"Writing primary header @LBA %lld and %d entries @LBA %lld.",
+               (long long)pl->dst_header_lba, (int)pl->entry_count,
+               (long long)pl->dst_entries_lba);
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 12);
+        gptw_draw_line(state, L"Type YES then press Enter to repair.",
+            tx, &ty, small, COLOR_WHITE, 3);
+        gptw_draw_line(state, L"Esc = go back (repair will not happen).",
+            tx, &ty, small, COLOR_WHITE, 12);
+        SPrint(line, sizeof(line), L"> %s", state->gptw_confirm);
+        draw_text_px_a(state, line, (INTN)tx, (INTN)ty, COLOR_ORANGE, th, 255);
+        return;
+    }
+
+    if (state->gptw_state == 4) {                       /* working */
+        draw_text_px_a(state, L"Repair in progress...",
+                       (INTN)tx, (INTN)ty, COLOR_ORANGE, th, 255);
+        ty += th + 10;
+        SPrint(line, sizeof(line), L"Disk: %s  (media %d)",
+               state->gptw_disk, (int)dg->media_id);
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 3);
+        SPrint(line, sizeof(line),
+               L"Writing primary header @LBA %lld and %d entries @LBA %lld.",
+               (long long)pl->dst_header_lba, (int)pl->entry_count,
+               (long long)pl->dst_entries_lba);
+        gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 2);
+        return;
+    }
+
+    if (state->gptw_state == 5) {                       /* done */
+        gpt_result_t *r = &state->gptw_res;
+        if (r->success) {
+            draw_text_px_a(state, L"Repair completed and verified.",
+                           (INTN)tx, (INTN)ty, COLOR_GREEN, th, 255);
+            ty += th + 10;
+            SPrint(line, sizeof(line), L"Primary GPT : %s",
+                   gpt_status_text(gpt_table_status(&r->after.primary)));
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 3);
+            SPrint(line, sizeof(line), L"Backup GPT  : %s",
+                   gpt_status_text(gpt_table_status(&r->after.backup)));
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 3);
+            SPrint(line, sizeof(line),
+                   L"Partition tables : %s",
+                   r->after.cmp.kind == GPT_CMP_IDENTICAL ? L"MATCH"
+                                                          : L"DIFFER");
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 12);
+            SPrint(line, sizeof(line),
+                   L"%d partition(s) restored; enter = continue to boot menu",
+                   (int)r->after.primary.used_count);
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_GRAY, 2);
+        } else {
+            draw_text_px_a(state, L"Repair could not be completed.",
+                           (INTN)tx, (INTN)ty, COLOR_ORANGE, th, 255);
+            ty += th + 10;
+            SPrint(line, sizeof(line), L"Reason: %s",
+                   gpt_reason_text(r->reason));
+            gptw_draw_line(state, line, tx, &ty, small, COLOR_WHITE, 12);
+            gptw_draw_line(state,
+                L"The disk was not modified. Enter/Esc = continue.",
+                tx, &ty, small, COLOR_GRAY, 2);
+        }
+    }
+}
+
+/* Drop any keystrokes queued while the menu was idle so a stray Enter or
+ * mouse click cannot instantly confirm the destructive step. */
+static void con_in_drain(gui_state_t *state) {
+    EFI_INPUT_KEY k;
+    while (!EFI_ERROR(uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2,
+                                        ST->ConIn, &k))) { }
+    if (state->mouse_enabled && state->has_pointer && state->spp) {
+        EFI_SIMPLE_POINTER_PROTOCOL *sp =
+            (EFI_SIMPLE_POINTER_PROTOCOL*)state->spp;
+        EFI_SIMPLE_POINTER_STATE st;
+        while (!EFI_ERROR(sp->GetState(sp, &st))) { }
+    }
+}
+
+static void gptw_do_repair(gui_state_t *state) {
+    CHAR16 lb[128];
+    SPrint(lb, sizeof(lb), L"gpt: repairing primary GPT on disk media %d",
+           (int)state->gptw_diag.media_id);
+    efi_log(lb);
+    gpt_result_t res;
+    ZeroMem(&res, sizeof(res));
+    EFI_STATUS st = gpt_execute_plan(&state->gptw_dev, &state->gptw_plan, &res);
+    state->gptw_res = res;
+    state->gptw_state = 5;
+    if (!EFI_ERROR(st) && res.success)
+        efi_log(L"gpt: primary GPT rebuilt and verified from backup");
+    else
+        efi_log(L"gpt: repair failed");
+}
+
+static void cap_do_screenshot(gui_state_t *state);
+static void gpt_warn_run(gui_state_t *state) {
+    if (state->gptw_suppressed) return;
+
+    UINTN n = 0;
+    EFI_HANDLE *hs = gpt_disk_enum(&n);
+    if (!hs) return;
+    if (n == 0) {
+        efi_free_pool(hs);
+        return;
+    }
+
+    int found = 0;
+    for (UINTN i = 0; i < n && !found; i++) {
+        gpt_dev_t dev;
+        if (!gpt_disk_from_bio(&dev, hs[i])) continue;
+
+        gpt_diag_t dg;
+        ZeroMem(&dg, sizeof(dg));
+        EFI_STATUS st = gpt_diagnose(&dev, 0, &dg);
+        if (EFI_ERROR(st)) {
+            gpt_diag_free(&dg);
+            gpt_disk_close(&dev);
+            continue;
+        }
+
+        if (dg.klass == GPT_CLASS_PRIMARY_CORRUPT_BACKUP_VALID &&
+            !dg.read_only) {
+            gpt_plan_t plan;
+            ZeroMem(&plan, sizeof(plan));
+            int ok = gpt_build_primary_plan(&dg, &plan);
+            if (ok && plan.safety == GPT_VALID) {
+                found = 1;
+                SPrint(state->gptw_disk, sizeof(state->gptw_disk),
+                       L"media %d", (int)dg.media_id);
+                state->gptw_have_dev = 1;
+                state->gptw_dev = dev;
+                state->gptw_diag = dg;
+                state->gptw_plan = plan;
+            } else {
+                gpt_plan_free(&plan);
+                gpt_diag_free(&dg);
+                gpt_disk_close(&dev);
+            }
+        } else {
+            gpt_diag_free(&dg);
+            gpt_disk_close(&dev);
+        }
+    }
+    efi_free_pool(hs);
+
+    if (!found || !state->gptw_have_dev) return;
+
+    con_in_drain(state);
+    state->gptw_state = 2;          /* overview */
+    state->gptw_confirm[0] = 0;
+    efi_log(L"gpt: primary GPT corruption detected - offering repair");
+
+    while (state->gptw_state != 0) {
+        gui_draw_menu(state, 0);
+        gptw_draw(state);
+        gui_present(state);
+
+        EFI_INPUT_KEY key;
+        EFI_STATUS ks = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
+        if (EFI_ERROR(ks)) {
+            efi_sleep(30);
+            continue;
+        }
+        CHAR16 u = key.UnicodeChar;
+        int esc = (u == 0x1B || (u == 0x00 && key.ScanCode == 0x17));
+
+        if (u == 0x00 && key.ScanCode == 0x10) {
+            cap_do_screenshot(state);
+            continue;
+        }
+
+        if (state->gptw_state == 2) {
+            if (u == 0x0D) {
+                state->gptw_state = 6;
+                state->gptw_confirm[0] = 0;
+            } else if (u == L'd' || u == L'D') {
+                state->gptw_state = 3;
+            } else if (esc || u == L'b' || u == L'B') {
+                state->gptw_suppressed = 1;
+                state->gptw_state = 0;
+            }
+        } else if (state->gptw_state == 3) {
+            if (esc) {
+                state->gptw_suppressed = 1;
+                state->gptw_state = 0;
+            } else if (u == 0x0D || u == L'b' || u == L'B') {
+                state->gptw_state = 2;
+            } else if (u == L'r' || u == L'R') {
+                state->gptw_state = 6;
+                state->gptw_confirm[0] = 0;
+            }
+        } else if (state->gptw_state == 6) {
+            if (esc) {
+                state->gptw_state = 2;
+                state->gptw_confirm[0] = 0;
+            } else if (u == 0x0D) {
+                if (gptw_eq_ci(state->gptw_confirm, L"YES") ||
+                    gptw_eq_ci(state->gptw_confirm, L"Y")) {
+                    state->gptw_state = 4;      /* working */
+                    gui_draw_menu(state, 0);
+                    gptw_draw(state);
+                    gui_present(state);
+                    gptw_do_repair(state);
+                } else {
+                    state->gptw_confirm[0] = 0;
+                    state->gptw_state = 2;
+                }
+            } else if (u == 0x08) {
+                UINTN l = gptw_len(state->gptw_confirm);
+                if (l) state->gptw_confirm[l - 1] = 0;
+            } else if (u >= L'0' && u <= L'z' &&
+                       gptw_len(state->gptw_confirm) <
+                           sizeof(state->gptw_confirm) / sizeof(CHAR16) - 1) {
+                UINTN l = gptw_len(state->gptw_confirm);
+                CHAR16 c = u;
+                if (c >= L'a' && c <= L'z') c = (CHAR16)(c - 32);
+                state->gptw_confirm[l] = c;
+                state->gptw_confirm[l + 1] = 0;
+            }
+        } else if (state->gptw_state == 5) {
+            if (u == 0x0D || esc) {
+                state->gptw_suppressed = 1;
+                state->gptw_state = 0;
+            }
+        }
+    }
+
+    gptw_close(state);
+}
+
 static int point_in(INTN px, INTN py, INTN x, INTN y, INTN w, INTN h) {
     return px >= x && px < x + w && py >= y && py < y + h;
 }
@@ -3745,6 +4132,220 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
     return moved ? 2 : 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Capture: F6 = PNG screenshot, F10 = animated GIF recording           */
+
+#define CAP_COUNTDOWN_MS 3000u
+#define CAP_RECORD_MS    3000u
+#define CAP_FRAME_MS     50u            /* 20 fps */
+#define CAP_MAX_FRAMES   (CAP_RECORD_MS / CAP_FRAME_MS)   /* 60 */
+#define CAP_TOAST_MS     2000
+
+/* Show a status toast (green = ok, red = error).  Resets the countdown
+ * clock so the message is always visible for its full CAP_TOAST_MS window,
+ * even if a recording ran in between. */
+static void cap_set_toast(gui_state_t *state, const CHAR16 *msg, int is_err) {
+    SPrint(state->cap_status, sizeof(state->cap_status), L"%s", msg);
+    state->cap_status_err = is_err;
+    state->cap_status_ms  = CAP_TOAST_MS;
+    state->cap_last_ms    = 0;
+}
+
+static void cap_do_screenshot(gui_state_t *state) {
+    if (!state->backbuffer || !state->screen_width || !state->screen_height) return;
+    UINT8 *png = NULL; UINTN pngsz = 0;
+    EFI_STATUS st = cap_png_encode(state->backbuffer, state->screen_width,
+                                   state->screen_height, &png, &pngsz);
+    if (EFI_ERROR(st) || !png) {
+        cap_set_toast(state, L"Screenshot failed", 1);
+        if (png) efi_free_pool(png);
+        return;
+    }
+    if (!EFI_ERROR(cap_ensure_dir(L"\\EFI\\visor")))
+        cap_ensure_dir(L"\\EFI\\visor\\shots");
+    CHAR16 name[192], full[256], msg[224];
+    cap_timestamp_name(name, 192, L"shot", L".png");
+    SPrint(full, sizeof(full), L"\\EFI\\visor\\shots\\%s", name);
+    st = cap_save_file(full, png, pngsz);
+    efi_free_pool(png);
+    if (EFI_ERROR(st)) {
+        cap_set_toast(state, L"Screenshot save failed", 1);
+    } else {
+        SPrint(msg, sizeof(msg), L"Saved: %s", name);
+        cap_set_toast(state, msg, 0);
+    }
+}
+
+static void cap_start_record(gui_state_t *state) {
+    if (!state->backbuffer || !state->screen_width || !state->screen_height) return;
+    state->cap_mode = 2;
+    state->cap_start_ms = efi_get_tick();
+    state->cap_frames = 0;
+    state->cap_gif = NULL;
+    state->cap_sec_prev = CAP_COUNTDOWN_MS / 1000 + 1;
+    state->cap_status[0] = 0;
+    state->cap_status_ms = -1;          /* clear any stale toast */
+}
+
+static void cap_cancel_record(gui_state_t *state) {
+    if (state->cap_gif) { cap_gif_free(state->cap_gif); state->cap_gif = NULL; }
+    state->cap_mode = 0;
+    cap_set_toast(state, L"Recording cancelled", 0);
+}
+
+static void cap_finish_record(gui_state_t *state) {
+    cap_gif *g = state->cap_gif;
+    state->cap_gif = NULL;
+    state->cap_mode = 0;
+    UINT8 *data = NULL; UINTN sz = 0;
+    EFI_STATUS st = g ? cap_gif_close(g, &data, &sz) : EFI_DEVICE_ERROR;
+    if (EFI_ERROR(st) || !data) {
+        cap_set_toast(state, L"Recording failed", 1);
+        return;
+    }
+    if (!EFI_ERROR(cap_ensure_dir(L"\\EFI\\visor")))
+        cap_ensure_dir(L"\\EFI\\visor\\shots");
+    CHAR16 name[192], full[256], msg[224];
+    cap_timestamp_name(name, 192, L"rec", L".gif");
+    SPrint(full, sizeof(full), L"\\EFI\\visor\\shots\\%s", name);
+    st = cap_save_file(full, data, sz);
+    efi_free_pool(data);
+    if (EFI_ERROR(st)) {
+        SPrint(msg, sizeof(msg), L"Save failed: %s", name);
+        cap_set_toast(state, msg, 1);
+    } else {
+        SPrint(msg, sizeof(msg), L"Saved recording: %s", name);
+        cap_set_toast(state, msg, 0);
+    }
+}
+
+/* Grab every GIF frame whose deadline has passed.  For animated backgrounds
+ * only one frame is taken per call (the backbuffer must advance between
+ * grabs); static scenes catch up in a single pass.  Returns 0 on OOM. */
+static int cap_grab_due_frames(gui_state_t *state) {
+    if (!state->cap_gif) return 1;
+    UINT64 el = efi_get_tick() - state->cap_start_ms;
+    int animated = state->bg_anim && state->bg_anim->frame_count > 1;
+
+    while (state->cap_frames < CAP_MAX_FRAMES) {
+        UINT32 due = (UINT32)state->cap_frames * CAP_FRAME_MS;
+        if (due >= CAP_RECORD_MS || el < due) break;
+        if (!cap_gif_frame(state->cap_gif, state->backbuffer, 5))
+            return 0;
+        state->cap_frames++;
+        if (animated) break;
+    }
+    return 1;
+}
+
+/* Called once per main-loop iteration while cap_mode != 0 or a toast is
+ * up.  Returns 2 when the HUD needs a full redraw, 0 otherwise. */
+static int cap_tick(gui_state_t *state) {
+    UINT64 now = efi_get_tick();
+
+    if (state->cap_mode == 0) {
+        if (state->cap_status_ms < 0) return 0;
+        if (!state->cap_last_ms) state->cap_last_ms = now;
+        INTN dt = (INTN)(now - state->cap_last_ms);
+        state->cap_last_ms = now;
+        if (dt > 0) state->cap_status_ms -= dt;
+        if (state->cap_status_ms <= 0) {
+            state->cap_status_ms = -1;  /* toast expired: one redraw clears it */
+            return 2;
+        }
+        return 0;                       /* toast already drawn; nothing to do */
+    }
+
+    UINT64 el = now - state->cap_start_ms;
+
+    if (state->cap_mode == 2) {                       /* countdown */
+        if (el >= CAP_COUNTDOWN_MS) {
+            state->cap_gif = cap_gif_new(state->screen_width, state->screen_height);
+            state->cap_sec_prev = CAP_RECORD_MS / 1000 + 1;
+            if (state->cap_gif) {
+                state->cap_mode = 3;
+                state->cap_start_ms = now;
+                state->cap_frames = 0;
+            } else {
+                state->cap_mode = 0;
+                cap_set_toast(state, L"Recording failed (out of memory)", 1);
+            }
+            return 2;
+        }
+        UINTN sec = (CAP_COUNTDOWN_MS - (UINT64)el + 999) / 1000;
+        if (sec != state->cap_sec_prev) {              /* redraw 1x/second */
+            state->cap_sec_prev = sec;
+            return 2;
+        }
+        return 0;
+    }
+
+    if (state->cap_mode == 3) {                       /* capturing */
+        if (el >= CAP_RECORD_MS || state->cap_frames >= CAP_MAX_FRAMES) {
+            if (state->cap_gif) {
+                cap_grab_due_frames(state);
+                cap_finish_record(state);
+            }
+            return 2;
+        }
+
+        UINTN sec = (CAP_RECORD_MS - (UINT64)el + 999) / 1000;
+        if (sec != state->cap_sec_prev) {              /* REC badge tick */
+            state->cap_sec_prev = sec;
+            return 2;
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
+/* Small REC badge in the top-right corner while capturing.  It is drawn
+ * into the backbuffer, so it is also visible inside the finished GIF - an
+ * intended "this was recorded" marker. */
+static void cap_draw_rec_badge(gui_state_t *state) {
+    UINT64 el = efi_get_tick() - state->cap_start_ms;
+    UINTN rem = el >= CAP_RECORD_MS ? 0 : (CAP_RECORD_MS - (UINT64)el) / 1000;
+    CHAR16 buf[24];
+    SPrint(buf, sizeof(buf), L"REC %d:%02d", (int)(rem / 60), (int)(rem % 60));
+    UINTN tw = text_width_px(buf, 22);
+    INTN w = (INTN)state->screen_width;
+    INTN bx = w - (INTN)tw - 30;
+    if (bx < 0) bx = 0;
+
+    fill_rect_alpha(state, bx, 8, (INTN)tw + 22, 38, (color_t){0, 0, 0}, 160);
+    gui_fill_rect(state, (UINTN)bx + 9, 20, 8, 8, COLOR_RED);
+    draw_text_px(state, buf, bx + 23, 12, COLOR_RED, 22);
+}
+
+static void cap_draw_overlay(gui_state_t *state) {
+    INTN w = (INTN)state->screen_width;
+    INTN h = (INTN)state->screen_height;
+    INTN y0 = h / 4;                       /* clear of header and centre_info */
+    if (state->cap_mode == 2) {
+        UINT64 el = efi_get_tick() - state->cap_start_ms;
+        UINTN sec = el >= CAP_COUNTDOWN_MS ? 0
+                    : (CAP_COUNTDOWN_MS - (UINT64)el + 999) / 1000;
+        CHAR16 buf[48];
+        SPrint(buf, sizeof(buf), L"Recording in %d", (int)sec);
+        UINTN tw = text_width_px(buf, 32);
+        fill_rect_alpha(state, w / 2 - (INTN)(tw / 2) - 24, y0 - 16,
+                        (INTN)tw + 48, 72, (color_t){0, 0, 0}, 150);
+        draw_text_centered_px(state, buf, 0, (UINTN)w, y0, COLOR_RED, 32);
+        draw_text_centered_px(state, L"F10 cancels", 0, (UINTN)w, y0 + 42,
+                              COLOR_GRAY, 16);
+    } else if (state->cap_mode == 3) {
+        cap_draw_rec_badge(state);
+    } else if (state->cap_status_ms > 0) {
+        color_t col = state->cap_status_err ? COLOR_RED : COLOR_GREEN;
+        UINTN tw = text_width_px(state->cap_status, 26);
+        fill_rect_alpha(state, w / 2 - (INTN)(tw / 2) - 20, y0 + 18,
+                        (INTN)tw + 40, 42, (color_t){0, 0, 0}, 150);
+        draw_text_centered_px(state, state->cap_status, 0, (UINTN)w,
+                              y0 + 28, col, 26);
+    }
+}
+
 boot_entry_t* gui_run(gui_state_t *state) {
     EFI_STATUS status;
     EFI_INPUT_KEY key;
@@ -3753,6 +4354,9 @@ boot_entry_t* gui_run(gui_state_t *state) {
     state->action = VISOR_ACTION_BOOT;
 
     BS->SetWatchdogTimer(0, 0, 0, NULL);
+
+    if (!state->gptw_suppressed)
+        gpt_warn_run(state);
 
     if (state->timeout == 0) {
         state->running = 0;
@@ -3802,6 +4406,17 @@ boot_entry_t* gui_run(gui_state_t *state) {
             continue;
         }
 
+        if (state->cap_mode == 3 && state->cap_gif) {
+            UINT64 el = efi_get_tick() - state->cap_start_ms;
+            if (state->cap_frames < CAP_MAX_FRAMES &&
+                el >= (UINT64)state->cap_frames * CAP_FRAME_MS) {
+                need_redraw = 1;
+                full_redraw = 1;
+                if (state->bg_anim && state->bg_anim->frame_count > 1)
+                    state->scene_valid = 0;
+            }
+        }
+
         if (need_redraw) {
             INTN ghost_y = -1;
             if (state->cursor_saved) {
@@ -3809,8 +4424,24 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 ghost_y = state->cur_prev_y;
                 state->cursor_saved = 0;
             }
+            if (state->cap_mode != 0 || state->cap_status_ms > 0) full_redraw = 1;
             gui_draw_menu(state, !full_redraw);
             if (state->editing) draw_editor_overlay(state);
+            if (state->cap_mode != 0 || state->cap_status_ms > 0) cap_draw_overlay(state);
+            if (state->cap_mode == 3 && state->cap_gif) {
+                if (!cap_grab_due_frames(state)) {
+                    cap_gif_free(state->cap_gif);
+                    state->cap_gif = NULL;
+                    state->cap_mode = 0;
+                    cap_set_toast(state, L"Recording failed (low memory)", 1);
+                } else {
+                    UINT64 el = efi_get_tick() - state->cap_start_ms;
+                    if (el >= CAP_RECORD_MS ||
+                        state->cap_frames >= CAP_MAX_FRAMES) {
+                        cap_finish_record(state);
+                    }
+                }
+            }
             if (intro_fade && full_redraw && !state->editing) {
                 gui_fade_in_current(state);
                 intro_fade = 0;
@@ -3846,6 +4477,18 @@ boot_entry_t* gui_run(gui_state_t *state) {
             state->ss_last_input_ms = efi_get_tick();
 
             if (state->timeout_active) { state->timeout_active = 0; need_redraw = 1; full_redraw = 1; }
+
+            if (key.UnicodeChar == 0x00 &&
+                (key.ScanCode == 0x10 || key.ScanCode == 0x14)) {
+                if (key.ScanCode == 0x10) {
+                    if (state->cap_mode == 0) cap_do_screenshot(state);
+                } else {
+                    if (state->cap_mode == 0) cap_start_record(state);
+                    else cap_cancel_record(state);
+                }
+                need_redraw = 1; full_redraw = 1;
+                continue;
+            }
 
             if (state->editing) {
                 editor_key(state, &key);
@@ -3935,8 +4578,12 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 } else if (key.UnicodeChar == 0x0D) {
                     if (snap && se && se->snap_count > 0) {
                         snapshot_t *s = &se->snapshots[se->snap_sel];
+                        if (state->override_cmdline) { efi_free_pool(state->override_cmdline); state->override_cmdline = NULL; }
+                        if (state->override_kernel_path) { efi_free_pool(state->override_kernel_path); state->override_kernel_path = NULL; }
+                        if (state->override_initrd_path) { efi_free_pool(state->override_initrd_path); state->override_initrd_path = NULL; }
+                        state->override_initrd_set = 0;
                         state->override_cmdline = s->cmdline ? efi_strdup(s->cmdline) : NULL;
-                        if (s->kernel) state->override_kernel_path = efi_strdup(s->kernel);
+                        if (s->kernel) { state->override_kernel_path = efi_strdup(s->kernel); }
                         if (s->initrd) { state->override_initrd_path = efi_strdup(s->initrd);
                                          state->override_initrd_set = 1; }
                     }
@@ -4137,6 +4784,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
             if (!state->hp_last_ms) state->hp_last_ms = now;
             if (now - state->hp_last_ms >= 1200) {
                 state->hp_last_ms = now;
+
                 UINTN pre_w = visible_row_width(state);
                 boot_entry_t *head = state->entries;
                 UINTN cnt = state->entry_count;
@@ -4162,6 +4810,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
                     if (state->selected >= cnt && cnt)
                         state->selected = cnt - 1;
                 }
+                if (mask && !state->gptw_suppressed)
+                    gpt_warn_run(state);
                 need_redraw = 1;
                 full_redraw = 1;
             }
@@ -4189,10 +4839,15 @@ boot_entry_t* gui_run(gui_state_t *state) {
             if (!state->clock_drawn) full_redraw = 1;
         }
 
+        if (state->cap_mode != 0 || state->cap_status_ms > 0) {
+            if (cap_tick(state) == 2) { need_redraw = 1; full_redraw = 1; }
+        }
+
         efi_sleep((state->anim_active || state->page_anim ||
                    state->ver_fading || state->hp_anim) ? 6
+                  : (state->cap_mode == 3 ? 6
                   : (state->bg_anim ? 8
-                  : (state->cursor_active ? 12 : 30)));
+                  : (state->cursor_active ? 12 : 30))));
     }
 
     if (state->action != VISOR_ACTION_BOOT) return NULL;

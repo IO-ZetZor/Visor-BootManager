@@ -3,6 +3,7 @@
 
 #include <efi.h>
 #include <efilib.h>
+#include "gpt.h"
 
 #define GUI_ACCENT_ROLES 14
 
@@ -48,6 +49,8 @@ typedef struct {
 
 #include "anim.h"
 #include "filebrowse.h"
+
+typedef struct cap_gif cap_gif;
 
 #define VISOR_ACTION_BOOT      0
 #define VISOR_ACTION_SHUTDOWN  1
@@ -357,6 +360,30 @@ typedef struct gui_state {
     INTN    hit_x[32], hit_y[32], hit_w[32], hit_h[32];
     UINTN   hit_idx[32];
     int     hit_n;
+
+    /* capture (F6 screenshot / F10 GIF record) state */
+    int     cap_mode;        /* 0=idle, 1=unused, 2=record countdown, 3=record capture */
+    UINT64  cap_start_ms;    /* timestamp when countdown/capture began */
+    UINTN   cap_frames;      /* frames captured so far */
+    INTN    cap_status_ms;   /* remaining ms to show a status toast, or -1 */
+    UINT64  cap_last_ms;     /* last loop tick (for toast countdown) */
+    CHAR16  cap_status[96];  /* status toast text */
+    int     cap_status_err;  /* toast drawn in red (error) instead of green */
+    UINTN   cap_sec_prev;    /* last second value drawn in HUD, for 1-Hz redraw */
+    cap_gif *cap_gif;        /* live gif encoder while recording */
+
+    /* GPT corruption warning modal.
+     * gptw_state: 0=hidden, 2=overview, 3=details, 6=confirm, 4=working, 5=done */
+    int      gptw_state;        /* 0=hidden,2=overview,3=details,6=confirm,4=working,5=done */
+    int      gptw_found;        /* at least one recoverable disk detected */
+    int      gptw_suppressed;   /* user dismissed this menu session */
+    CHAR16   gptw_disk[40];     /* device name */
+    gpt_dev_t    gptw_dev;      /* held open while dialog is up */
+    int          gptw_have_dev;
+    gpt_diag_t   gptw_diag;
+    gpt_plan_t   gptw_plan;
+    gpt_result_t gptw_res;
+    CHAR16   gptw_confirm[8];   /* typed-YES buffer for the confirm step */
 } gui_state_t;
 
 EFI_STATUS gui_init(gui_state_t *state);
