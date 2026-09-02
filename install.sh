@@ -506,7 +506,9 @@ if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
         disk="/dev/$(lsblk -no PKNAME "$src")"
         partnum="$(lsblk -no PARTN "$src" 2>/dev/null || \
                    echo "$src" | grep -o '[0-9]*$')"
-        if [ ! -b "$disk" ]; then
+        if [ -z "$partnum" ]; then
+            warn "Could not determine ESP partition number; skipping boot entry."
+        elif [ ! -b "$disk" ]; then
             warn "Could not determine ESP disk (got '$disk'); skipping boot entry."
         elif efibootmgr | grep -q 'Visor'; then
             ok "Boot entry 'Visor' already exists; left untouched."

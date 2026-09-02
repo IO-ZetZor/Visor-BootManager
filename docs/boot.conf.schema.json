@@ -779,6 +779,32 @@
       "$ref": "#/$defs/bool",
       "default": false
     },
+    "restore_fallback": {
+      "x-group": "boot",
+      "description": "Re-copy the running Visor binary to the firmware's default boot path (\\EFI\\BOOT\\BOOTX64.EFI) at startup, restoring a fallback that another OS may have overwritten.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "selfheal": {
+      "x-group": "boot",
+      "description": "Master switch for the boot-time NVRAM and fallback self-heal pass. 0 = disabled; 1 = run at every startup (default).",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "selfheal_order": {
+      "x-group": "boot",
+      "x-aliases": [
+        "boot_order"
+      ],
+      "description": "Repair policy for the NVRAM Boot entry and BootOrder list. 'first' (default) ensures Visor is listed first in BootOrder when a normal boot-manager boot is detected; 'ensure' only recreates a missing entry without moving it; 'off' leaves the NVRAM untouched.",
+      "type": "string",
+      "enum": [
+        "off",
+        "ensure",
+        "first"
+      ],
+      "default": "first"
+    },
     "resolution": {
       "x-group": "appearance",
       "description": "'native' keeps the firmware's current mode, 'max'/'highest' picks the largest offered, or an exact WxH such as 1920x1080.",

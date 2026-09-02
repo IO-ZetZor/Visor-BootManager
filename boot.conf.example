@@ -62,6 +62,32 @@ default=0
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
 #remember_last=0
 
+# --- Boot self-heal ---------------------------------------------------------
+# Windows and other OS updates may reorder the NVRAM boot list, remove the
+# Visor Boot#### entry or overwrite the firmware fallback path
+# (\EFI\BOOT\BOOTx64.EFI).  These options let Visor repair the damage
+# automatically at every startup.  Nothing is written when there is nothing
+# to fix, and removable media are always left untouched.
+
+# Master switch. 0 = skip the entire self-heal pass.
+#selfheal=1
+
+# NVRAM Boot-entry policy.
+#   off    - never touch NVRAM variables.
+#   ensure - recreate a missing Visor Boot#### entry; if it has been removed
+#            from BootOrder, append it back at the tail.
+#   first  (default) - same as ensure, plus: when BootCurrent matches the
+#            Visor entry (a normal boot through the firmware boot manager),
+#            keep Visor first in BootOrder.  Only rearranges an existing
+#            order - never invents one.
+# (alias: boot_order)
+#boot_order=first
+
+# Re-copy the running Visor binary to the default fallback path at startup.
+# Windows feature updates and 24H2 may replace \EFI\BOOT\BOOTx64.EFI with
+# a copy of bootmgfw.efi; this restores it.
+#restore_fallback=1
+
 # Global default kernel command line. Applied to any entry that does not set its
 # own cmdline/options - including auto-detected raw kernels (which otherwise have
 # no root=). Per-entry cmdline always wins. (alias: options)
@@ -124,6 +150,20 @@ quiet=0
 #    manifest  use only \EFI\visor\snapshots.conf (no auto-detection)
 #    0         disable snapshot loading entirely
 #snapshots=1
+
+# BLS (Boot Loader Specification) deployment browsing. Always on - no switch
+# needed. Visor scans \loader\entries and \boot\loader\entries on every volume
+# (ESP and XBOOTLDR) and folds matching *.conf files into a single per-OS menu
+# entry whose deployments you cycle with V / Ctrl+arrow. Supported fields:
+#   title version linux        required title plus a linux kernel or an efi
+#   efi   initrd options       program; efi-only entries are chainloaded
+#   machine-id architecture    arch mismatch (e.g. EFIARM on x86_64) is skipped
+#   sort-key                   groups sort by ostree index (newest first) then
+#                              alphabetically by sort-key; repeated initrd and
+#                              options lines accumulate in order. Entry
+#                              basenames ending in +N-M drive the boot-counter
+#                              (tries-left) rollback behaviour.
+#
 
 
 # --- Menu appearance and input ----------------------------------------------

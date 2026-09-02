@@ -43,6 +43,7 @@ package() {
   install -Dm644 docs/boot.conf.schema.json "$pkgdir/usr/share/visor/boot.conf.schema.json"
 
   install -Dm755 tools/vbg_encode.py "$pkgdir/usr/share/visor/tools/vbg_encode.py"
+  install -Dm755 tools/visor_encrypt.py "$pkgdir/usr/share/visor/tools/visor_encrypt.py"
 
   if [ -d assets/icons ]; then
     cp -r assets/icons "$pkgdir/usr/share/visor/icons"

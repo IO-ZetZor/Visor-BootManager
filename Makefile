@@ -67,7 +67,7 @@ EFI_LDFLAGS = -nostdlib -znocombreloc -z notext -T $(LDS) -shared \
 
 SRCS = main.c efi_helpers.c gui.c config.c linux_boot.c windows_boot.c \
        png_decoder.c gif_decoder.c mp4_decoder.c font_jetbrains.c sha256.c hash_verify.c crypto.c text_menu.c \
-       accent.c filebrowse.c tcg2.c loader_iface.c $(ARCH_SRC)
+       accent.c filebrowse.c tcg2.c loader_iface.c capture.c gpt.c gpt_disk.c efi_selfheal.c $(ARCH_SRC)
 OBJDIR = $(BUILD_DIR)/$(ARCH)
 OBJS = $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 
