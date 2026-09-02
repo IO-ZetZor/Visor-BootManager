@@ -67,7 +67,8 @@ Commands:
   uninstall [options]           Remove installed Visor files
   status [options]              Show install/source status
   config validate [options]      Validate a config file
-  clean                         Remove build outputs
+  clean [--all]                 Remove build outputs (--all also removes the
+                                ~/.cache/visor source checkout, with confirmation)
   doctor                        Check build/install dependencies
   help                          Show this help
 
@@ -230,7 +231,7 @@ detect_esp() {
 
     local m
     for m in /boot/efi /efi /boot; do
-        if mountpoint -q "$m" 2>/dev/null && [ "$(findmnt -no FSTYPE "$m" 2>/dev/null)" = vfat ]; then
+        if mountpoint -q "$m" 2>/dev/null && [ "$(findmnt -Uno FSTYPE "$m" 2>/dev/null)" = vfat ]; then
             printf '%s\n' "$m"
             return 0
         fi
@@ -258,7 +259,7 @@ ensure_visor_boot_entry() {
         return 0
     fi
     local src disk partnum
-    src="$(findmnt -no SOURCE "$esp")" || { warn "Cannot resolve ESP device; skipping boot entry."; return 0; }
+    src="$(findmnt -Uno SOURCE "$esp")" || { warn "Cannot resolve ESP device; skipping boot entry."; return 0; }
     disk="/dev/$(lsblk -no PKNAME "$src")"
     partnum="$(lsblk -no PARTN "$src" 2>/dev/null || echo "$src" | grep -o '[0-9]*$')"
     if [ ! -b "$disk" ]; then
@@ -530,9 +531,42 @@ cmd_install() {
 
 cmd_clean() {
     local dir
+    local all=0
+    case "${1:-}" in
+        --all) all=1 ;;
+        -h|--help) usage; exit 0 ;;
+        --*) die "unknown clean option: $1" ;;
+    esac
+
     dir="$(project_or_die)"
     say "Cleaning build outputs in $dir"
     make --no-print-directory -C "$dir" clean
+
+    if [ "$all" -eq 1 ]; then
+        local home cache
+        home="$(real_home)"
+        cache="${XDG_CACHE_HOME:-$home/.cache}"
+        local default_v="${VISOR_SOURCE_DIR:-$cache/visor/source}"
+        local legacy="$cache/visor-src"
+        local removed=0
+        local d
+        for d in "$default_v" "$legacy"; do
+            [ -e "$d" ] || continue
+            local ans=""
+            printf 'Remove source checkout %s? [y/N] ' "$d"
+            read -r ans || ans=""
+            case "${ans,,}" in
+                y|yes)
+                    rm -rf -- "$d" && removed=1 || warn "could not remove $d"
+                    ;;
+                *) say "Keeping $d" ;;
+            esac
+        done
+        if [ "$removed" -eq 1 ]; then
+            say "Re-run 'visor update' to re-clone the source."
+        fi
+    fi
+    return 0
 }
 
 cmd_doctor() {
@@ -967,10 +1001,20 @@ cmd_status() {
     if [ -n "$esp" ]; then
         local root="$esp/EFI/visor"
         printf 'ESP: %s\n' "$esp"
+        if [ ! -r "$esp" ] || [ ! -x "$esp" ]; then
+            printf 'Installed binary: unreadable\n'
+            printf 'Config: unreadable\n'
+            printf 'Boot log: unreadable\n'
+            printf 'UEFI entry: unknown (cannot read NVRAM)\n'
+            warn "cannot read ESP $esp (permission denied) - re-run with sudo"
+            return 1
+        fi
         if [ -f "$root/visor_x64.efi" ]; then
             printf 'Installed binary: %s\n' "$root/visor_x64.efi"
             if command -v sha256sum >/dev/null 2>&1; then
-                printf 'Installed sha256: %s\n' "$(sha256sum "$root/visor_x64.efi" | awk '{print $1}')"
+                local s
+                s="$(sha256sum "$root/visor_x64.efi" 2>/dev/null | awk '{print $1}')"
+                [ -n "$s" ] && printf 'Installed sha256: %s\n' "$s"
             fi
         else
             printf 'Installed binary: missing\n'
@@ -980,9 +1024,13 @@ cmd_status() {
         if command -v efibootmgr >/dev/null 2>&1; then
             if efibootmgr 2>/dev/null | grep -qi 'Visor'; then
                 printf 'UEFI entry: present\n'
-            else
+            elif efibootmgr >/dev/null 2>&1; then
                 printf 'UEFI entry: missing\n'
+            else
+                printf 'UEFI entry: unknown (cannot read NVRAM)\n'
             fi
+        else
+            printf 'UEFI entry: unknown (efibootmgr not installed)\n'
         fi
     else
         printf 'ESP: unavailable\n'
@@ -1032,9 +1080,9 @@ cmd_sign() {
 boot_fs_type() {
     local t=""
     if mountpoint -q /boot 2>/dev/null; then
-        t="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
+        t="$(findmnt -Uno FSTYPE /boot 2>/dev/null || true)"
     fi
-    [ -z "$t" ] && t="$(findmnt -no FSTYPE / 2>/dev/null || true)"
+    [ -z "$t" ] && t="$(findmnt -Uno FSTYPE / 2>/dev/null || true)"
     printf '%s\n' "$t"
 }
 
