@@ -21,10 +21,8 @@ static void gpt_crc32_init(void) {
     gpt_crc32_ready = 1;
 }
 
-/* Standard CRC32 (poly 0xEDB88320), as required by the UEFI GPT spec.
- * `seed` is the running value from a previous call, or 0 to start a new one;
- * the result is always a finished CRC, so single-shot callers can just use
- * gpt_crc32(0, buf, len) and chained callers can feed the return value back in. */
+/* Standard CRC32 (poly 0xEDB88320), as required by UEFI GPT spec.
+ * Seed with 0 for single-shot, or feed return value back for chaining. */
 UINT32 gpt_crc32(UINT32 seed, const UINT8 *data, UINTN len) {
     gpt_crc32_init();
     UINT32 reg = ~seed;
@@ -182,8 +180,7 @@ static gpt_status_t gpt_parse_header(const gpt_dev_t *dev, UINT64 expected_lba,
     t->header_crc_stored   = h->header_crc32;
     UINT32 saved_crc = h->header_crc32;
 
-    /* header_size is attacker-controlled: it comes straight off the disk.  Bound
-     * it by the CRC scratch buffer as well as the sector, never just the sector. */
+    /* header_size is attacker-controlled: bound by both scratch buffer and sector. */
     UINT32 hsize = h->header_size;
     if (hsize < GPT_HEADER_SIZE_MIN ||
         hsize > dev->sector_size ||
@@ -229,7 +226,7 @@ static gpt_status_t gpt_parse_header(const gpt_dev_t *dev, UINT64 expected_lba,
         t->header_reason = GPT_R_INVALID_ENTRY_COUNT;
         return GPT_INVALID;
     }
-    /* UEFI requires the entry size to be 128 * 2^n. */
+    /* UEFI requires entry size to be 128 * 2^n. */
     if (h->entry_size < GPT_ENTRY_SIZE_MIN || h->entry_size > GPT_ENTRY_SIZE_MAX ||
         (h->entry_size % GPT_ENTRY_SIZE_MIN) != 0 ||
         (h->entry_size & (h->entry_size - 1)) != 0) {
@@ -243,9 +240,7 @@ static gpt_status_t gpt_parse_header(const gpt_dev_t *dev, UINT64 expected_lba,
         return GPT_INVALID;
     }
 
-    /* The usable range must leave room for both metadata copies.  Without this
-     * a header can claim usable space that physically covers its own backup
-     * GPT, and a partition spanning it would still validate. */
+    /* Usable range must leave room for both metadata copies. */
     {
         UINT64 abytes  = (UINT64)h->entry_count * (UINT64)h->entry_size;
         UINT64 asect   = (abytes + dev->sector_size - 1) / dev->sector_size;
@@ -399,9 +394,7 @@ static gpt_status_t gpt_load_entries(gpt_dev_t *dev, gpt_table_t *t, int copy) {
         return GPT_INVALID;
     }
 
-    /* The entry array must live in a metadata region, never inside the usable
-     * range - otherwise the "partition table" we trust as a recovery source
-     * could actually be filesystem content sitting inside a partition. */
+    /* Entry array must live in a metadata region, never inside usable range. */
     if (h->entry_lba <= h->last_usable_lba &&
         h->entry_lba + sectors > h->first_usable_lba) {
         t->entries_status = GPT_INVALID;
@@ -505,8 +498,7 @@ static void gpt_check_mbr(gpt_diag_t *diag, const UINT8 *lba0) {
         diag->mbr_reason = GPT_R_MBR_NOT_PROTECTIVE;
         diag->mbr_protective = 0;
     } else if (le32(lba0 + 446 + 8) == 0) {
-        /* A protective entry with a zero size field describes nothing and
-         * cannot protect the disk - flag it rather than trusting the layout. */
+        /* Protective entry with zero size describes nothing. */
         diag->mbr_status = GPT_WARNING;
         diag->mbr_reason = GPT_R_MBR_WRONG_SIZE;
     }
@@ -565,9 +557,7 @@ static void gpt_load_ct(gpt_dev_t *dev, UINT64 lba, gpt_table_t *t, int copy) {
 
     gpt_status_t hs = gpt_parse_header(dev, lba, sector, t);
 
-    /* Keep the raw header bytes we just parsed (header_size covers any
-     * vendor-specific extension beyond the 92-byte base).  A rebuild of the
-     * other copy must reproduce these bytes exactly, not shrink back to 92. */
+    /* Keep raw header bytes (header_size may exceed the 92-byte base). */
     if (hs == GPT_VALID && !t->hdr_raw) {
         UINT32 hsize = t->hdr.header_size;
         UINT8 *hr = gpt_alloc(hsize);
@@ -619,8 +609,7 @@ static void gpt_compare(const gpt_diag_t *diag, gpt_cmp_t *cmp) {
                b->entries_status == GPT_VALID && b->layout_status == GPT_VALID;
 
     if (!p_ok && !b_ok) {
-        /* GPT metadata exists on the disk but neither copy can be trusted -
-         * there is no way to say which (if either) reflects reality. */
+        /* Neither copy can be trusted. */
         cmp->kind = (p->present || b->present) ? GPT_CMP_AMBIGUOUS
                                                : GPT_CMP_BOTH_INVALID;
         return;
@@ -695,17 +684,8 @@ static void gpt_classify(gpt_diag_t *diag) {
     }
 
     if (!p_ok && b_ok) {
-        /* Spec CASE B: the primary is unusable and the backup independently
-         * validates.  This covers a merely-corrupt primary AND a primary that
-         * was wiped outright (signature gone) - a zeroed first sector is one of
-         * the most common ways a primary GPT dies, and the backup is what
-         * proves the disk is really GPT.
-         *
-         * The one case we refuse is a disk that now carries a genuine MBR
-         * partition table with a stale GPT backup left at the end: restoring
-         * there would resurrect a layout the user replaced.  A protective MBR
-         * (or an absent/blank one alongside a surviving primary signature) is
-         * what tells the two apart. */
+        /* CASE B: primary unusable, backup validates. Refuse if a genuine MBR
+         * partition table replaced the primary (stale GPT backup at end). */
         if (!p_present && !diag->mbr_protective) {
             diag->klass = GPT_CLASS_UNSAFE_TO_RECOVER;
             diag->capability = GPT_RECOVER_MANUAL_ONLY;
@@ -718,9 +698,7 @@ static void gpt_classify(gpt_diag_t *diag) {
         return;
     }
 
-    /* Neither copy is usable.  If a copy verifies structurally but its
-     * partition layout does not, say so specifically - it is a different
-     * problem from a failed CRC and needs different handling. */
+    /* Neither copy usable; distinguish layout failure from CRC failure. */
     if ((p_present && p->header_status == GPT_VALID &&
          p->entries_status == GPT_VALID && p->layout_status == GPT_INVALID) ||
         (b_present && b->header_status == GPT_VALID &&
@@ -839,8 +817,7 @@ EFI_STATUS gpt_diagnose(gpt_dev_t *dev, int full, gpt_diag_t *out) {
 
     if (!dev->read) return EFI_INVALID_PARAMETER;
 
-    /* Reject geometry we cannot represent before doing any arithmetic on it.
-     * Everything below assumes total_sectors >= 2 and a sane sector size. */
+    /* Reject geometry we cannot represent before arithmetic. */
     if (dev->sector_size < GPT_SECTOR_SIZE_MIN ||
         dev->sector_size > GPT_SECTOR_SIZE_MAX) {
         out->primary.header_status = out->backup.header_status = GPT_INVALID;
@@ -986,10 +963,9 @@ gpt_status_t gpt_table_status(const gpt_table_t *t) {
     }
 }
 
-/* True only for a table we may copy FROM: fully validated *and* backed by real
- * entry bytes we actually read.  The fast path fills in a header-only backup
- * (raw == NULL) when the primary is pristine; that table is fine to report but
- * must never be used as a recovery source. */
+/* True only for a table we may copy FROM: fully validated and backed by real
+ * entry bytes. Header-only backups (raw == NULL) are fine to report but not
+ * to use as recovery source. */
 int gpt_table_is_source(const gpt_table_t *t) {
     if (!t) return 0;
     return t->present &&
@@ -1001,9 +977,8 @@ int gpt_table_is_source(const gpt_table_t *t) {
            t->hdr_raw_bytes >= (UINTN)t->hdr.header_size;
 }
 
-/* Partition type GUIDs as they appear ON DISK: the first three fields are
- * little-endian, so the byte order here is not the textual GUID order.
- * These are generated from the canonical text form - do not hand-edit. */
+/* Partition type GUIDs as they appear ON DISK (first three fields little-endian).
+ * Generated from canonical text form - do not hand-edit. */
 static const struct { const UINT8 g[16]; const CHAR16 *name; } KNOWN_TYPES[] = {
     { { 0x28,0x73,0x2a,0xc1,0x1f,0xf8,0xd2,0x11,0xba,0x4b,0x00,0xa0,0xc9,0x3e,0xc9,0x3b },
       L"EFI System Partition" },
@@ -1056,8 +1031,7 @@ const CHAR16* gpt_type_name(const UINT8 type_guid[16]) {
     return NULL;
 }
 
-/* Render an on-disk GUID in canonical text form.  The first three fields are
- * stored little-endian on disk, so they are emitted byte-reversed. */
+/* Render an on-disk GUID in canonical text form (first three fields byte-reversed). */
 void gpt_format_guid(const UINT8 guid[16], CHAR16 *out, UINTN cap) {
     static const CHAR16 hex[] = L"0123456789abcdef";
     static const int order[16] = { 3,2,1,0, -1, 5,4, -1, 7,6, -1, 8,9, -1,
@@ -1178,11 +1152,7 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
         return 0;
     }
 
-    /* The source must be the real backup: sitting on the last LBA and pointing
-     * back at LBA 1.  A "backup" that claims to live elsewhere describes a
-     * different geometry than the one we are about to write, so recovering
-     * from it is ambiguous - refuse here rather than letting the pre-commit
-     * re-read reject it later and report it as a disk change. */
+    /* Source must be the real backup: last LBA, pointing back at LBA 1. */
     if (b->hdr.current_lba != diag->total_sectors - 1) {
         plan->reason = GPT_R_BACKUP_NOT_AT_END;
         return 0;
@@ -1228,17 +1198,14 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
         return 0;
     }
 
-    /* The destination metadata region must fit strictly before the first
-     * usable LBA.  This is what proves the rewrite cannot touch partition
-     * data - it must hold before any write is even contemplated. */
+    /* Destination metadata must fit strictly before first usable LBA. */
     if (plan->first_usable_lba <= plan->dst_entries_lba ||
         plan->entry_array_sectors > plan->first_usable_lba - plan->dst_entries_lba) {
         plan->reason = GPT_R_NO_SAFE_DESTINATION;
         return 0;
     }
 
-    /* Belt and braces: walk the actual partition list and prove no partition
-     * intersects the sectors we are going to write, including LBA 0/1. */
+    /* Walk partition list and prove no partition intersects written sectors. */
     {
         UINT64 wr_first = plan->dst_header_lba;
         UINT64 wr_last  = plan->dst_entries_lba + plan->entry_array_sectors - 1;
@@ -1249,7 +1216,7 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
                 plan->reason = GPT_R_METADATA_OVERLAP;
                 return 0;
             }
-            /* And nothing may sit on top of the backup copy we read from. */
+            /* Nothing may sit on top of the backup copy we read from. */
             if (e->first_lba <= plan->src_header_lba &&
                 plan->src_header_lba <= e->last_lba) {
                 plan->reason = GPT_R_METADATA_OVERLAP;
@@ -1266,9 +1233,7 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
     plan->entry_bytes = e;
     plan->new_entries_crc = gpt_crc32(0, e, (UINTN)plan->entry_array_bytes);
 
-    /* The rebuilt array must reproduce the source's own recorded CRC - if it
-     * does not, the bytes we hold are not the ones the backup header vouches
-     * for and nothing may be written. */
+    /* Rebuilt array must reproduce the source's recorded CRC. */
     if (plan->new_entries_crc != plan->src_entries_crc) {
         gpt_plan_free(plan);
         plan->safety = GPT_UNKNOWN;
@@ -1279,10 +1244,7 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
     UINT8 *h = gpt_alloc(plan->sector_size);
     if (!h) { gpt_plan_free(plan); plan->reason = GPT_R_OUT_OF_MEMORY; return 0; }
 
-    /* Start from the source header's exact bytes (preserving header_size and
-     * any vendor-specific tail beyond the 92-byte base), then patch only the
-     * fields that describe the copy's own location.  The header CRC is then
-     * taken over the preserved size. */
+    /* Start from source header's exact bytes, patch location fields only. */
     UINT32 hsize = b->hdr.header_size;
     ZeroMem(h, plan->sector_size);
     RCOPY(h, b->hdr_raw, hsize);
@@ -1292,8 +1254,7 @@ int gpt_build_primary_plan(const gpt_diag_t *diag, gpt_plan_t *plan) {
     put_le32(h + 80, plan->entry_count);
     put_le32(h + 84, plan->entry_size);
     put_le32(h + 88, plan->new_entries_crc);
-    /* The stored field must read zero while the header CRC is being computed -
-     * never leave the source copy's own CRC in the field for the math. */
+    /* Stored CRC field must be zero during computation. */
     put_le32(h + 16, 0);
     UINT32 new_hdr_crc = gpt_crc32(0, h, hsize);
     put_le32(h + 16, new_hdr_crc);
@@ -1346,10 +1307,7 @@ void gpt_result_free(gpt_result_t *result) {
     ZeroMem(result, sizeof(*result));
 }
 
-/* Re-read the recovery source immediately before committing and prove it is
- * still bit-for-bit what the plan was built from.  This closes the
- * time-of-check/time-of-use window: anything that differs means the disk (or
- * the medium) changed under us and the repair must abort. */
+/* Re-read recovery source before committing; abort if it changed (TOCTOU). */
 static int gpt_revalidate_source(gpt_dev_t *dev, const gpt_plan_t *plan) {
     UINT8 *sec = gpt_alloc(dev->sector_size);
     if (!sec) return 0;
@@ -1377,7 +1335,7 @@ static int gpt_revalidate_source(gpt_dev_t *dev, const gpt_plan_t *plan) {
     if (le64(sec + 48) != plan->last_usable_lba) goto done;
     if (le32(sec + 88) != plan->src_entries_crc) goto done;
 
-    /* The header must still be self-consistent, not merely unchanged. */
+    /* Header must still be self-consistent. */
     {
         UINT32 hsize = le32(sec + 12);
         if (hsize < GPT_HEADER_SIZE_MIN || hsize > dev->sector_size ||
@@ -1395,7 +1353,7 @@ static int gpt_revalidate_source(gpt_dev_t *dev, const gpt_plan_t *plan) {
                             (UINTN)plan->entry_array_sectors, arr))) goto done;
     if (gpt_crc32(0, arr, (UINTN)plan->entry_array_bytes) != plan->src_entries_crc)
         goto done;
-    /* And the bytes must be exactly the ones staged in the plan. */
+    /* Bytes must match the staged plan exactly. */
     if (plan->entry_bytes &&
         CompareMem(arr, plan->entry_bytes, (UINTN)plan->entry_array_bytes) != 0)
         goto done;
@@ -1429,10 +1387,7 @@ EFI_STATUS gpt_execute_plan(gpt_dev_t *dev, const gpt_plan_t *plan,
         return EFI_DEVICE_ERROR;
     }
 
-    /* Snapshot the sectors we are about to overwrite (LBA 0, LBA 1 and the
-     * primary entry array) so the caller can log or restore the exact bytes
-     * that were replaced.  Purely read-only; failure to snapshot is not fatal
-     * to the repair, but is recorded. */
+    /* Snapshot sectors before overwriting (for logging/restore). */
     result->preimage_bytes = 0;
     if (!EFI_ERROR(gpt_read_preimage(dev, plan, &result->preimage,
                                      &result->preimage_bytes)))

@@ -4,9 +4,7 @@
 #include <efilib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* CRC32 (PNG / ISO 3309, reflected)                                  */
-/* ------------------------------------------------------------------ */
+/* CRC32 (PNG / ISO 3309, reflected) */
 
 static UINT32 cap_crc32_table[256];
 static int    cap_crc32_ready = 0;
@@ -30,9 +28,7 @@ static UINT32 cap_crc32(UINT32 crc, const UINT8 *data, UINTN len) {
     return ~crc;
 }
 
-/* ------------------------------------------------------------------ */
-/* ADLER32                                                             */
-/* ------------------------------------------------------------------ */
+/* ADLER32 */
 
 static UINT32 cap_adler32(const UINT8 *data, UINTN len) {
     UINT32 a = 1, b = 0;
@@ -43,9 +39,7 @@ static UINT32 cap_adler32(const UINT8 *data, UINTN len) {
     return (b << 16) | a;
 }
 
-/* ------------------------------------------------------------------ */
-/* Small growable byte buffer (uses efi_allocate_pool)                 */
-/* ------------------------------------------------------------------ */
+/* Small growable byte buffer */
 
 typedef struct {
     UINT8  *buf;
@@ -88,13 +82,11 @@ static int cap_buf_u16le(cap_buf *b, UINT16 v) {
     return cap_buf_put(b, t, 2);
 }
 
-/* ------------------------------------------------------------------ */
-/* PNG encoder (stored / uncompressed DEFLATE)                         */
-/* ------------------------------------------------------------------ */
+/* PNG encoder (stored / uncompressed DEFLATE) */
 
-#define CAP_PNG_CHUNK_IHDR 0x52484449u  /* "IHDR" */
-#define CAP_PNG_CHUNK_IDAT 0x54414449u  /* "IDAT" */
-#define CAP_PNG_CHUNK_IEND 0x444E4549u  /* "IEND" */
+#define CAP_PNG_CHUNK_IHDR 0x52484449u
+#define CAP_PNG_CHUNK_IDAT 0x54414449u
+#define CAP_PNG_CHUNK_IEND 0x444E4549u
 
 EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
                           UINT8 **out, UINTN *out_size) {
@@ -102,11 +94,11 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
     *out = NULL;
     *out_size = 0;
 
-    cap_buf raw;                    /* filtered scanlines: 0x00 + RGB per row */
+    cap_buf raw;
     raw.buf = NULL; raw.len = 0; raw.cap = 0;
-    cap_buf zl;                     /* zlib stream (stored blocks)           */
+    cap_buf zl;
     zl.buf = NULL; zl.len = 0; zl.cap = 0;
-    cap_buf png;                    /* final png                             */
+    cap_buf png;
     png.buf = NULL; png.len = 0; png.cap = 0;
 
     UINTN rsize = h * (1 + w * 3);
@@ -114,23 +106,21 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
 
     /* Build the filtered raw stream. */
     for (UINTN y = 0; y < h; y++) {
-        raw.buf[raw.len++] = 0x00;                      /* PNG filter: None */
+        raw.buf[raw.len++] = 0x00;
         const UINT32 *row = pixels + y * w;
         for (UINTN x = 0; x < w; x++) {
             UINT32 p = row[x];
-            raw.buf[raw.len++] = (UINT8)(p >> 16);      /* R */
-            raw.buf[raw.len++] = (UINT8)(p >> 8);       /* G */
-            raw.buf[raw.len++] = (UINT8)p;              /* B */
+            raw.buf[raw.len++] = (UINT8)(p >> 16);
+            raw.buf[raw.len++] = (UINT8)(p >> 8);
+            raw.buf[raw.len++] = (UINT8)p;
         }
     }
 
-    /* zlib header */
     {
         UINT8 hdr[2] = { 0x78, 0x01 };
         if (!cap_buf_put(&zl, hdr, 2)) goto fail;
     }
 
-    /* Emit stored DEFLATE blocks over raw (max 65535 bytes each). */
     {
         const UINTN STORED_MAX = 65535;
         UINTN off = 0;
@@ -139,7 +129,7 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
             UINTN n = raw.len - off;
             if (n > STORED_MAX) n = STORED_MAX;
             final = (off + n >= raw.len);
-            UINT8 bhdr = (UINT8)(final ? 1 : 0);   /* BTYPE=00 stored */
+            UINT8 bhdr = (UINT8)(final ? 1 : 0);
             UINT8 p16[4];
             p16[0] = (UINT8)n; p16[1] = (UINT8)(n >> 8);
             UINTN nlen = ((UINTN)0xFFFF) ^ n;
@@ -151,14 +141,12 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
         }
     }
 
-    /* adler32 over raw */
     {
         UINT32 a = cap_adler32(raw.buf, raw.len);
         if (!cap_buf_u32be(&zl, a)) goto fail;
     }
     cap_buf_free(&raw);
 
-    /* PNG signature */
     {
         static const UINT8 sig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
         if (!cap_buf_put(&png, sig, 8)) goto fail;
@@ -169,11 +157,11 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
         ihdr[2] = (UINT8)(w >> 8);  ihdr[3] = (UINT8)w;
         ihdr[4] = (UINT8)(h >> 24); ihdr[5] = (UINT8)(h >> 16);
         ihdr[6] = (UINT8)(h >> 8);  ihdr[7] = (UINT8)h;
-        ihdr[8] = 8;                /* bit depth   */
-        ihdr[9] = 2;                /* color type: truecolor */
-        ihdr[10] = 0;               /* compression */
-        ihdr[11] = 0;               /* filter      */
-        ihdr[12] = 0;               /* interlace   */
+        ihdr[8] = 8;
+        ihdr[9] = 2;
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
         UINT8 type[4] = { 'I', 'H', 'D', 'R' };
         if (!cap_buf_u32be(&png, 13)) goto fail;
         if (!cap_buf_put(&png, type, 4)) goto fail;
@@ -183,7 +171,6 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
         if (!cap_buf_u32be(&png, crc)) goto fail;
     }
 
-    /* IDAT */
     {
         UINT8 type[4] = { 'I', 'D', 'A', 'T' };
         UINT32 idat_crc = cap_crc32(0, type, 4);
@@ -195,7 +182,6 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
     }
     cap_buf_free(&zl);
 
-    /* IEND */
     {
         UINT8 type[4] = { 'I', 'E', 'N', 'D' };
         UINT32 crc = cap_crc32(0, type, 4);
@@ -215,16 +201,14 @@ fail:
     return EFI_OUT_OF_RESOURCES;
 }
 
-/* ------------------------------------------------------------------ */
-/* GIF encoder                                                         */
-/* ------------------------------------------------------------------ */
+/* GIF encoder */
 
 #define CAP_GIF_CLEAR 256
 #define CAP_GIF_EOI   257
 #define CAP_GIF_MAXCODE 4096
 
 typedef struct {
-    UINT8  *idx;                    /* w*h palette indexes */
+    UINT8  *idx;
     UINT8   palette[256 * 3];
 } cap_gif_fr;
 
@@ -235,7 +219,7 @@ struct cap_gif {
     cap_gif_fr *frames[CAP_GIF_MAX_FRAMES];
 };
 
-#define CAP_BUCKETS 32768           /* 5 bits per channel */
+#define CAP_BUCKETS 32768
 
 /* Median-cut quantizer over the 5-bit-per-channel histogram.
  * Splits the RGB cube (bucket index space, 0..31) into at most maxc boxes
@@ -328,7 +312,6 @@ static UINTN cap_median_cut(const UINT32 *hist, UINT8 *palette, UINTN maxc) {
     return (UINTN)nb;
 }
 
-/* Build a per-frame 256-colour palette and index map (5 bits per channel). */
 static int cap_gif_quantize(const UINT32 *pixels, UINTN n,
                             UINT8 *palette, UINT8 *idx) {
     UINT32 *hist = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
@@ -424,14 +407,14 @@ void cap_gif_free(cap_gif *g) {
     efi_free_pool(g);
 }
 
-/* ---- LZW sub-block writer ---- */
+/* LZW sub-block writer */
 
 typedef struct {
     cap_buf  out;
     UINTN    bitbuf, bitcnt;
     UINT8    sub[256];
     UINTN    sublen;
-    int      err;                /* set on OOM while writing; no partial data */
+    int      err;
 } lzw_writer;
 
 static void lzw_byte(lzw_writer *w, UINT8 b) {
@@ -465,18 +448,17 @@ static void lzw_code(lzw_writer *w, UINTN code, UINTN codesize) {
     }
 }
 
-/* Hash table mapping (prefix,char) -> code for a single image.
- * Open addressing; 8191 slots. */
+/* Hash table mapping (prefix,char) -> code. Open addressing; 8191 slots. */
 #define LZW_HASH_SIZE 8191
 typedef struct {
-    UINT32 key;        /* (prefix<<8)|char, or 0xFFFFFFFF empty */
+    UINT32 key;
     UINT16 code;
 } lzw_slot;
 
 typedef struct {
-    lzw_slot *slot;    /* hash table */
-    UINT16   *pref;    /* prefixes[code] */
-    UINT8    *ch;      /* chars[code] */
+    lzw_slot *slot;
+    UINT16   *pref;
+    UINT8    *ch;
 } lzw_dict;
 
 static void lzw_dict_clear(lzw_dict *d) {
@@ -509,7 +491,7 @@ static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
                                      UINT8 **data, UINTN *datalen,
                                      UINTN *min_code_size) {
     (void)g;
-    UINTN minsize = 8;                     /* 256-color palette */
+    UINTN minsize = 8;
     *min_code_size = minsize;
 
     lzw_writer w;
@@ -528,12 +510,12 @@ static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
         return EFI_OUT_OF_RESOURCES;
     }
 
-    /* Single-symbol codes 0..255 are implicit (code == char). */
+    /* Single-symbol codes 0..255 are implicit. */
     for (UINTN c = 0; c < 256; c++) { d.pref[c] = 0; d.ch[c] = (UINT8)c; }
     lzw_dict_clear(&d);
 
     UINTN codesize = minsize + 1;
-    UINTN next = CAP_GIF_EOI + 1;   /* 258 */
+    UINTN next = CAP_GIF_EOI + 1;
     UINTN prefix;
 
     lzw_code(&w, CAP_GIF_CLEAR, codesize);
@@ -565,7 +547,6 @@ static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
 
     lzw_code(&w, CAP_GIF_EOI, codesize);
 
-    /* flush any remaining bits */
     if (w.bitcnt > 0) {
         lzw_byte(&w, (UINT8)(w.bitbuf & 0xFF));
         w.bitbuf = 0; w.bitcnt = 0;
@@ -591,13 +572,13 @@ static EFI_STATUS cap_gif_build(cap_gif *g, UINT8 **out, UINTN *out_size) {
     outb.buf = NULL; outb.len = 0; outb.cap = 0;
     if (!cap_buf_reserve(&outb, 4096 + g->nframes * (g->w * g->h / 2))) goto oom;
 
-    /* Header — no global colour table; each frame carries its own palette. */
+    /* Header - no global colour table; each frame carries its own palette. */
     if (!cap_buf_put(&outb, (const UINT8*)"GIF89a", 6)) goto oom;
     if (!cap_buf_u16le(&outb, (UINT16)g->w)) goto oom;
     if (!cap_buf_u16le(&outb, (UINT16)g->h)) goto oom;
-    outb.buf[outb.len++] = 0x00;            /* no GCT */
-    outb.buf[outb.len++] = 0x00;            /* bg index */
-    outb.buf[outb.len++] = 0x00;            /* aspect */
+    outb.buf[outb.len++] = 0x00;
+    outb.buf[outb.len++] = 0x00;
+    outb.buf[outb.len++] = 0x00;
 
     for (UINTN f = 0; f < g->nframes; f++) {
         cap_gif_fr *fr = g->frames[f];
@@ -651,9 +632,7 @@ EFI_STATUS cap_gif_close(cap_gif *g, UINT8 **out, UINTN *out_size) {
     return EFI_SUCCESS;
 }
 
-/* ------------------------------------------------------------------ */
-/* ESP file helpers                                                    */
-/* ------------------------------------------------------------------ */
+/* ESP file helpers */
 
 #ifndef CAP_NO_IO
 
@@ -700,11 +679,10 @@ void cap_timestamp_name(CHAR16 *out, UINTN cap, const CHAR16 *base,
     if (!EFI_ERROR(RT->GetTime(&t, NULL))) {
         ho = t.Hour; mi = t.Minute; se = t.Second;
     }
-    /* guard against undefined time */
     if (ho > 99) ho = 0;
     if (mi > 99) mi = 0;
     if (se > 99) se = 0;
-    /* base_HHMMSS.ext  (built manually, no SPrint) */
+    /* base_HHMMSS.ext */
     UINTN n = 0;
     for (UINTN i = 0; base && base[i] && n + 1 < cap; i++) out[n++] = base[i];
     if (n + 1 < cap) out[n++] = L'_';
@@ -717,4 +695,4 @@ void cap_timestamp_name(CHAR16 *out, UINTN cap, const CHAR16 *base,
     out[n < cap ? n : cap - 1] = 0;
 }
 
-#endif /* !CAP_NO_IO */
+#endif

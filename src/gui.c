@@ -3608,9 +3608,7 @@ static int editor_key(gui_state_t *state, EFI_INPUT_KEY *key) {
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* GPT corruption warning modal                                        */
-/* ------------------------------------------------------------------ */
+/* GPT corruption warning modal */
 
 static void gptw_close(gui_state_t *state) {
     gpt_result_free(&state->gptw_res);
@@ -3673,7 +3671,7 @@ static void gptw_draw(gui_state_t *state) {
     gpt_diag_t *dg = &state->gptw_diag;
     gpt_plan_t  *pl = &state->gptw_plan;
 
-    if (state->gptw_state == 2) {                       /* overview */
+    if (state->gptw_state == 2) {
         draw_text_px_a(state, L"Possible disk corruption detected",
                        (INTN)tx, (INTN)ty, COLOR_RED, th, 255);
         ty += th + 12;
@@ -3827,8 +3825,7 @@ static void gptw_draw(gui_state_t *state) {
     }
 }
 
-/* Drop any keystrokes queued while the menu was idle so a stray Enter or
- * mouse click cannot instantly confirm the destructive step. */
+/* Drop queued keystrokes so a stray Enter cannot confirm the destructive step. */
 static void con_in_drain(gui_state_t *state) {
     EFI_INPUT_KEY k;
     while (!EFI_ERROR(uefi_call_wrapper(ST->ConIn->ReadKeyStroke, 2,
@@ -3911,7 +3908,7 @@ static void gpt_warn_run(gui_state_t *state) {
     if (!found || !state->gptw_have_dev) return;
 
     con_in_drain(state);
-    state->gptw_state = 2;          /* overview */
+    state->gptw_state = 2;
     state->gptw_confirm[0] = 0;
     efi_log(L"gpt: primary GPT corruption detected - offering repair");
 
@@ -3961,7 +3958,7 @@ static void gpt_warn_run(gui_state_t *state) {
             } else if (u == 0x0D) {
                 if (gptw_eq_ci(state->gptw_confirm, L"YES") ||
                     gptw_eq_ci(state->gptw_confirm, L"Y")) {
-                    state->gptw_state = 4;      /* working */
+                    state->gptw_state = 4;
                     gui_draw_menu(state, 0);
                     gptw_draw(state);
                     gui_present(state);
@@ -4132,18 +4129,15 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
     return moved ? 2 : 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Capture: F6 = PNG screenshot, F10 = animated GIF recording           */
+/* Capture: F6 = PNG screenshot, F10 = animated GIF recording */
 
 #define CAP_COUNTDOWN_MS 3000u
 #define CAP_RECORD_MS    3000u
-#define CAP_FRAME_MS     50u            /* 20 fps */
-#define CAP_MAX_FRAMES   (CAP_RECORD_MS / CAP_FRAME_MS)   /* 60 */
+#define CAP_FRAME_MS     50u
+#define CAP_MAX_FRAMES   (CAP_RECORD_MS / CAP_FRAME_MS)
 #define CAP_TOAST_MS     2000
 
-/* Show a status toast (green = ok, red = error).  Resets the countdown
- * clock so the message is always visible for its full CAP_TOAST_MS window,
- * even if a recording ran in between. */
+/* Show a status toast (green = ok, red = error). */
 static void cap_set_toast(gui_state_t *state, const CHAR16 *msg, int is_err) {
     SPrint(state->cap_status, sizeof(state->cap_status), L"%s", msg);
     state->cap_status_err = is_err;
@@ -4184,7 +4178,7 @@ static void cap_start_record(gui_state_t *state) {
     state->cap_gif = NULL;
     state->cap_sec_prev = CAP_COUNTDOWN_MS / 1000 + 1;
     state->cap_status[0] = 0;
-    state->cap_status_ms = -1;          /* clear any stale toast */
+    state->cap_status_ms = -1;
 }
 
 static void cap_cancel_record(gui_state_t *state) {
@@ -4219,9 +4213,7 @@ static void cap_finish_record(gui_state_t *state) {
     }
 }
 
-/* Grab every GIF frame whose deadline has passed.  For animated backgrounds
- * only one frame is taken per call (the backbuffer must advance between
- * grabs); static scenes catch up in a single pass.  Returns 0 on OOM. */
+/* Grab every GIF frame whose deadline has passed. Returns 0 on OOM. */
 static int cap_grab_due_frames(gui_state_t *state) {
     if (!state->cap_gif) return 1;
     UINT64 el = efi_get_tick() - state->cap_start_ms;
@@ -4238,8 +4230,7 @@ static int cap_grab_due_frames(gui_state_t *state) {
     return 1;
 }
 
-/* Called once per main-loop iteration while cap_mode != 0 or a toast is
- * up.  Returns 2 when the HUD needs a full redraw, 0 otherwise. */
+/* Called once per main-loop iteration while cap_mode != 0 or a toast is up. */
 static int cap_tick(gui_state_t *state) {
     UINT64 now = efi_get_tick();
 
@@ -4250,15 +4241,15 @@ static int cap_tick(gui_state_t *state) {
         state->cap_last_ms = now;
         if (dt > 0) state->cap_status_ms -= dt;
         if (state->cap_status_ms <= 0) {
-            state->cap_status_ms = -1;  /* toast expired: one redraw clears it */
+            state->cap_status_ms = -1;
             return 2;
         }
-        return 0;                       /* toast already drawn; nothing to do */
+        return 0;
     }
 
     UINT64 el = now - state->cap_start_ms;
 
-    if (state->cap_mode == 2) {                       /* countdown */
+    if (state->cap_mode == 2) {
         if (el >= CAP_COUNTDOWN_MS) {
             state->cap_gif = cap_gif_new(state->screen_width, state->screen_height);
             state->cap_sec_prev = CAP_RECORD_MS / 1000 + 1;
@@ -4273,14 +4264,14 @@ static int cap_tick(gui_state_t *state) {
             return 2;
         }
         UINTN sec = (CAP_COUNTDOWN_MS - (UINT64)el + 999) / 1000;
-        if (sec != state->cap_sec_prev) {              /* redraw 1x/second */
+        if (sec != state->cap_sec_prev) {
             state->cap_sec_prev = sec;
             return 2;
         }
         return 0;
     }
 
-    if (state->cap_mode == 3) {                       /* capturing */
+    if (state->cap_mode == 3) {
         if (el >= CAP_RECORD_MS || state->cap_frames >= CAP_MAX_FRAMES) {
             if (state->cap_gif) {
                 cap_grab_due_frames(state);
@@ -4290,7 +4281,7 @@ static int cap_tick(gui_state_t *state) {
         }
 
         UINTN sec = (CAP_RECORD_MS - (UINT64)el + 999) / 1000;
-        if (sec != state->cap_sec_prev) {              /* REC badge tick */
+        if (sec != state->cap_sec_prev) {
             state->cap_sec_prev = sec;
             return 2;
         }
@@ -4300,9 +4291,7 @@ static int cap_tick(gui_state_t *state) {
     return 0;
 }
 
-/* Small REC badge in the top-right corner while capturing.  It is drawn
- * into the backbuffer, so it is also visible inside the finished GIF - an
- * intended "this was recorded" marker. */
+/* Small REC badge in the top-right corner while capturing. */
 static void cap_draw_rec_badge(gui_state_t *state) {
     UINT64 el = efi_get_tick() - state->cap_start_ms;
     UINTN rem = el >= CAP_RECORD_MS ? 0 : (CAP_RECORD_MS - (UINT64)el) / 1000;

@@ -649,9 +649,7 @@ static CHAR16* effective_cmdline(boot_entry_t *e, gui_state_t *state) {
     return e ? e->cmdline : NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* GPT diagnostics / recovery commands                                 */
-/* ------------------------------------------------------------------ */
+/* GPT diagnostics / recovery commands */
 
 static int gpt_cmd_open(UINT32 media_id, gpt_dev_t *dev) {
     return gpt_disk_open_media_id(media_id, dev);

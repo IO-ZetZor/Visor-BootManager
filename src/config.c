@@ -1324,10 +1324,7 @@ static int bls_arch_ok(CHAR16 *arch) {
 #endif
 }
 
-/* Ordering of deployments within a group:
- *  - OSTree entries rank by ostree index first (higher = newer = on top)
- *  - otherwise sort_key decides (alphabetical, entries with sort_key first)
- *  - ties keep discovery order (smaller scan index first) */
+/* Ordering of deployments within a group (OSTree index first, then sort_key). */
 static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
     int oa = a->ot_idx, ob = b->ot_idx;
     if (oa >= 0 || ob >= 0) {
@@ -1434,8 +1431,8 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
         }
         efi_free_pool(buf);
 
-        /* Accept entries with either linux or efi field (BLS spec requires at least one).
-         * EFI-only entries: map efi path -> kernel so visor_boot() chainloads them. */
+        /* Accept entries with either linux or efi field (BLS spec).
+         * EFI-only: map efi path -> kernel so visor_boot() chainloads them. */
         if (!r.kernel && r.efi) { r.kernel = r.efi; r.efi = NULL; }
         if (r.title && r.kernel && bls_arch_ok(r.arch)) {
             r.conf = efi_strdup(path);

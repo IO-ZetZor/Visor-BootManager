@@ -2,54 +2,49 @@
 #define EFI_SELFHEAL_H
 
 #ifdef NVSH_HOST
-/* types (UINT16, UINT8, ...) provided by the harness (efi_stub.h) */
 #else
 #include <efi.h>
 #endif
 
-/* Boot-order repair policies. See docs/boot.conf.schema.json (boot_order).
- *
+/* Boot-order repair policies:
  * OFF    - never touch NVRAM Boot entries or BootOrder.
- * ENSURE - recreate a missing Visor Boot#### entry and append it to BootOrder;
- *          never rearrange an existing order.
- * FIRST  - ENSURE plus: when firmware reports BootCurrent == our entry (a
- *          normal boot through the boot manager, including one-time selection
- *          from the firmware menu), move our entry to the head of BootOrder.
- *          On fallback / one-time no-slot boots behaves like ENSURE.
+ * ENSURE - recreate a missing Boot#### and append it to BootOrder.
+ * FIRST  - ENSURE plus: promote our entry to the head of BootOrder on a
+ *          normal boot-manager boot; behaves like ENSURE otherwise.
  */
 #define NVSH_ORDER_OFF     0
 #define NVSH_ORDER_ENSURE  1
 #define NVSH_ORDER_FIRST   2
 
 #define NVSH_ERR_OK            0
-#define NVSH_ERR_DISABLED      1  /* all self-heal disabled by config */
-#define NVSH_ERR_REMOVABLE     2  /* booted from removable media - skipped */
-#define NVSH_ERR_NO_IMAGE      3  /* cannot resolve our own loaded path */
-#define NVSH_ERR_BOOTMGR       4  /* generic firmware-variable failure */
-#define NVSH_ERR_ORDER_LOCKED  5  /* SetVariable(BootOrder) denied */
-#define NVSH_ERR_ENTRY_LOCKED  6  /* SetVariable(Boot####) denied */
-#define NVSH_ERR_NOSLOT        7  /* no free Boot#### slot */
+#define NVSH_ERR_DISABLED      1
+#define NVSH_ERR_REMOVABLE     2
+#define NVSH_ERR_NO_IMAGE      3
+#define NVSH_ERR_BOOTMGR       4
+#define NVSH_ERR_ORDER_LOCKED  5
+#define NVSH_ERR_ENTRY_LOCKED  6
+#define NVSH_ERR_NOSLOT        7
 
 typedef struct {
-    int order_mode;       /* NVSH_ORDER_* */
-    int restore_fallback; /* restore \EFI\BOOT\BOOTx64.EFI from our binary */
-    int dry_run;          /* compute and log the plan, write nothing */
+    int order_mode;
+    int restore_fallback;
+    int dry_run;
 } nvsh_policy_t;
 
 typedef struct {
-    int    entry_present;    /* a Boot#### pointing at our image exists */
-    int    entry_in_order;   /* our entry appears in BootOrder */
-    int    entry_created;    /* this run created our Boot#### */
-    int    order_missing;    /* BootOrder variable is absent */
-    int    order_updated;    /* this run rewrote BootOrder */
-    int    normal_boot;      /* BootCurrent matched our entry */
-    int    removable;        /* booted from removable media */
+    int    entry_present;
+    int    entry_in_order;
+    int    entry_created;
+    int    order_missing;
+    int    order_updated;
+    int    normal_boot;
+    int    removable;
     int    fallback_restored;
     int    fallback_unneeded;
-    UINT16 our_entry;        /* our Boot#### slot (0xFFFF = none) */
-    UINT16 bootcurrent;      /* raw BootCurrent value */
-    int    error;            /* NVSH_ERR_* */
-    CHAR16 our_path[164];    /* image path we ran from */
+    UINT16 our_entry;
+    UINT16 bootcurrent;
+    int    error;
+    CHAR16 our_path[164];
 } nvsh_report_t;
 
 void nvsh_policy_defaults(nvsh_policy_t *policy);
@@ -59,7 +54,7 @@ nvsh_report_t nvram_self_heal(nvsh_policy_t *policy);
 const CHAR16* nvsh_order_name(int mode);
 const CHAR16* nvsh_err_text(int err);
 
-/* --- Pure helpers, also exercised by the host unit harness --- */
+/* Pure helpers, also exercised by the host unit harness */
 
 UINTN nvsh_load_option_size(const CHAR16 *desc, UINTN path_len);
 int   nvsh_build_load_option(UINT8 *out, UINTN cap, UINT32 attributes,

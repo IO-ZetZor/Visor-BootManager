@@ -362,28 +362,28 @@ typedef struct gui_state {
     int     hit_n;
 
     /* capture (F6 screenshot / F10 GIF record) state */
-    int     cap_mode;        /* 0=idle, 1=unused, 2=record countdown, 3=record capture */
-    UINT64  cap_start_ms;    /* timestamp when countdown/capture began */
-    UINTN   cap_frames;      /* frames captured so far */
-    INTN    cap_status_ms;   /* remaining ms to show a status toast, or -1 */
-    UINT64  cap_last_ms;     /* last loop tick (for toast countdown) */
-    CHAR16  cap_status[96];  /* status toast text */
-    int     cap_status_err;  /* toast drawn in red (error) instead of green */
-    UINTN   cap_sec_prev;    /* last second value drawn in HUD, for 1-Hz redraw */
-    cap_gif *cap_gif;        /* live gif encoder while recording */
+    int     cap_mode;
+    UINT64  cap_start_ms;
+    UINTN   cap_frames;
+    INTN    cap_status_ms;
+    UINT64  cap_last_ms;
+    CHAR16  cap_status[96];
+    int     cap_status_err;
+    UINTN   cap_sec_prev;
+    cap_gif *cap_gif;
 
-    /* GPT corruption warning modal.
-     * gptw_state: 0=hidden, 2=overview, 3=details, 6=confirm, 4=working, 5=done */
-    int      gptw_state;        /* 0=hidden,2=overview,3=details,6=confirm,4=working,5=done */
-    int      gptw_found;        /* at least one recoverable disk detected */
-    int      gptw_suppressed;   /* user dismissed this menu session */
-    CHAR16   gptw_disk[40];     /* device name */
-    gpt_dev_t    gptw_dev;      /* held open while dialog is up */
+    /* GPT corruption warning modal (gptw_state: 0=hidden, 2=overview,
+     * 3=details, 6=confirm, 4=working, 5=done) */
+    int      gptw_state;
+    int      gptw_found;
+    int      gptw_suppressed;
+    CHAR16   gptw_disk[40];
+    gpt_dev_t    gptw_dev;
     int          gptw_have_dev;
     gpt_diag_t   gptw_diag;
     gpt_plan_t   gptw_plan;
     gpt_result_t gptw_res;
-    CHAR16   gptw_confirm[8];   /* typed-YES buffer for the confirm step */
+    CHAR16   gptw_confirm[8];
 } gui_state_t;
 
 EFI_STATUS gui_init(gui_state_t *state);

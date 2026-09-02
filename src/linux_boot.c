@@ -427,9 +427,7 @@ static efi_file_buffer_t* load_from_open_root(EFI_FILE_PROTOCOL *root, CHAR16 *p
                                               CHAR16 **resolved_path) {
     int opened = 0;
     efi_file_buffer_t *buf = efi_load_file_from_root(root, path, &opened);
-    /* Only fall back to the stripped path when the configured one could not be
-     * opened at all. If it opened and the read failed, a read error must not
-     * silently boot a different file. */
+    /* Only fall back to the stripped path when the configured one could not be opened. */
     if (buf || opened || !root_path) return buf;
 
     buf = efi_load_file_from_root(root, root_path, NULL);

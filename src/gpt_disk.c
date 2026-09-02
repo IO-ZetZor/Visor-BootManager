@@ -15,12 +15,8 @@ typedef struct {
     UINT64        open_last_block;  
 } gpt_bio_t;
 
-/* Re-check, on every I/O, that the medium behind this handle is still exactly
- * the one we opened.  The MediaId is the UEFI-provided identity: when it moves
- * the medium has been swapped (or the device re-initialised), so refuse to act
- * on the new contents.  dev->media_id stays the open-time value - a driver
- * that silently re-reads the *current* MediaId every call cannot detect the
- * swap, which is exactly why plan/revalidate comparisons were unreliable. */
+/* Re-check on every I/O that the medium behind this handle hasn't been
+ * swapped. MediaId is the UEFI identity; when it moves, refuse to act. */
 static EFI_STATUS bio_refresh_identity(gpt_dev_t *dev, gpt_bio_t *b) {
     EFI_BLOCK_IO_MEDIA *m = b->bio->Media;
     if (!m) return EFI_DEVICE_ERROR;
@@ -142,9 +138,7 @@ void gpt_disk_close(gpt_dev_t *dev) {
     dev->flush = NULL;
 }
 
-/* Open the disk whose Media->MediaId equals media_id.  Matching on the
- * stable UEFI media identity (not a transient enumeration order) keeps a
- * later 'gpt repair' from hitting a different disk if the list moved. */
+/* Open the disk whose Media->MediaId equals media_id. */
 int gpt_disk_open_media_id(UINT32 media_id, gpt_dev_t *dev) {
     UINTN n = 0;
     EFI_HANDLE *hs = gpt_disk_enum(&n);

@@ -1,31 +1,11 @@
 /* Boot-time self-heal for Windows-style boot-takeover.
  *
- * Two problems are worth fixing automatically, because they require no user
- * involvement and a plain reboots corrects nothing:
+ * 1. NVRAM: ensure a Boot#### entry exists and (per policy) keep it first.
+ * 2. Fallback: re-copy our binary to \EFI\BOOT\BOOTX64.EFI.
  *
- *  1. NVRAM:  an OS update may move itself ahead in BootOrder or delete our
- *     Boot#### entry. Repair: ensure a Boot#### entry that points at our own
- *     running image exists, and (per policy) keep it first in BootOrder.
- *     Firmware level details (EFI_LOAD_OPTION layout, BootOrder rules) follow
- *     the UEFI spec exactly, so the same bytes work on the host test harness.
- *
- *  2. Fallback file: Windows occasionally overwrites \EFI\BOOT\BOOTX64.EFI
- *     (the "Removable media" fallback path). Repair: re-copy our own binary
- *     there, so a firmware that boots the fallback still lands in Visor.
- *
- * Safety rules (from real-world boot-manager research):
- *   - Never write NVRAM when booted from removable media (a rescue/live stick
- *     must not hijack a machine's boot order).
- *   - Never invent a BootOrder when the variable is absent; only re-add our
- *     own entry to an order that already exists. The fallback copy is what
- *     guarantees reachability in that state.
- *   - When a fallback / no-slot boot happens (BootCurrent absent or pointing
- *     elsewhere), a FULL policy still only appends - never reorders - because
- *     a one-time/firmware-menu boot should not silently change priority.
- *   - Writes are compare-and-write only: no NVRAM churn on a healthy boot.
- *
- * Nothing here is allowed to fail the boot: every step is best-effort and
- * logged to the boot log.
+ * Safety: never write NVRAM from removable media; never invent BootOrder;
+ * only append on fallback boots; compare-and-write only.
+ * Nothing here is allowed to fail the boot.
  */
 
 #include "efi_selfheal.h"
@@ -56,12 +36,10 @@ extern EFI_HANDLE IH;
 #define NVSH_DP_SUBTYPE_FILEPATH  0x04
 #define NVSH_DP_TYPE_END          0x7f
 
-#define NVSH_SLOTS           0x400   /* Boot0000 .. Boot03FF scan window */
+#define NVSH_SLOTS           0x400
 #define NVSH_MAX_OPTION      1024
 
-/* ------------------------------------------------------------------ */
-/* Pure data helpers                                                   */
-/* ------------------------------------------------------------------ */
+/* Pure data helpers */
 
 static UINTN nvsh_str16_len(const CHAR16 *s) {
     if (!s) return 0;
@@ -128,7 +106,7 @@ int nvsh_parse_load_option(const UINT8 *buf, UINTN size, UINT32 *attributes,
     UINTN dmax = (size - 6) / sizeof(CHAR16);
     UINTN dl = 0;
     while (dl < dmax && d[dl]) dl++;
-    if (dl >= dmax) return -1;                   /* unterminated description */
+    if (dl >= dmax) return -1;
     if (6 + (dl + 1) * sizeof(CHAR16) + plen > size) return -1;
     if (attributes) *attributes = attr;
     if (path_len) *path_len = (UINT16)plen;
@@ -160,7 +138,7 @@ int nvsh_replan_order(UINT16 *list, UINTN n, UINT16 ours, int mode,
     }
 
     if (pos < n) {
-        /* Already present. FIRST + normal boot may promote us to the head. */
+        /* FIRST + normal boot may promote us to the head. */
         if (mode == NVSH_ORDER_FIRST && normal_boot && pos != 0) {
             UINT16 keep = ours;
             for (UINTN i = pos; i > 0; i--) list[i] = list[i - 1];
@@ -170,8 +148,7 @@ int nvsh_replan_order(UINT16 *list, UINTN n, UINT16 ours, int mode,
         return 0;
     }
 
-    /* Absent: re-add, preserving every existing entry. Append, or prepend
-     * only for a FIRST policy on a normal boot-manager boot. */
+    /* Absent: re-add, preserving every existing entry. */
     if (new_n) *new_n = n + 1;
     list[n] = ours;
     if (mode == NVSH_ORDER_FIRST && normal_boot) {
@@ -200,9 +177,7 @@ int nvsh_walk_filepath(const UINT8 *dp, UINTN dp_len, const CHAR16 **path) {
 
 #ifndef NVSH_HOST
 
-/* ------------------------------------------------------------------ */
-/* EFI glue                                                            */
-/* ------------------------------------------------------------------ */
+/* EFI glue */
 
 static void nsh_log(const CHAR16 *fmt, ...) {
     CHAR16 buf[220];
@@ -220,7 +195,7 @@ static EFI_STATUS nvsh_var_get(const CHAR16 *name, EFI_GUID *guid,
     EFI_STATUS s = RT->GetVariable((CHAR16 *)name, guid, &a, &sz, NULL);
     if (s == EFI_NOT_FOUND || s == EFI_UNSUPPORTED) return s;
     if (s != EFI_BUFFER_TOO_SMALL) return EFI_DEVICE_ERROR;
-    if (sz == 0) return EFI_NOT_FOUND;       /* exists but empty -> treat as absent */
+    if (sz == 0) return EFI_NOT_FOUND;
     UINT8 *buf = efi_allocate_pool(sz);
     if (!buf) return EFI_OUT_OF_RESOURCES;
     s = RT->GetVariable((CHAR16 *)name, guid, &a, &sz, buf);
@@ -269,7 +244,7 @@ static void nvsh_strcpy_safe(CHAR16 *dst, UINTN cap, const CHAR16 *src) {
     dst[i] = 0;
 }
 
-/* Runs the full NVRAM pass. Returns nothing; reports into rep. */
+/* Runs the full NVRAM pass; reports into rep. */
 static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                             nvsh_report_t *rep) {
     /* BootCurrent */
@@ -288,15 +263,12 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
     else
         nsh_log(L"selfheal: BootCurrent=Boot%04X", (unsigned)bootcurrent);
 
-    /* Existing Boot#### entries; find the one pointing at us.
-     * Enumerate real variables with GetNextVariableName instead of probing
-     * existence via GetVariable: some firmwares (edk2/OVMF) answer stale or
-     * placeholder data for absent Boot#### names, which would fake a full
-     * slot table. Only variables that really exist appear in the iteration. */
+    /* Enumerate real variables with GetNextVariableName, not GetVariable:
+     * some firmwares answer stale data for absent Boot#### names. */
     UINT8 used[NVSH_SLOTS];
     NVSH_ZERO(used, sizeof(used));
     CHAR16 vn[512];
-    vn[0] = 0;              /* empty name -> start of the variable iteration */
+    vn[0] = 0;
     UINTN vnsz = sizeof(vn);
     EFI_GUID vg;
     UINT16 slot = 0xFFFF;
@@ -357,7 +329,7 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
         if (dry_run) {
             nsh_log(L"selfheal: dry run - would create Boot%04X -> %s",
                     (unsigned)could, run);
-            slot = could;           /* pretend for the order-planning step */
+            slot = could;
         } else {
             EFI_DEVICE_PATH *full = efi_make_file_path(
                 efi_boot_volume_handle(), (CHAR16 *)run);
@@ -404,7 +376,7 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                 }
             }
             efi_free_pool(full);
-            if (!present) return;   /* creation failed */
+            if (!present) return;
         }
     } else {
         nsh_log(L"selfheal: found existing entry Boot%04X for %s",

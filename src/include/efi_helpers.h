@@ -96,8 +96,7 @@ void efi_log_rotate(void);
 
 void efi_log_close(void);
 
-/* Number of OpenVolume calls issued so far. Logged once at handoff; each open
- * can cost tens of seconds on third-party EFI filesystem drivers. */
+/* Number of OpenVolume calls issued. Each open can cost tens of seconds. */
 UINTN efi_volume_open_count(void);
 
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count);

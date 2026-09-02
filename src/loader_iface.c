@@ -224,11 +224,8 @@ UINTN loader_apply_overrides(config_t *config, boot_entry_t *entries,
     UINTN pick = (UINTN)-1;
     (void)entry_count;
 
-    /* LoaderConfigTimeoutOneShot is a deliberate, transient request
-     * (systemctl reboot --boot-loader-menu=N), so it always wins.
-     * LoaderConfigTimeout is persistent NVRAM state that another boot loader
-     * may have left behind, so an explicit timeout= in boot.conf beats it -
-     * editing the config file has to be what actually decides the countdown. */
+    /* LoaderConfigTimeoutOneShot (transient) always wins over persistent
+     * LoaderConfigTimeout; explicit timeout= in boot.conf beats both. */
     CHAR16 *t1 = efi_get_loader_var(L"LoaderConfigTimeoutOneShot");
     if (t1) {
         INTN v;

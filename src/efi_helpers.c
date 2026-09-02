@@ -19,10 +19,8 @@ static EFI_HANDLE boot_device_handle(void) {
     return cached;
 }
 
-/* Counts every OpenVolume we issue. On volumes served by third-party EFI FS
- * drivers a single open can cost tens of seconds, so the count is the metric
- * that matters when diagnosing slow boots. Never log from the open path
- * itself: the logger opens a volume too, and would recurse. */
+/* Counts every OpenVolume call. Each open can cost tens of seconds on
+ * third-party EFI FS drivers. Never log from the open path (recursion). */
 static UINTN g_volume_opens = 0;
 
 UINTN efi_volume_open_count(void) {
