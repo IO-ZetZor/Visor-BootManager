@@ -210,9 +210,9 @@ fi
 boot_fs_type() {
     local t=""
     if mountpoint -q /boot 2>/dev/null; then
-        t="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
+        t="$(findmnt -Uno FSTYPE /boot 2>/dev/null || true)"
     fi
-    [ -z "$t" ] && t="$(findmnt -no FSTYPE / 2>/dev/null || true)"
+    [ -z "$t" ] && t="$(findmnt -Uno FSTYPE / 2>/dev/null || true)"
     echo "$t"
 }
 
@@ -348,7 +348,7 @@ detect_esp() {
     local m
     for m in /boot/efi /efi /boot; do
         if mountpoint -q "$m" 2>/dev/null && \
-           [ "$(findmnt -no FSTYPE "$m" 2>/dev/null)" = vfat ]; then
+           [ "$(findmnt -Uno FSTYPE "$m" 2>/dev/null)" = vfat ]; then
             echo "$m"; return
         fi
     done
@@ -502,7 +502,7 @@ if [ "$DO_BOOT_ENTRY" -eq 1 ]; then
     if ! command -v efibootmgr >/dev/null 2>&1; then
         warn "efibootmgr not installed; skipping boot entry."
     else
-        src="$(findmnt -no SOURCE "$ESP")" || die "Cannot resolve ESP device."
+        src="$(findmnt -Uno SOURCE "$ESP")" || die "Cannot resolve ESP device."
         disk="/dev/$(lsblk -no PKNAME "$src")"
         partnum="$(lsblk -no PARTN "$src" 2>/dev/null || \
                    echo "$src" | grep -o '[0-9]*$')"
