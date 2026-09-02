@@ -464,7 +464,7 @@ static UINTN jpeg_parse_header(mjpeg_t *st, const UINT8 *d, UINTN size) {
                 UINTN H = rd16(p + 1), W = rd16(p + 3);
                 if (W == 0 || H == 0 || W > MP4_MAX_DIM || H > MP4_MAX_DIM) return 0;
                 int nf = p[5];
-                if (nf < 1 || nf > 3) return 0;
+                if (nf != 1 && nf != 3) return 0;
                 if (plen < (UINTN)(6 + 3 * nf)) return 0;
                 st->W = W;
                 st->H = H;
@@ -702,21 +702,21 @@ static int mp4_samples(mp4box_t *stbl, UINT32 timescale, mjpeg_t *st) {
     UINT32 sample_count = rd32(ps + 8);
     if (sample_count == 0 || sample_count > MP4_MAX_SAMPLES) return 0;
     const UINT8 *sztab = (sample_size == 0) ? ps + 12 : NULL;
-    if (sample_size == 0 && stsz.size < 12 + (UINTN)sample_count * 4) return 0;
+    if (sample_size == 0 && stsz.size < 20 + (UINTN)sample_count * 4) return 0;
 
     const UINT8 *pt = stts.d + stts.pos;
     UINT32 stts_n = rd32(pt + 4);
-    if (stts.size < 8 + (UINTN)stts_n * 8) return 0;
+    if (stts.size < 16 + (UINTN)stts_n * 8) return 0;
 
     const UINT8 *pc = stsc.d + stsc.pos;
     UINT32 stsc_n = rd32(pc + 4);
-    if (stsc.size < 8 + (UINTN)stsc_n * 12) return 0;
+    if (stsc.size < 16 + (UINTN)stsc_n * 12) return 0;
 
     const UINT8 *po = have_stco ? (stco.d + stco.pos) : (co64.d + co64.pos);
     UINT32 chunk_n = rd32(po + 4);
     UINTN chunk_bytes = have_stco ? (UINTN)chunk_n * 4 : (UINTN)chunk_n * 8;
-    if (have_stco ? (stco.size < 8 + chunk_bytes)
-                  : (co64.size < 8 + chunk_bytes)) return 0;
+    if (have_stco ? (stco.size < 16 + chunk_bytes)
+                  : (co64.size < 16 + chunk_bytes)) return 0;
 
     st->n = sample_count;
     st->off = efi_allocate_pool(sample_count * sizeof(UINTN));

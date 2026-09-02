@@ -63,7 +63,11 @@ emit() {
 
 count=0
 if command -v snapper >/dev/null 2>&1; then
-    while IFS=, read -r num date desc; do
+    while IFS= read -r line; do
+        num="${line%%,*}"
+        rest="${line#*,}"
+        date="${rest%%,*}"
+        desc="${rest#*,}"
         [ "$num" = "0" ] && continue
         [ -z "$num" ] && continue
         sv="${root_subvol:+$root_subvol/}"

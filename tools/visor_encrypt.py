@@ -12,6 +12,8 @@ SALT_SIZE = 16
 NONCE_SIZE = 12
 HASH_SIZE = 32
 MAX_ITERATIONS = 5_000_000
+MIN_ITERATIONS = 100_000
+MAX_PLAIN_SIZE = 256 * 1024 * 1024
 HEADER_AUTH_SIZE = 52
 HEADER = "<8sIIQ16s12s32s"
 HEADER_SIZE = struct.calcsize(HEADER)
@@ -68,6 +70,9 @@ def encrypt_file(inp: str, outp: str, password: str, iterations: int) -> None:
         plain = f.read()
     if not plain:
         raise SystemExit(f"input is empty: {inp}")
+    if len(plain) > MAX_PLAIN_SIZE:
+        raise SystemExit(f"input too large ({len(plain)} bytes): "
+                         f"{inp} (bootloader limit is {MAX_PLAIN_SIZE} bytes)")
 
     salt = os.urandom(SALT_SIZE)
     nonce = os.urandom(NONCE_SIZE)
@@ -100,8 +105,9 @@ def main() -> int:
         ap.error("arguments must be INPUT OUTPUT pairs")
     pairs = list(zip(args.files[::2], args.files[1::2]))
 
-    if args.iterations < 1:
-        ap.error("--iterations must be at least 1")
+    if args.iterations < MIN_ITERATIONS:
+        ap.error(f"--iterations must be at least {MIN_ITERATIONS} "
+                 "(the bootloader refuses weaker encryption)")
     if args.iterations > MAX_ITERATIONS:
         ap.error(f"--iterations must be at most {MAX_ITERATIONS}")
 
