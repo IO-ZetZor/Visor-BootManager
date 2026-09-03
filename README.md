@@ -94,6 +94,7 @@ Full install guide, installer flags, and the configuration reference: **[here](h
 | Auto cmdline for detected kernels | Yes — UKI section / fstab / GPT partition type | n/a (scripted at install time) | No | Partial | No |
 | Live USB hotplug in the menu | Yes, animated add/remove | No | No | No | No |
 | Btrfs snapshot boot    | Built in (snapper / Timeshift / plain) | Via grub-btrfs add-on | No | No | No |
+| Windows immunity       | Self-heals missing/reordered boot entry, overwritten `BOOTx64.EFI` fallback, and damaged GPT partition table | No | No | No | No |
 | Encrypted boot files on the ESP | Built in (VISORENC + one-password LUKS handoff) | Can read LUKS-encrypted `/boot` | No | No | No |
 | Secure Boot            | shim/`SHIM_LOCK` aware; sbctl signing in installer | Mature shim integration | Mature | Works with shim/MOK | Sign it yourself; no shim integration |
 | Legacy BIOS            | No — UEFI only | Yes | No | No | Yes |
@@ -117,6 +118,20 @@ notes, and troubleshooting — is in the **[Wiki](https://visor-bootmanager.verc
 A fully commented config reference also ships in
 [`boot.conf.example`](boot.conf.example).
 
+## Companion: Visor Studio
+
+**[Visor Studio](https://github.com/Versedcamel153/visor-studio)** is the official
+visual `boot.conf` configurator for Visor. It edits, validates, previews, and
+exports a Visor configuration without rebooting after every change:
+schema-driven controls from Visor's own `boot.conf.schema.json`, live boot-menu
+preview, a Linux/UKI/Windows/custom entry wizard, diagnostics with safe auto-fix,
+and an export bundle ready to copy to the ESP.
+
+It is a companion project, not the bootloader — Visor stays a single small EFI
+binary, and Studio runs where you edit config (browser / Docker / localhost).
+For real installs, run it locally via `visor studio`. It is BSD-2-Clause
+licensed, built by [Farid](https://farid.is-a.dev).
+
 ## Credits
 
 - **[rEFInd](https://www.rodsbooks.com/refind/)** — the massive inspiration for
@@ -128,6 +143,8 @@ A fully commented config reference also ships in
 - **[materialyoucolor](https://github.com/T-Dynamos/materialyoucolor-python)** —
   the reference Material You color implementation behind the wallpaper accent
   pipeline.
+- **[Farid](https://farid.is-a.dev)** — Visor Studio, the official visual
+  `boot.conf` configurator that ships with Visor.
 - Everyone who ran early builds on real hardware and sent in `boot.log` files
   and firmware quirk reports — most of the hardening in every release came
   straight from those.

@@ -69,6 +69,7 @@ Commands:
   config validate [options]      Validate a config file
   clean [--all]                 Remove build outputs (--all also removes the
                                 ~/.cache/visor source checkout, with confirmation)
+  studio [options]              Fetch and run the Visor Studio configurator locally
   doctor                        Check build/install dependencies
   help                          Show this help
 
@@ -119,6 +120,13 @@ Doctor options:
 Config validate options:
   --file PATH        Config file to validate
   --esp PATH         ESP mount point
+
+Studio options:
+  --update           Pull the latest Visor Studio before running
+  --port PORT        Backend port (default 8000)
+  --docker           Require the Docker runtime (otherwise Docker is used when
+                     available, falling back to python3+node)
+  --detach           Run in the background and return immediately
 EOF
 }
 
@@ -1520,6 +1528,87 @@ cmd_config() {
     esac
 }
 
+STUDIO_REPO="https://github.com/Versedcamel153/visor-studio.git"
+
+studio_dir() {
+    printf '%s\n' "${VISOR_STUDIO_DIR:-${XDG_CACHE_HOME:-$(real_home)/.cache}/visor-studio}"
+}
+
+cmd_studio() {
+    local port=8000
+    local force_docker=0
+    local detach=0
+    local update=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --update) update=1; shift ;;
+            --port) port="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --docker) force_docker=1; shift ;;
+            --detach) detach=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown studio option: $1" ;;
+        esac
+    done
+
+    need_cmd git
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "curl or wget is required"
+
+    local dir
+    dir="$(studio_dir)"
+    if [ ! -d "$dir/.git" ]; then
+        say "Cloning Visor Studio into $dir"
+        mkdir -p "$(dirname "$dir")"
+        git clone --depth 1 "$STUDIO_REPO" "$dir"
+    elif [ "$update" -eq 1 ]; then
+        say "Updating Visor Studio in $dir"
+        git -C "$dir" pull --ff-only
+    fi
+
+    if [ "$force_docker" -eq 1 ] || command -v docker >/dev/null 2>&1; then
+        if command -v docker >/dev/null 2>&1; then
+            say "Building Visor Studio image (docker)"
+            docker build -t visor-studio "$dir" || die "docker build failed"
+            if [ "$detach" -eq 1 ]; then
+                docker rm -f visor-studio >/dev/null 2>&1 || true
+                docker run -d --name visor-studio -p "$port:8000" visor-studio >/dev/null
+                say "Visor Studio running at http://127.0.0.1:$port"
+                say "Stop it with: docker rm -f visor-studio"
+                return 0
+            fi
+            say "Starting Visor Studio at http://127.0.0.1:$port (Ctrl-C to stop)"
+            exec docker run --rm -p "$port:8000" visor-studio
+        elif [ "$force_docker" -eq 1 ]; then
+            die "docker is not installed (install docker or drop --docker)"
+        fi
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        die "need python3 and npm to run Studio locally - install them, or install docker and re-run"
+    fi
+
+    say "Preparing Python environment"
+    python3 -m venv "$dir/.venv" 2>/dev/null || true
+    # shellcheck disable=SC1091
+    . "$dir/.venv/bin/activate"
+    pip install -q -e "$dir[test]" || { deactivate 2>/dev/null || true; die "failed to install Python deps for Studio"; }
+
+    say "Installing and starting frontend"
+    (cd "$dir/frontend" && npm install --silent) || die "npm install failed in $dir/frontend"
+
+    if [ "$detach" -eq 1 ]; then
+        (cd "$dir/frontend" && nohup npm run dev >/tmp/visor-studio-frontend.log 2>&1 &) || true
+        (cd "$dir" && nohup uvicorn main:app --port "$port" >/tmp/visor-studio.log 2>&1 &) || true
+        say "Backend:  http://127.0.0.1:$port"
+        say "Frontend: http://127.0.0.1:5173"
+        say "Logs: /tmp/visor-studio.log, /tmp/visor-studio-frontend.log"
+        return 0
+    fi
+
+    (cd "$dir/frontend" && npm run dev >/tmp/visor-studio-frontend.log 2>&1 &) || true
+    say "Starting Visor Studio backend at http://127.0.0.1:$port (Ctrl-C to stop)"
+    (cd "$dir" && exec uvicorn main:app --port "$port")
+}
+
 main() {
     local cmd="${1:-help}"
     case "$cmd" in
@@ -1534,6 +1623,7 @@ main() {
         status) shift; cmd_status "$@" ;;
         config) shift; cmd_config "$@" ;;
         clean) shift; cmd_clean "$@" ;;
+        studio) shift; cmd_studio "$@" ;;
         doctor) shift; cmd_doctor "$@" ;;
         help|-h|--help|"") usage ;;
         *) die "unknown command: $cmd" ;;
