@@ -12,6 +12,8 @@ DO_FS_DRIVERS=-1
 FORCE_CONFIG=0
 FS_DRIVER=""
 INSTALL_CLI=1
+DO_STUDIO=-1
+STUDIO_REPO="${VISOR_STUDIO_REPO:-https://github.com/Versedcamel153/visor-studio.git}"
 ARCH=""
 USE_COLOR=-1
 EFIFS_VERSION="${EFIFS_VERSION:-v1.12}"
@@ -137,6 +139,8 @@ Usage: ./install.sh [options]
   --no-cli           do not install the host-side 'visor' command
   --cli-dir PATH     directory for the host-side command (default: /usr/local/bin)
   --data-dir PATH    directory for host-side tools (default: /usr/share/visor)
+  --studio           pre-fetch the Visor Studio configurator (else prompted)
+  --no-studio        do not install or prompt for Visor Studio
   --force-config     overwrite an existing boot.conf with the default
   --color / --no-color   force or disable coloured output
   -h, --help         show this help
@@ -176,6 +180,8 @@ while [ $# -gt 0 ]; do
         --no-cli)       INSTALL_CLI=0; shift ;;
         --cli-dir)      CLI_DIR="${2:-}"; shift 2 ;;
         --data-dir)     DATA_DIR="${2:-}"; shift 2 ;;
+        --studio)       DO_STUDIO=1; shift ;;
+        --no-studio)    DO_STUDIO=0; shift ;;
         --force-config) FORCE_CONFIG=1; shift ;;
         --color)        USE_COLOR=1; shift ;;
         --no-color)     USE_COLOR=0; shift ;;
@@ -447,6 +453,51 @@ if [ "$INSTALL_CLI" -eq 1 ] && [ -f "$CLI_NAME" ]; then
     fi
 fi
 
+STUDIO_STATE="skipped"
+if [ "$DO_STUDIO" -eq -1 ]; then
+    hdr "Visor Studio"
+    DO_STUDIO="$(ask 'Pre-fetch the Visor Studio configurator so it runs offline?')"
+elif [ "$DO_STUDIO" -eq 1 ]; then
+    hdr "Visor Studio"
+fi
+if [ "$DO_STUDIO" -eq 1 ]; then
+    if ! command -v git >/dev/null 2>&1; then
+        warn "git not installed; skipping Visor Studio."
+    else
+        user="${SUDO_USER:-${PKEXEC_UID:-}}"
+        home="${HOME:-/tmp}"
+        case "$user" in
+            *[!A-Za-z0-9_.-]*|"")
+                user="$(id -un)" ;;
+        esac
+        if [ "$(id -u)" -eq 0 ] && [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
+            h="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"
+            [ -n "$h" ] && [ -d "$h" ] && home="$h"
+        fi
+        dir="${VISOR_STUDIO_DIR:-${XDG_CACHE_HOME:-$home/.cache}/visor-studio}"
+        if [ ! -d "$dir/.git" ]; then
+            say "Cloning Visor Studio into $dir"
+            mkdir -p "$(dirname "$dir")"
+            if [ "$(id -u)" -eq 0 ] && [ -n "$SUDO_USER" ]; then
+                chown "$SUDO_USER" "$(dirname "$dir")" 2>/dev/null || true
+            fi
+            if git clone --depth 1 "$STUDIO_REPO" "$dir"; then
+                if [ "$(id -u)" -eq 0 ] && [ -n "$SUDO_USER" ]; then
+                    chown -R "$SUDO_USER" "$dir" 2>/dev/null || true
+                fi
+                STUDIO_STATE="$dir"
+                ok "Visor Studio: run 'visor studio'"
+            else
+                STUDIO_STATE="failed"
+                warn "Could not fetch Visor Studio from $STUDIO_REPO"
+            fi
+        else
+            say "Visor Studio already fetched at $dir"
+            STUDIO_STATE="$dir"
+        fi
+    fi
+fi
+
 CONF="$DEST/boot.conf"
 CONF_IS_NEW=0
 if [ -f "$CONF" ] && [ "$FORCE_CONFIG" -eq 0 ]; then
@@ -560,6 +611,7 @@ kv "Config" "$CONF"
 if [ -n "$CLI_INSTALLED" ]; then kv "Command" "$CLI_INSTALLED"; fi
 kv "Boot entry" "$BOOT_ENTRY_STATE"
 kv "Secure Boot" "$SIGN_STATE"
+kv "Visor Studio" "$STUDIO_STATE"
 if [ -n "$BACKUP" ]; then kv "Rollback" "$(basename "$BACKUP")"; fi
 
 printf '\n  %sNext%s\n' "$C_BOLD" "$C_OFF"
