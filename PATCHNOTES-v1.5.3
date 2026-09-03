@@ -1,0 +1,50 @@
+# Visor — 1.5.3
+
+Fast boots from slow disks and a boot manager that looks after itself: GPT corruption is caught and repaired before it bites, OS updates can no longer silently walk off with the boot entry, and BLS deployments gained proper support.
+
+## GPT corruption detection and repair
+
+- At menu startup, Visor scans whole-disk block devices for GPT damage. A disk with a valid backup header but a damaged primary (corruption, bad CRC, clobbered signature) gets a warning modal before the menu: overview, details, confirm (type YES), working, done.
+- The repair rebuilds the primary GPT from the verified backup only when the plan is confirmed safe — never when the layout is invalid, the backup is itself corrupt, or the disk is read-only.
+- The scan runs once per menu boot instead of being re-armed on every hotplug poll; corruption appearing after the menu is up is not something a boot manager should chase.
+- Text-mode CLI equivalents: `gpt` scans for damage, `gpt N` details one disk, `gpt repair N` rebuilds the primary header from the backup.
+- The warning can be suppressed per-boot (the modal remembers an "ignore once" dismissal).
+- New boot.conf options: `selfheal`, `boot_order`, `restore_fallback`, documented and added to `boot.conf.schema.json`.
+
+## Boot self-heal
+
+- Every startup can repair boot-manager damage left by OS updates (Windows and others): a missing or reordered NVRAM `Boot####` entry and `BootOrder` (`boot_order=first|ensure|off`), and a `\EFI\BOOT\BOOTx64.EFI` fallback path that another OS overwrote (`restore_fallback=1`).
+- Nothing is written when there is nothing to fix, and removable media are never touched.
+
+## BLS deployment support
+
+- BLS (Boot Loader Specification) support is extended:
+  - `efi`/`uki` - efistub and UKI entries are now accepted and chainloaded.
+  - `architecture` - entries for another arch (e.g. EFIARM on x86_64) are skipped instead of being offered and failing at handoff.
+  - `sort-key` - deployments group by ostree index (newest first) then sort-key within a group; entries without a sort-key follow.
+  - Repeated `initrd` and `options` lines accumulate in order instead of silently keeping only the first.
+
+## Booting from slow filesystems
+
+- Booting a manual entry that reads its kernel and initrd from a slow non-FAT filesystem driver (ext4/btrfs via efifs) no longer freezes the handoff for seconds-to-minutes. The kernel/initrd were read four separate times per boot — once for the kernel, once to build the LoadImage device path, once for the initrd, and once for an existence re-check (#22).
+- The entry's volume is now held open and reused for all of them, and the existence re-check is gone (a reporter on btrfs measured ~51 s per OpenVolume, four of them, ~178 s total; expected to drop to ~75 s).
+- `efi_volume_open_count()` is logged at handoff, making the number of volume opens — the metric that predicts slow boots on non-FAT drivers — accountable per boot.
+- Big-file reads (>= 16 MB) log progress and a final MB/s figure so slow-driver stalls are visible.
+
+## Screenshots and recording
+
+- `F6` takes a PNG screenshot of the current screen, saved to `\EFI\visor\shots`. Works in the GUI menu, the GPT warning modal, and elsewhere. `F10` records a GIF/MJPEG animation.
+
+## Config parsing
+
+- `#RRGGBB` colour values are no longer eaten as inline comments: a `#` inside a value only starts a comment when preceded by whitespace, so `color=#22c1ff` keeps working (fix by moeKiwiSAMA).
+
+## Tooling fixes
+
+- MP4/MJPEG box parsing validates the full box header extension, so `mp4_decoder` accepts standard 64-bit-size mp4 files instead of rejecting them mid-parse.
+- `visor_encrypt.py` refuses weak PBKDF2 parameters to match the bootloader: `--iterations` below 100,000 is an error, and inputs larger than the bootloader's 256 MiB plaintext limit are rejected up front.
+- `visor-snapshot-sync` accepts snapshot descriptions containing commas; the CSV line was split on the first comma rather than the first field.
+
+## Credits
+
+- moeKiwiSAMA — `#RRGGBB` colour parsing fix (#24)

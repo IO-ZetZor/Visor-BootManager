@@ -1,0 +1,34 @@
+# Visor Boot Manager v1.5.2
+
+## Fixes
+
+- Snapshot auto-detection no longer freezes on slow or damaged volumes.
+  A per-volume time budget of 8 seconds is enforced, with watchdog kicking
+  and progress logging so a hang is attributable to a single volume (#21).
+
+- Password confirmation now uses constant-time comparison, preventing
+  timing side-channel attacks against the confirmation field.
+
+- SHA-256 context is zeroed after finalizing, preventing key material
+  from lingering on the stack.
+
+- PBKDF2 iteration count below 100,000 is now rejected on decrypt,
+  preventing use of weak derivation parameters.
+
+## Improvements
+
+- PNG decoder supports Adam7 interlaced images. Interlaced PNGs (the
+  default output of most image editors) now load correctly as backgrounds
+  and icons instead of falling back to defaults or failing silently.
+
+- `efi_strlen16()` is the single shared implementation across the
+  codebase, replacing three redundant local definitions.
+
+- `mem_equal()` is a public constant-time comparison function, available
+  to any module that needs side-channel-resistant equality checks.
+
+- `efi_fread()` simplified: the redundant `size > requested` clamp is
+  removed since UEFI `HandleRead` never returns more than requested.
+
+- Snapshot scan logs which volume is being scanned, and reports when no
+  snapshots are found on any volume instead of silently continuing.
