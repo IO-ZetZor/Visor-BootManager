@@ -201,78 +201,165 @@ fail:
     return EFI_OUT_OF_RESOURCES;
 }
 
-/* GIF encoder */
-
 #define CAP_GIF_CLEAR 256
 #define CAP_GIF_EOI   257
 #define CAP_GIF_MAXCODE 4096
 
-typedef struct {
-    UINT8  *idx;
-    UINT8   palette[256 * 3];
-} cap_gif_fr;
+#define CAP_GIF_TRANSPARENT 255
+#define CAP_GIF_COLORS      255
 
-struct cap_gif {
-    UINTN       w, h;
-    UINTN       nframes;
-    UINT32      delays[CAP_GIF_MAX_FRAMES];
-    cap_gif_fr *frames[CAP_GIF_MAX_FRAMES];
-};
+#define CAP_GIF_DEFAULT_BUDGET (24u * 1024u * 1024u)
+#define CAP_GIF_MIN_DELAY_CS   2
+#define CAP_GIF_MAX_DELAY_CS   500
+
+typedef struct {
+    UINT8  *data;
+    UINTN   len;
+    UINT16  x, y, w, h;
+    UINT16  delay_cs;
+    UINT8   min_code_size;
+    UINT8   transparent;
+} cap_gif_fr;
 
 #define CAP_BUCKETS 32768
 
-/* Median-cut quantizer over the 5-bit-per-channel histogram.
- * Splits the RGB cube (bucket index space, 0..31) into at most maxc boxes
- * and writes each box's weighted-mean colour into palette. Returns the
- * number of boxes produced (1..maxc). */
-static UINTN cap_median_cut(const UINT32 *hist, UINT8 *palette, UINTN maxc) {
+typedef struct {
+    UINT32 *n;
+    UINT32 *sr, *sg, *sb;
+    UINTN   passes;
+} cap_hist;
+
+#define CAP_HIST_SAMPLES     200000u
+#define CAP_HIST_MAX_PASSES  8u
+
+struct cap_gif {
+    UINTN   src_w, src_h;
+    UINTN   w, h;
+    UINTN   max_frames;
+    UINTN   budget;
+    UINTN   bytes;
+    UINTN   nominal_delay_cs;
+    int     full;
+
+    UINTN   nframes;
+    cap_gif_fr frames[CAP_GIF_MAX_FRAMES];
+
+    UINT8   palette[256 * 3];
+    int     palette_ready;
+    cap_hist hist;
+    UINT8  *bucket_idx;
+
+    UINT8  *prev;
+    UINT8  *cur;
+    UINT32 *scaled;
+
+    UINT64  last_ms;
+    int     have_last_ms;
+};
+
+static UINTN cap_bucket_of(UINT32 p) {
+    return ((((p >> 16) & 0xF8) << 7) | (((p >> 8) & 0xF8) << 2)
+            | ((p & 0xF8) >> 3));
+}
+
+#define CAP_BUCKET_MID(v) (((v) << 3) | 4)
+
+static void cap_hist_color(const cap_hist *h, UINTN b,
+                           INTN *r, INTN *g, INTN *bl) {
+    UINT32 c = h->n[b];
+    if (c) {
+        *r  = (INTN)(h->sr[b] / c);
+        *g  = (INTN)(h->sg[b] / c);
+        *bl = (INTN)(h->sb[b] / c);
+    } else {
+        *r  = (INTN)CAP_BUCKET_MID(b >> 10);
+        *g  = (INTN)CAP_BUCKET_MID((b >> 5) & 31);
+        *bl = (INTN)CAP_BUCKET_MID(b & 31);
+    }
+}
+
+static int cap_box_tighten(const cap_hist *h, INTN *lo, INTN *hi) {
+    INTN nlo[3] = { 32, 32, 32 }, nhi[3] = { -1, -1, -1 };
+    for (INTN r = lo[0]; r <= hi[0]; r++) {
+        for (INTN gg = lo[1]; gg <= hi[1]; gg++) {
+            UINTN base = ((UINTN)r << 10) | ((UINTN)gg << 5);
+            for (INTN bb = lo[2]; bb <= hi[2]; bb++) {
+                if (!h->n[base | (UINTN)bb]) continue;
+                if (r  < nlo[0]) nlo[0] = r;
+                if (r  > nhi[0]) nhi[0] = r;
+                if (gg < nlo[1]) nlo[1] = gg;
+                if (gg > nhi[1]) nhi[1] = gg;
+                if (bb < nlo[2]) nlo[2] = bb;
+                if (bb > nhi[2]) nhi[2] = bb;
+            }
+        }
+    }
+    if (nhi[0] < nlo[0]) return 0;
+    for (INTN a = 0; a < 3; a++) { lo[a] = nlo[a]; hi[a] = nhi[a]; }
+    return 1;
+}
+
+static UINTN cap_median_cut(const cap_hist *h, UINT8 *palette, UINTN maxc) {
     INTN lo[256][3], hi[256][3];
+    UINT32 pop[256];
     INTN nb = 1;
+
     for (INTN a = 0; a < 3; a++) { lo[0][a] = 0; hi[0][a] = 31; }
+    pop[0] = 0;
+    for (UINTN b = 0; b < CAP_BUCKETS; b++) pop[0] += h->n[b];
+    if (!pop[0]) {
+        palette[0] = palette[1] = palette[2] = 0;
+        return 1;
+    }
 
     while (nb < (INTN)maxc) {
         INTN pick = -1, pickaxis = 0;
-        UINT32 pickmax = 0, pickpop = 0;
+        UINT64 pickmax = 0;
         for (INTN i = 0; i < nb; i++) {
+            if (!pop[i]) continue;
             INTN range = 0, rax = 0;
             for (INTN a = 0; a < 3; a++) {
                 INTN rr = hi[i][a] - lo[i][a];
                 if (rr > range) { range = rr; rax = a; }
             }
             if (range == 0) continue;
-            UINT32 pop = 0;
-            for (UINTN b = 0; b < CAP_BUCKETS; b++) {
-                UINTN r = b >> 10, gg = (b >> 5) & 31, bb = b & 31;
-                if (r >= (UINTN)lo[i][0] && r <= (UINTN)hi[i][0] &&
-                    gg >= (UINTN)lo[i][1] && gg <= (UINTN)hi[i][1] &&
-                    bb >= (UINTN)lo[i][2] && bb <= (UINTN)hi[i][2])
-                    pop += hist[b];
-            }
-            UINT32 score = (UINT32)((UINT64)range * pop);
-            if (score > pickmax) { pickmax = score; pick = i; pickaxis = rax; pickpop = pop; }
+            UINT64 score = (UINT64)range * pop[i];
+            if (score > pickmax) { pickmax = score; pick = i; pickaxis = rax; }
         }
-        if (pick < 0 || pickpop == 0) break;
+        if (pick < 0) break;
 
-        /* Sweep counts along the chosen axis to find the weighted median. */
+        if (!cap_box_tighten(h, lo[pick], hi[pick])) { pop[pick] = 0; continue; }
+        {
+            INTN range = 0;
+            for (INTN a = 0; a < 3; a++) {
+                INTN rr = hi[pick][a] - lo[pick][a];
+                if (rr > range) { range = rr; pickaxis = a; }
+            }
+            if (range == 0) continue;
+        }
+
         UINT32 sweep[32];
         memset(sweep, 0, sizeof(sweep));
-        for (UINTN b = 0; b < CAP_BUCKETS; b++) {
-            UINTN r = b >> 10, gg = (b >> 5) & 31, bb = b & 31;
-            if (r >= (UINTN)lo[pick][0] && r <= (UINTN)hi[pick][0] &&
-                gg >= (UINTN)lo[pick][1] && gg <= (UINTN)hi[pick][1] &&
-                bb >= (UINTN)lo[pick][2] && bb <= (UINTN)hi[pick][2]) {
-                UINTN v = (pickaxis == 0) ? r : (pickaxis == 1 ? gg : bb);
-                sweep[v] += hist[b];
+        for (INTN r = lo[pick][0]; r <= hi[pick][0]; r++)
+            for (INTN gg = lo[pick][1]; gg <= hi[pick][1]; gg++) {
+                UINTN base = ((UINTN)r << 10) | ((UINTN)gg << 5);
+                for (INTN bb = lo[pick][2]; bb <= hi[pick][2]; bb++) {
+                    INTN v = (pickaxis == 0) ? r : (pickaxis == 1 ? gg : bb);
+                    sweep[v] += h->n[base | (UINTN)bb];
+                }
             }
-        }
-        UINT32 acc = 0, half = pickpop / 2;
-        INTN split = hi[pick][pickaxis];
-        for (INTN v = lo[pick][pickaxis]; v <= hi[pick][pickaxis]; v++) {
+
+        UINT32 half = pop[pick] / 2, acc = 0;
+        INTN split = lo[pick][pickaxis];
+        for (INTN v = lo[pick][pickaxis]; v < hi[pick][pickaxis]; v++) {
             acc += sweep[v];
-            if (acc >= half) { split = v; break; }
+            split = v;
+            if (acc >= half) break;
         }
-        if (split >= hi[pick][pickaxis]) split = hi[pick][pickaxis] - 1;
-        if (split < lo[pick][pickaxis]) break;
+
+        UINT32 lopop = 0;
+        for (INTN v = lo[pick][pickaxis]; v <= split; v++) lopop += sweep[v];
+        if (!lopop || lopop >= pop[pick]) { pop[pick] = 0; continue; }
 
         for (INTN a = 0; a < 3; a++) {
             lo[nb][a] = lo[pick][a];
@@ -280,131 +367,123 @@ static UINTN cap_median_cut(const UINT32 *hist, UINT8 *palette, UINTN maxc) {
         }
         lo[nb][pickaxis] = split + 1;
         hi[pick][pickaxis] = split;
+        pop[nb] = pop[pick] - lopop;
+        pop[pick] = lopop;
         nb++;
     }
 
     for (INTN i = 0; i < nb; i++) {
         UINT64 sr = 0, sg = 0, sb = 0;
         UINT32 cnt = 0;
-        for (UINTN b = 0; b < CAP_BUCKETS; b++) {
-            UINTN r = b >> 10, gg = (b >> 5) & 31, bb = b & 31;
-            if (r >= (UINTN)lo[i][0] && r <= (UINTN)hi[i][0] &&
-                gg >= (UINTN)lo[i][1] && gg <= (UINTN)hi[i][1] &&
-                bb >= (UINTN)lo[i][2] && bb <= (UINTN)hi[i][2]) {
-                UINT32 c = hist[b];
-                if (c) {
-                    sr += (UINT64)(r * 255 / 31) * c;
-                    sg += (UINT64)(gg * 255 / 31) * c;
-                    sb += (UINT64)(bb * 255 / 31) * c;
+        for (INTN r = lo[i][0]; r <= hi[i][0]; r++)
+            for (INTN gg = lo[i][1]; gg <= hi[i][1]; gg++) {
+                UINTN base = ((UINTN)r << 10) | ((UINTN)gg << 5);
+                for (INTN bb = lo[i][2]; bb <= hi[i][2]; bb++) {
+                    UINTN b = base | (UINTN)bb;
+                    UINT32 c = h->n[b];
+                    if (!c) continue;
+                    sr += h->sr[b];
+                    sg += h->sg[b];
+                    sb += h->sb[b];
                     cnt += c;
                 }
             }
-        }
         if (cnt) {
             palette[i * 3 + 0] = (UINT8)(sr / cnt);
             palette[i * 3 + 1] = (UINT8)(sg / cnt);
             palette[i * 3 + 2] = (UINT8)(sb / cnt);
         } else {
-            palette[i * 3 + 0] = palette[i * 3 + 1] =
-            palette[i * 3 + 2] = 0;
+            palette[i * 3 + 0] = (UINT8)CAP_BUCKET_MID(lo[i][0]);
+            palette[i * 3 + 1] = (UINT8)CAP_BUCKET_MID(lo[i][1]);
+            palette[i * 3 + 2] = (UINT8)CAP_BUCKET_MID(lo[i][2]);
         }
     }
     return (UINTN)nb;
 }
 
-static int cap_gif_quantize(const UINT32 *pixels, UINTN n,
-                            UINT8 *palette, UINT8 *idx) {
-    UINT32 *hist = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
-    UINT8  *bucket_idx = efi_allocate_pool(CAP_BUCKETS);
-    if (!hist || !bucket_idx) {
-        if (hist) efi_free_pool(hist);
-        if (bucket_idx) efi_free_pool(bucket_idx);
-        return 0;
+static void cap_hist_add(cap_hist *h, const UINT32 *pixels,
+                         UINTN w, UINTN h_px, UINTN stride) {
+    if (h->passes >= CAP_HIST_MAX_PASSES) return;
+    h->passes++;
+    UINTN step = 1;
+    while ((w / step) * (h_px / step) > CAP_HIST_SAMPLES) step++;
+    for (UINTN y = 0; y < h_px; y += step) {
+        const UINT32 *row = pixels + y * stride;
+        for (UINTN x = 0; x < w; x += step) {
+            UINT32 p = row[x];
+            UINTN b = cap_bucket_of(p);
+            h->n[b]++;
+            h->sr[b] += (p >> 16) & 0xFF;
+            h->sg[b] += (p >> 8) & 0xFF;
+            h->sb[b] += p & 0xFF;
+        }
     }
-    memset(hist, 0, sizeof(UINT32) * CAP_BUCKETS);
+}
 
-    for (UINTN i = 0; i < n; i++) {
-        UINT32 p = pixels[i];
-        UINT32 bucket = ((((p >> 16) & 0xF8) << 7) | (((p >> 8) & 0xF8) << 2)
-                         | ((p & 0xF8) >> 3));
-        hist[bucket]++;
-    }
+static void cap_hist_free(cap_hist *h) {
+    if (h->n)  { efi_free_pool(h->n);  h->n = NULL; }
+    if (h->sr) { efi_free_pool(h->sr); h->sr = NULL; }
+    if (h->sg) { efi_free_pool(h->sg); h->sg = NULL; }
+    if (h->sb) { efi_free_pool(h->sb); h->sb = NULL; }
+}
 
-    UINTN paln = cap_median_cut(hist, palette, 256);
+static void cap_palette_build(cap_gif *g) {
+    UINTN paln = cap_median_cut(&g->hist, g->palette, CAP_GIF_COLORS);
+    if (paln == 0) paln = 1;
     while (paln < 256) {
-        palette[paln * 3 + 0] = palette[paln * 3 + 1] =
-        palette[paln * 3 + 2] = 0;
+        g->palette[paln * 3 + 0] = g->palette[paln * 3 + 1] =
+        g->palette[paln * 3 + 2] = 0;
         paln++;
     }
+    g->palette[CAP_GIF_TRANSPARENT * 3 + 0] = 0;
+    g->palette[CAP_GIF_TRANSPARENT * 3 + 1] = 0;
+    g->palette[CAP_GIF_TRANSPARENT * 3 + 2] = 0;
 
     for (UINTN b = 0; b < CAP_BUCKETS; b++) {
-        UINTN rb = b >> 10, gb = (b >> 5) & 31, bb = b & 31;
-        INTN  r = (INTN)((rb * 255) / 31), gg = (INTN)((gb * 255) / 31),
-              bl = (INTN)((bb * 255) / 31);
+        INTN r, gg, bl;
+        cap_hist_color(&g->hist, b, &r, &gg, &bl);
         UINT32 bestd = 0xFFFFFFFFu; UINT8 besti = 0;
-        for (UINTN pi = 0; pi < paln; pi++) {
-            INTN dr = r - palette[pi * 3 + 0];
-            INTN dg = gg - palette[pi * 3 + 1];
-            INTN db = bl - palette[pi * 3 + 2];
+        for (UINTN pi = 0; pi < CAP_GIF_COLORS; pi++) {
+            INTN dr = r - g->palette[pi * 3 + 0];
+            INTN dg = gg - g->palette[pi * 3 + 1];
+            INTN db = bl - g->palette[pi * 3 + 2];
             UINT32 d = (UINT32)(dr * dr + dg * dg + db * db);
             if (d < bestd) { bestd = d; besti = (UINT8)pi; }
         }
-        bucket_idx[b] = besti;
+        g->bucket_idx[b] = besti;
     }
 
-    for (UINTN i = 0; i < n; i++) {
-        UINT32 p = pixels[i];
-        UINTN bucket = ((((p >> 16) & 0xF8) << 7) | (((p >> 8) & 0xF8) << 2)
-                        | ((p & 0xF8) >> 3));
-        idx[i] = bucket_idx[bucket];
-    }
-
-    efi_free_pool(hist);
-    efi_free_pool(bucket_idx);
-    return 1;
+    cap_hist_free(&g->hist);
+    g->palette_ready = 1;
 }
 
-cap_gif *cap_gif_new(UINTN w, UINTN h) {
-    if (!w || !h || w > 0x7FFF || h > 0x7FFF) return NULL;
-    cap_gif *g = efi_allocate_pool(sizeof(cap_gif));
-    if (!g) return NULL;
-    g->w = w; g->h = h; g->nframes = 0;
-    for (UINTN i = 0; i < CAP_GIF_MAX_FRAMES; i++) g->frames[i] = NULL;
-    return g;
-}
+static void cap_downscale(cap_gif *g, const UINT32 *src, UINT32 *dst) {
+    for (UINTN j = 0; j < g->h; j++) {
+        UINTN sy0 = j * g->src_h / g->h;
+        UINTN sy1 = (j + 1) * g->src_h / g->h;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > g->src_h) sy1 = g->src_h;
+        for (UINTN i = 0; i < g->w; i++) {
+            UINTN sx0 = i * g->src_w / g->w;
+            UINTN sx1 = (i + 1) * g->src_w / g->w;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > g->src_w) sx1 = g->src_w;
 
-int cap_gif_frame(cap_gif *g, const UINT32 *pixels, UINTN delay_cs) {
-    if (!g || !pixels) return 0;
-    if (g->nframes >= CAP_GIF_MAX_FRAMES) return 0;
-    UINTN n = g->w * g->h;
-    cap_gif_fr *fr = efi_allocate_pool(sizeof(cap_gif_fr));
-    if (!fr) return 0;
-    fr->idx = efi_allocate_pool(n);
-    if (!fr->idx) { efi_free_pool(fr); return 0; }
-    if (!cap_gif_quantize(pixels, n, fr->palette, fr->idx)) {
-        efi_free_pool(fr->idx);
-        efi_free_pool(fr);
-        return 0;
-    }
-    g->frames[g->nframes] = fr;
-    g->delays[g->nframes] = (UINT32)delay_cs;
-    g->nframes++;
-    return 1;
-}
-
-UINTN cap_gif_count(const cap_gif *g) {
-    return g ? g->nframes : 0;
-}
-
-void cap_gif_free(cap_gif *g) {
-    if (!g) return;
-    for (UINTN i = 0; i < g->nframes; i++) {
-        if (g->frames[i]) {
-            if (g->frames[i]->idx) efi_free_pool(g->frames[i]->idx);
-            efi_free_pool(g->frames[i]);
+            UINT32 ar = 0, ag = 0, ab = 0, n = 0;
+            for (UINTN sy = sy0; sy < sy1; sy++) {
+                const UINT32 *row = src + sy * g->src_w;
+                for (UINTN sx = sx0; sx < sx1; sx++) {
+                    UINT32 p = row[sx];
+                    ar += (p >> 16) & 0xFF;
+                    ag += (p >> 8) & 0xFF;
+                    ab += p & 0xFF;
+                    n++;
+                }
+            }
+            if (!n) n = 1;
+            dst[j * g->w + i] = ((ar / n) << 16) | ((ag / n) << 8) | (ab / n);
         }
     }
-    efi_free_pool(g);
 }
 
 /* LZW sub-block writer */
@@ -487,16 +566,17 @@ static int lzw_dict_find(lzw_dict *d, UINTN px, UINTN c) {
     return -1;
 }
 
-static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
+static EFI_STATUS cap_gif_lzw_encode(const UINT8 *idx, UINTN stride,
+                                     UINTN rx, UINTN ry, UINTN rw, UINTN rh,
                                      UINT8 **data, UINTN *datalen,
                                      UINTN *min_code_size) {
-    (void)g;
     UINTN minsize = 8;
+    UINTN n = rw * rh;
     *min_code_size = minsize;
 
     lzw_writer w;
     memset(&w, 0, sizeof(w));
-    if (!cap_buf_reserve(&w.out, n + n / 2 + 64)) return EFI_OUT_OF_RESOURCES;
+    if (!cap_buf_reserve(&w.out, n / 4 + 256)) return EFI_OUT_OF_RESOURCES;
 
     lzw_dict d;
     d.slot = efi_allocate_pool(sizeof(lzw_slot) * LZW_HASH_SIZE);
@@ -516,34 +596,36 @@ static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
 
     UINTN codesize = minsize + 1;
     UINTN next = CAP_GIF_EOI + 1;
-    UINTN prefix;
+    UINTN prefix = 0;
+    int started = 0;
 
     lzw_code(&w, CAP_GIF_CLEAR, codesize);
 
-    if (n > 0) {
-        prefix = (UINTN)idx[0];
-        for (UINTN i = 1; i < n; i++) {
-            UINTN c = (UINTN)idx[i];
+    for (UINTN y = 0; y < rh; y++) {
+        const UINT8 *row = idx + (ry + y) * stride + rx;
+        for (UINTN x = 0; x < rw; x++) {
+            UINTN c = (UINTN)row[x];
+            if (!started) { prefix = c; started = 1; continue; }
             int f = lzw_dict_find(&d, prefix, c);
             if (f >= 0) {
                 prefix = (UINTN)f;
-            } else {
-                lzw_code(&w, prefix, codesize);
-                if (next >= (1u << codesize) && codesize < 12) codesize++;
-                if (next < CAP_GIF_MAXCODE) {
-                    lzw_dict_insert(&d, prefix, c, next);
-                    next++;
-                } else {
-                    lzw_code(&w, CAP_GIF_CLEAR, codesize);
-                    lzw_dict_clear(&d);
-                    next = CAP_GIF_EOI + 1;
-                    codesize = minsize + 1;
-                }
-                prefix = c;
+                continue;
             }
+            lzw_code(&w, prefix, codesize);
+            if (next >= (1u << codesize) && codesize < 12) codesize++;
+            if (next < CAP_GIF_MAXCODE) {
+                lzw_dict_insert(&d, prefix, c, next);
+                next++;
+            } else {
+                lzw_code(&w, CAP_GIF_CLEAR, codesize);
+                lzw_dict_clear(&d);
+                next = CAP_GIF_EOI + 1;
+                codesize = minsize + 1;
+            }
+            prefix = c;
         }
-        lzw_code(&w, prefix, codesize);
     }
+    if (started) lzw_code(&w, prefix, codesize);
 
     lzw_code(&w, CAP_GIF_EOI, codesize);
 
@@ -567,47 +649,227 @@ static EFI_STATUS cap_gif_lzw_encode(cap_gif *g, const UINT8 *idx, UINTN n,
     return EFI_SUCCESS;
 }
 
+cap_gif *cap_gif_new(UINTN src_w, UINTN src_h, UINTN max_width,
+                     UINTN max_frames, UINTN budget_bytes,
+                     UINTN nominal_delay_cs) {
+    if (!src_w || !src_h || src_w > 0x7FFF || src_h > 0x7FFF) return NULL;
+
+    UINTN w = src_w, h = src_h;
+    if (max_width && w > max_width) {
+        h = (src_h * max_width + src_w / 2) / src_w;
+        if (!h) h = 1;
+        w = max_width;
+    }
+
+    cap_gif *g = efi_allocate_pool(sizeof(cap_gif));
+    if (!g) return NULL;
+    memset(g, 0, sizeof(*g));
+
+    g->src_w = src_w; g->src_h = src_h;
+    g->w = w; g->h = h;
+    g->max_frames = max_frames ? max_frames : CAP_GIF_MAX_FRAMES;
+    if (g->max_frames > CAP_GIF_MAX_FRAMES) g->max_frames = CAP_GIF_MAX_FRAMES;
+    g->budget = budget_bytes ? budget_bytes : CAP_GIF_DEFAULT_BUDGET;
+    g->nominal_delay_cs = nominal_delay_cs ? nominal_delay_cs
+                                           : CAP_GIF_MIN_DELAY_CS;
+
+    g->hist.n     = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
+    g->hist.sr    = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
+    g->hist.sg    = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
+    g->hist.sb    = efi_allocate_pool(sizeof(UINT32) * CAP_BUCKETS);
+    g->bucket_idx = efi_allocate_pool(CAP_BUCKETS);
+    g->prev       = efi_allocate_pool(w * h);
+    g->cur        = efi_allocate_pool(w * h);
+    if (w != src_w || h != src_h)
+        g->scaled = efi_allocate_pool(w * h * sizeof(UINT32));
+
+    if (!g->hist.n || !g->hist.sr || !g->hist.sg || !g->hist.sb ||
+        !g->bucket_idx || !g->prev || !g->cur ||
+        ((w != src_w || h != src_h) && !g->scaled)) {
+        cap_gif_free(g);
+        return NULL;
+    }
+    memset(g->hist.n,  0, sizeof(UINT32) * CAP_BUCKETS);
+    memset(g->hist.sr, 0, sizeof(UINT32) * CAP_BUCKETS);
+    memset(g->hist.sg, 0, sizeof(UINT32) * CAP_BUCKETS);
+    memset(g->hist.sb, 0, sizeof(UINT32) * CAP_BUCKETS);
+    return g;
+}
+
+void cap_gif_free(cap_gif *g) {
+    if (!g) return;
+    for (UINTN i = 0; i < g->nframes; i++)
+        if (g->frames[i].data) efi_free_pool(g->frames[i].data);
+    cap_hist_free(&g->hist);
+    if (g->bucket_idx) efi_free_pool(g->bucket_idx);
+    if (g->prev)       efi_free_pool(g->prev);
+    if (g->cur)        efi_free_pool(g->cur);
+    if (g->scaled)     efi_free_pool(g->scaled);
+    efi_free_pool(g);
+}
+
+UINTN cap_gif_count(const cap_gif *g)  { return g ? g->nframes : 0; }
+UINTN cap_gif_bytes(const cap_gif *g)  { return g ? g->bytes : 0; }
+int   cap_gif_is_full(const cap_gif *g) { return g ? g->full : 1; }
+UINTN cap_gif_width(const cap_gif *g)  { return g ? g->w : 0; }
+UINTN cap_gif_height(const cap_gif *g) { return g ? g->h : 0; }
+
+void cap_gif_sample(cap_gif *g, const UINT32 *pixels) {
+    if (!g || !pixels || g->palette_ready || !g->hist.n) return;
+    cap_hist_add(&g->hist, pixels, g->src_w, g->src_h, g->src_w);
+}
+
+static void cap_gif_map(cap_gif *g, const UINT32 *pixels) {
+    const UINT32 *src = pixels;
+    if (g->scaled) {
+        cap_downscale(g, pixels, g->scaled);
+        src = g->scaled;
+    }
+    UINTN n = g->w * g->h;
+    for (UINTN i = 0; i < n; i++)
+        g->cur[i] = g->bucket_idx[cap_bucket_of(src[i])];
+}
+
+int cap_gif_frame(cap_gif *g, const UINT32 *pixels, UINT64 now_ms) {
+    if (!g || !pixels) return CAP_FRAME_ERROR;
+
+    if (g->nframes && g->have_last_ms) {
+        UINT64 dt = now_ms - g->last_ms;
+        UINTN cs = (UINTN)((dt + 5) / 10);
+        if (cs < CAP_GIF_MIN_DELAY_CS) cs = CAP_GIF_MIN_DELAY_CS;
+        if (cs > CAP_GIF_MAX_DELAY_CS) cs = CAP_GIF_MAX_DELAY_CS;
+        g->frames[g->nframes - 1].delay_cs = (UINT16)cs;
+    }
+
+    if (g->full || g->nframes >= g->max_frames) {
+        g->full = 1;
+        return g->nframes ? CAP_FRAME_FULL : CAP_FRAME_ERROR;
+    }
+
+    if (!g->palette_ready) {
+        cap_hist_add(&g->hist, pixels, g->src_w, g->src_h, g->src_w);
+        cap_palette_build(g);
+    }
+
+    cap_gif_map(g, pixels);
+
+    UINTN rx = 0, ry = 0, rw = g->w, rh = g->h;
+    int transparent = 0;
+
+    if (g->nframes) {
+        UINTN x0 = g->w, y0 = g->h, x1 = 0, y1 = 0;
+        for (UINTN y = 0; y < g->h; y++) {
+            const UINT8 *cr = g->cur + y * g->w;
+            const UINT8 *pr = g->prev + y * g->w;
+            for (UINTN x = 0; x < g->w; x++) {
+                if (cr[x] == pr[x]) continue;
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+        }
+        if (x0 > x1 || y0 > y1) {
+            g->last_ms = now_ms;
+            g->have_last_ms = 1;
+            return CAP_FRAME_OK;
+        }
+        rx = x0; ry = y0; rw = x1 - x0 + 1; rh = y1 - y0 + 1;
+
+        for (UINTN y = 0; y < rh; y++) {
+            UINT8 *cr = g->cur + (ry + y) * g->w + rx;
+            const UINT8 *pr = g->prev + (ry + y) * g->w + rx;
+            for (UINTN x = 0; x < rw; x++) {
+                if (cr[x] == pr[x]) { cr[x] = CAP_GIF_TRANSPARENT; transparent = 1; }
+            }
+        }
+    }
+
+    UINT8 *data = NULL; UINTN len = 0, minsize = 0;
+    EFI_STATUS st = cap_gif_lzw_encode(g->cur, g->w, rx, ry, rw, rh,
+                                       &data, &len, &minsize);
+    if (EFI_ERROR(st) || !data) {
+        if (data) efi_free_pool(data);
+        g->full = 1;
+        return g->nframes ? CAP_FRAME_FULL : CAP_FRAME_ERROR;
+    }
+
+    if (g->bytes + len > g->budget) {
+        efi_free_pool(data);
+        g->full = 1;
+        return g->nframes ? CAP_FRAME_FULL : CAP_FRAME_ERROR;
+    }
+
+    cap_gif_fr *fr = &g->frames[g->nframes];
+    fr->data = data;
+    fr->len = len;
+    fr->x = (UINT16)rx; fr->y = (UINT16)ry;
+    fr->w = (UINT16)rw; fr->h = (UINT16)rh;
+    fr->min_code_size = (UINT8)minsize;
+    fr->transparent = (UINT8)transparent;
+    fr->delay_cs = (UINT16)g->nominal_delay_cs;
+    g->bytes += len;
+    g->nframes++;
+
+    if (transparent) {
+        for (UINTN y = 0; y < rh; y++) {
+            UINT8 *cr = g->cur + (ry + y) * g->w + rx;
+            const UINT8 *pr = g->prev + (ry + y) * g->w + rx;
+            for (UINTN x = 0; x < rw; x++)
+                if (cr[x] == CAP_GIF_TRANSPARENT) cr[x] = pr[x];
+        }
+    }
+    memcpy(g->prev, g->cur, g->w * g->h);
+
+    g->last_ms = now_ms;
+    g->have_last_ms = 1;
+
+    if (g->nframes >= g->max_frames || g->bytes >= g->budget) g->full = 1;
+    return g->full ? CAP_FRAME_FULL : CAP_FRAME_OK;
+}
+
 static EFI_STATUS cap_gif_build(cap_gif *g, UINT8 **out, UINTN *out_size) {
     cap_buf outb;
     outb.buf = NULL; outb.len = 0; outb.cap = 0;
-    if (!cap_buf_reserve(&outb, 4096 + g->nframes * (g->w * g->h / 2))) goto oom;
+    if (!cap_buf_reserve(&outb, g->bytes + g->nframes * 24 + 1024)) goto oom;
 
-    /* Header - no global colour table; each frame carries its own palette. */
     if (!cap_buf_put(&outb, (const UINT8*)"GIF89a", 6)) goto oom;
     if (!cap_buf_u16le(&outb, (UINT16)g->w)) goto oom;
     if (!cap_buf_u16le(&outb, (UINT16)g->h)) goto oom;
-    outb.buf[outb.len++] = 0x00;
-    outb.buf[outb.len++] = 0x00;
-    outb.buf[outb.len++] = 0x00;
+    {
+        UINT8 lsd[3] = { 0xF7, 0x00, 0x00 };
+        if (!cap_buf_put(&outb, lsd, 3)) goto oom;
+    }
+    if (!cap_buf_put(&outb, g->palette, 256 * 3)) goto oom;
+
+    {
+        static const UINT8 loop[19] = {
+            0x21, 0xFF, 0x0B, 'N','E','T','S','C','A','P','E','2','.','0',
+            0x03, 0x01, 0x00, 0x00, 0x00
+        };
+        if (!cap_buf_put(&outb, loop, sizeof(loop))) goto oom;
+    }
 
     for (UINTN f = 0; f < g->nframes; f++) {
-        cap_gif_fr *fr = g->frames[f];
-        if (!fr || !fr->idx) goto oom;
+        cap_gif_fr *fr = &g->frames[f];
+        if (!fr->data) goto oom;
 
-        /* Graphic Control Extension: dispose=0, no transparency; delay */
-        UINT8 gce[8] = { 0x21, 0xF9, 0x04, 0x00,
-                         (UINT8)g->delays[f], (UINT8)(g->delays[f] >> 8),
-                         0x00, 0x00 };
+        UINT8 packed = fr->transparent ? 0x05 : 0x04;
+        UINT8 gce[8] = { 0x21, 0xF9, 0x04, packed,
+                         (UINT8)fr->delay_cs, (UINT8)(fr->delay_cs >> 8),
+                         CAP_GIF_TRANSPARENT, 0x00 };
         if (!cap_buf_put(&outb, gce, 8)) goto oom;
 
-        /* Image Descriptor with a 256-entry local colour table */
         UINT8 id[10] = { 0x2C,
-                         0, 0, 0, 0,
-                         (UINT8)g->w, (UINT8)(g->w >> 8),
-                         (UINT8)g->h, (UINT8)(g->h >> 8),
-                         0x87 };
+                         (UINT8)fr->x, (UINT8)(fr->x >> 8),
+                         (UINT8)fr->y, (UINT8)(fr->y >> 8),
+                         (UINT8)fr->w, (UINT8)(fr->w >> 8),
+                         (UINT8)fr->h, (UINT8)(fr->h >> 8),
+                         0x00 };
         if (!cap_buf_put(&outb, id, 10)) goto oom;
-        if (!cap_buf_put(&outb, fr->palette, 256 * 3)) goto oom;
 
-        /* LZW data */
-        UINT8 *fdata = NULL; UINTN fdatalen = 0; UINTN minsize = 0;
-        EFI_STATUS s = cap_gif_lzw_encode(g, fr->idx, g->w * g->h,
-                                          &fdata, &fdatalen, &minsize);
-        if (EFI_ERROR(s)) { if (fdata) efi_free_pool(fdata); goto oom; }
-        UINT8 ms = (UINT8)minsize;
-        if (!cap_buf_put(&outb, &ms, 1)) { efi_free_pool(fdata); goto oom; }
-        if (!cap_buf_put(&outb, fdata, fdatalen)) { efi_free_pool(fdata); goto oom; }
-        efi_free_pool(fdata);
+        if (!cap_buf_put(&outb, &fr->min_code_size, 1)) goto oom;
+        if (!cap_buf_put(&outb, fr->data, fr->len)) goto oom;
     }
 
     UINT8 trailer = 0x3B;
@@ -624,6 +886,8 @@ oom:
 EFI_STATUS cap_gif_close(cap_gif *g, UINT8 **out, UINTN *out_size) {
     if (!g || !out || !out_size) return EFI_INVALID_PARAMETER;
     if (g->nframes == 0) { cap_gif_free(g); return EFI_NOT_READY; }
+    if (g->frames[g->nframes - 1].delay_cs < CAP_GIF_MIN_DELAY_CS)
+        g->frames[g->nframes - 1].delay_cs = (UINT16)g->nominal_delay_cs;
     if (EFI_ERROR(cap_gif_build(g, out, out_size))) {
         cap_gif_free(g);
         return EFI_OUT_OF_RESOURCES;

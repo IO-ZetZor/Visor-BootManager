@@ -368,8 +368,12 @@ typedef struct gui_state {
     INTN    cap_status_ms;
     UINT64  cap_last_ms;
     CHAR16  cap_status[96];
+    CHAR16  cap_detail[128];
     int     cap_status_err;
     UINTN   cap_sec_prev;
+    UINT64  cap_next_due_ms;
+    int     cap_truncated;
+    UINTN   record_seconds;
     cap_gif *cap_gif;
 
     /* GPT corruption warning modal (gptw_state: 0=hidden, 2=overview,

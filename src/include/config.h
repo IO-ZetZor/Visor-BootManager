@@ -107,6 +107,7 @@ typedef struct {
     UINTN   screensaver_delay;
     UINTN   screensaver_blank;
     int     screensaver_clock;
+    UINTN   record_seconds;
     int     tpm;
     UINTN   tpm_pcr_config;
     UINTN   tpm_pcr_cmdline;

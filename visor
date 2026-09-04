@@ -1605,7 +1605,8 @@ cmd_studio() {
     fi
 
     (cd "$dir/frontend" && npm run dev >/tmp/visor-studio-frontend.log 2>&1 &) || true
-    say "Starting Visor Studio backend at http://127.0.0.1:$port (Ctrl-C to stop)"
+    say "Starting Visor Studio backend at http://127.0.0.1:$port"
+    say "Open http://127.0.0.1:5173 in your browser (Ctrl-C to stop)"
     (cd "$dir" && exec uvicorn main:app --port "$port")
 }
 

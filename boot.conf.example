@@ -499,6 +499,20 @@ background=\EFI\visor\backgrounds\default.png
 #screensaver_blank_delay=600
 #screensaver_clock=1
 
+# --- Screenshots and screen recording ----------------------------------------
+# F6 writes a PNG screenshot of the current screen to \EFI\visor\shots.
+# F10 records an animated GIF of the menu: a 3-second countdown (F10 again
+# cancels), then the recording, then the file is written to the same folder.
+# Recordings use one global palette with per-frame deltas, are captured at
+# 20 fps, and are scaled down to at most 960 px wide so a 4K menu does not
+# produce a file nothing will open. Both work in the menu and in the disk
+# corruption warning.
+#   record_seconds   = 3          how long F10 records, in seconds (1-12,
+#                                 default 3). Longer recordings are cut short
+#                                 if they would exceed the 20 MiB encoder
+#                                 budget; whatever was captured is still saved.
+#record_seconds=3
+
 # --- TPM2 measured boot ------------------------------------------------------
 # Measure boot artifacts into the TPM2 so a sealed disk or remote-attestation
 # policy can tell what Visor booted. Both measurements use the TCG2

@@ -285,6 +285,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.ss_delay_ms      = config.screensaver_delay * 1000;
     gui.ss_blank_ms      = config.screensaver_blank * 1000;
     gui.ss_keep_clock    = config.screensaver_clock;
+    gui.record_seconds   = config.record_seconds;
     gui.animation       = config.animation;
     gui.anim_speed      = config.anim_speed;
     gui.fade_speed      = config.fade_speed;
@@ -554,12 +555,12 @@ boot_selected:
             (visor_cmdline_has_word(selected->cmdline, L"quiet") ||
              visor_cmdline_has_word(selected->cmdline, L"splash"));
         CHAR16 *prompt = selected->luks
-            ? L"LUKS Password   (Enter = boot, Esc = cancel)"
-            : L"Password   (Enter = boot, Esc = cancel)";
+            ? L"LUKS passphrase"
+            : L"Password";
         CHAR16 *hint = splash_hides_prompt
-            ? L"F2 shows what you typed. Visor cannot check the passphrase - if it "
-              L"is wrong, splash hides the initramfs retry prompt (luks_verbose=1)"
-            : L"F2 shows what you typed - use it to check your keyboard layout";
+            ? L"Visor cannot check the passphrase - if it is wrong, splash hides "
+              L"the initramfs retry prompt (luks_verbose=1)"
+            : L"Checked by the initramfs, not by Visor - F2 to verify your layout";
         if (splash_hides_prompt)
             efi_log(L"WARN: luks=1 entry uses quiet/splash - see luks_verbose in boot.conf");
 
@@ -583,7 +584,7 @@ boot_selected:
                 }
                 if (confirm) {
                     ps = gui_prompt_password(&gui,
-                            L"Repeat passphrase   (Enter = boot, Esc = cancel)",
+                            L"Repeat passphrase",
                             L"Typed twice because Visor cannot verify it before handing over",
                             &again);
                     if (EFI_ERROR(ps)) {

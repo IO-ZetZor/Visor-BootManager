@@ -2782,6 +2782,11 @@ static void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->screensaver_blank = parse_uint(value);
     } else if (efi_strcmp(key, L"screensaver_clock") == 0) {
         config->screensaver_clock = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"record_seconds") == 0) {
+        UINTN s = parse_uint(value);
+        if (s < 1)  s = 1;
+        if (s > 12) s = 12;
+        config->record_seconds = s;
     } else if (efi_strcmp(key, L"tpm") == 0 ||
                efi_strcmp(key, L"measure") == 0) {
         config->tpm = (*value == '1' || *value == 't' || *value == 'y');
@@ -3710,6 +3715,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->screensaver_delay = 60;
     config->screensaver_blank = 600;
     config->screensaver_clock = 1;
+    config->record_seconds = 3;
     config->tpm = 1;
     config->tpm_pcr_config = TPM_PCR_CONFIG_DEFAULT;
     config->tpm_pcr_cmdline = TPM_PCR_CMDLINE_DEFAULT;

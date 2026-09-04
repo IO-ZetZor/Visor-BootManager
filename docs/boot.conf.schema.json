@@ -327,6 +327,14 @@
       "$ref": "#/$defs/bool",
       "default": true
     },
+    "record_seconds": {
+      "x-group": "capture",
+      "description": "How long F10 records the screen, in seconds. Recordings are captured at 20 fps, scaled to at most 960 px wide, and cut short if they would exceed the encoder's 20 MiB budget (what was captured is still saved).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12,
+      "default": 3
+    },
     "tpm": {
       "x-group": "tpm",
       "x-aliases": [
