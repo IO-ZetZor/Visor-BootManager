@@ -112,6 +112,7 @@ static UINTN default_aux_text_px(gui_state_t *state) {
 
 static void gui_fill_rect(gui_state_t *state, UINTN x, UINTN y,
                           UINTN w, UINTN h, color_t color);
+static void blur_free(gui_state_t *state);
 
 static int add_overflow_uintn(UINTN a, UINTN b, UINTN *out) {
     if (~(UINTN)0 - a < b) return 1;
@@ -703,6 +704,12 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->scene_cache = efi_allocate_pool(
         state->screen_width * state->screen_height * sizeof(UINT32));
     state->blur_cache = NULL;
+    state->blur_line  = NULL;
+    state->blur_w = state->blur_h = 0;
+    state->blur_shift = 2;
+    state->blur_gen = 0;
+    state->blur_valid = 0;
+    state->bg_gen = 0;
     state->scene_valid = 0;
 
     gui_fill_rect(state, 0, 0, state->screen_width, state->screen_height, state->bg_color);
@@ -766,7 +773,7 @@ EFI_STATUS gui_set_mode(gui_state_t *state, UINTN want_w, UINTN want_h, int want
     UINTN px = state->screen_width * state->screen_height;
     if (state->backbuffer)  efi_free_pool(state->backbuffer);
     if (state->scene_cache) efi_free_pool(state->scene_cache);
-    if (state->blur_cache)  { efi_free_pool(state->blur_cache); state->blur_cache = NULL; }
+    blur_free(state);
 
     state->backbuffer  = efi_allocate_pool(px * sizeof(UINT32));
     state->scene_cache = efi_allocate_pool(px * sizeof(UINT32));
@@ -1335,10 +1342,8 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
         anim_free(state->bg_anim);
         state->bg_anim = NULL;
     }
-    if (state->blur_cache) {
-        efi_free_pool(state->blur_cache);
-        state->blur_cache = NULL;
-    }
+    blur_free(state);
+    state->bg_gen++;
     if (state->background_path) {
         efi_free_pool(state->background_path);
     }
@@ -1659,6 +1664,7 @@ static int anim_tick(gui_state_t *state) {
 
     a->next_ms = now + hold;
 
+    state->bg_gen++;
     state->scene_valid = 0;
     return 1;
 }
@@ -1773,22 +1779,37 @@ static void scene_restore_band(gui_state_t *state, INTN y, INTN h) {
 
 #define FROST_RADIUS 16
 
-static void box_blur_pass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN rad) {
-    UINTN W = state->screen_width, H = state->screen_height;
+#define BLUR_RADIUS 16
+
+static UINTN blur_pick_shift(UINTN w) {
+    UINTN s = 2;
+    while ((w >> s) > 640 && s < 5) s++;
+    return s;
+}
+
+static void blur_free(gui_state_t *state) {
+    if (state->blur_cache) { efi_free_pool(state->blur_cache); state->blur_cache = NULL; }
+    if (state->blur_line)  { efi_free_pool(state->blur_line);  state->blur_line  = NULL; }
+    state->blur_valid = 0;
+    state->blur_w = state->blur_h = 0;
+}
+
+static void box_blur_pass(UINT32 *src, UINT32 *dst, UINTN W, UINTN H, INTN rad) {
+    INTN win = 2 * rad + 1;
+    UINT32 recip = (UINT32)(((1u << 16) + (UINT32)win - 1) / (UINT32)win);
     for (UINTN y = 0; y < H; y++) {
         UINT32 *s = src + y * W;
         UINT32 *d = dst + y * W;
         UINT32 sr = 0, sg = 0, sb = 0;
-        INTN win = 2 * rad + 1;
         for (INTN i = -rad; i <= rad; i++) {
             UINTN xi = (i < 0) ? 0 : ((UINTN)i >= W ? W - 1 : (UINTN)i);
             UINT32 p = s[xi];
             sr += (p >> 16) & 0xFF; sg += (p >> 8) & 0xFF; sb += p & 0xFF;
         }
         for (UINTN x = 0; x < W; x++) {
-            d[x] = (0xFFu << 24) | (((sr / win) & 0xFF) << 16)
-                 | (((sg / win) & 0xFF) << 8) | ((sb / win) & 0xFF);
-            UINTN xa = x + rad + 1; if (xa >= W) xa = W - 1;
+            d[x] = (0xFFu << 24) | ((((sr * recip) >> 16) & 0xFF) << 16)
+                 | ((((sg * recip) >> 16) & 0xFF) << 8) | (((sb * recip) >> 16) & 0xFF);
+            UINTN xa = x + (UINTN)rad + 1; if (xa >= W) xa = W - 1;
             INTN xrm = (INTN)x - rad; UINTN xr = (xrm < 0) ? 0 : (UINTN)xrm;
             UINT32 pa = s[xa], pr = s[xr];
             sr += ((pa >> 16) & 0xFF) - ((pr >> 16) & 0xFF);
@@ -1798,9 +1819,9 @@ static void box_blur_pass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN rad
     }
 }
 
-static void box_blur_vpass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN rad) {
-    UINTN W = state->screen_width, H = state->screen_height;
+static void box_blur_vpass(UINT32 *src, UINT32 *dst, UINTN W, UINTN H, INTN rad) {
     INTN win = 2 * rad + 1;
+    UINT32 recip = (UINT32)(((1u << 16) + (UINT32)win - 1) / (UINT32)win);
     UINTN strip = 64;
     UINT32 sr[64], sg[64], sb[64];
 
@@ -1818,9 +1839,10 @@ static void box_blur_vpass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN ra
         for (UINTN y = 0; y < H; y++) {
             UINT32 *d = dst + y * W + x0;
             for (UINTN k = 0; k < nx; k++)
-                d[k] = (0xFFu << 24) | (((sr[k] / win) & 0xFF) << 16)
-                     | (((sg[k] / win) & 0xFF) << 8) | ((sb[k] / win) & 0xFF);
-            UINTN ya = y + rad + 1; if (ya >= H) ya = H - 1;
+                d[k] = (0xFFu << 24) | ((((sr[k] * recip) >> 16) & 0xFF) << 16)
+                     | ((((sg[k] * recip) >> 16) & 0xFF) << 8)
+                     | (((sb[k] * recip) >> 16) & 0xFF);
+            UINTN ya = y + (UINTN)rad + 1; if (ya >= H) ya = H - 1;
             INTN yrm = (INTN)y - rad; UINTN yr = (yrm < 0) ? 0 : (UINTN)yrm;
             const UINT32 *pa = src + ya * W + x0;
             const UINT32 *pr = src + yr * W + x0;
@@ -1834,16 +1856,118 @@ static void box_blur_vpass(gui_state_t *state, UINT32 *src, UINT32 *dst, INTN ra
     }
 }
 
-static void build_blur_cache(gui_state_t *state) {
-    if (!state->blur_cache) {
-        state->blur_cache = efi_allocate_pool(
-            state->screen_width * state->screen_height * sizeof(UINT32));
+static void blur_downsample(gui_state_t *state, UINT32 *dst) {
+    UINTN W = state->screen_width, H = state->screen_height;
+    UINTN S = state->blur_shift, SC = 1u << S;
+    UINTN SW = state->blur_w, SH = state->blur_h;
+    const UINT32 *src = state->backbuffer;
+
+    for (UINTN sy = 0; sy < SH; sy++) {
+        UINTN y0 = sy << S;
+        UINTN y1 = y0 + SC; if (y1 > H) y1 = H;
+        UINTN rows = y1 - y0;
+        UINT32 *d = dst + sy * SW;
+
+        for (UINTN sx = 0; sx < SW; sx++) {
+            UINTN x0 = sx << S;
+            UINTN x1 = x0 + SC; if (x1 > W) x1 = W;
+            UINTN cols = x1 - x0;
+            UINT32 ar = 0, ag = 0, ab = 0;
+            for (UINTN y = y0; y < y1; y++) {
+                const UINT32 *s = src + y * W + x0;
+                for (UINTN k = 0; k < cols; k++) {
+                    UINT32 p = s[k];
+                    ar += (p >> 16) & 0xFF; ag += (p >> 8) & 0xFF; ab += p & 0xFF;
+                }
+            }
+            UINTN n = rows * cols; if (!n) n = 1;
+            d[sx] = (0xFFu << 24) | (((ar / n) & 0xFF) << 16)
+                  | (((ag / n) & 0xFF) << 8) | ((ab / n) & 0xFF);
+        }
     }
-    if (!state->blur_cache || !state->scene_cache) return;
-    box_blur_pass(state, state->backbuffer, state->scene_cache, 14);
-    box_blur_vpass(state, state->scene_cache, state->blur_cache, 14);
-    box_blur_pass(state, state->blur_cache, state->scene_cache, 14);
-    box_blur_vpass(state, state->scene_cache, state->blur_cache, 14);
+}
+
+static void build_blur_cache(gui_state_t *state) {
+    UINTN S = blur_pick_shift(state->screen_width);
+    UINTN SW = (state->screen_width  + (1u << S) - 1) >> S;
+    UINTN SH = (state->screen_height + (1u << S) - 1) >> S;
+    if (SW < 4) SW = 4;
+    if (SH < 4) SH = 4;
+
+    if (state->blur_cache && (state->blur_w != SW || state->blur_h != SH))
+        blur_free(state);
+
+    if (!state->blur_cache) {
+        state->blur_cache = efi_allocate_pool(SW * SH * sizeof(UINT32));
+        if (!state->blur_cache) return;
+        state->blur_w = SW; state->blur_h = SH; state->blur_shift = S;
+        state->blur_valid = 0;
+    }
+    if (!state->blur_line) {
+        state->blur_line = efi_allocate_pool(state->screen_width * sizeof(UINT32));
+        if (!state->blur_line) { blur_free(state); return; }
+    }
+    if (state->blur_valid && state->blur_gen == state->bg_gen) return;
+    if (!state->scene_cache || !state->backbuffer) return;
+
+    UINT32 *tmp = state->scene_cache;
+    INTN rad = (INTN)((BLUR_RADIUS + (1u << S) / 2) >> S);
+    if (rad < 1) rad = 1;
+
+    blur_downsample(state, state->blur_cache);
+    box_blur_pass (state->blur_cache, tmp, SW, SH, rad);
+    box_blur_vpass(tmp, state->blur_cache, SW, SH, rad);
+    box_blur_pass (state->blur_cache, tmp, SW, SH, rad);
+    box_blur_vpass(tmp, state->blur_cache, SW, SH, rad);
+
+    state->blur_gen = state->bg_gen;
+    state->blur_valid = 1;
+}
+
+static void blur_fill_line(gui_state_t *state, INTN y, INTN x0, INTN n) {
+    UINTN S = state->blur_shift, SC = 1u << S, mask = SC - 1;
+    INTN SW = (INTN)state->blur_w, SH = (INTN)state->blur_h;
+    UINT32 *out = state->blur_line;
+
+    INTN sy = y >> (INTN)S, fy = y & (INTN)mask;
+    if (sy < 0) { sy = 0; fy = 0; }
+    if (sy > SH - 1) { sy = SH - 1; fy = 0; }
+    const UINT32 *r0 = state->blur_cache + (UINTN)sy * (UINTN)SW;
+    const UINT32 *r1 = (sy + 1 < SH) ? r0 + SW : r0;
+
+    INTN i = 0;
+    while (i < n) {
+        INTN x = x0 + i;
+        INTN sx = x >> (INTN)S, fx = x & (INTN)mask;
+        if (sx < 0) { sx = 0; fx = 0; }
+        if (sx > SW - 1) { sx = SW - 1; fx = 0; }
+        INTN sx1 = (sx + 1 < SW) ? sx + 1 : sx;
+
+        UINT32 pa = r0[sx],  pb = r1[sx];
+        UINT32 pc = r0[sx1], pd = r1[sx1];
+        INTN lr = (((pa >> 16) & 0xFF) * ((INTN)SC - fy) + ((pb >> 16) & 0xFF) * fy);
+        INTN lg = (((pa >>  8) & 0xFF) * ((INTN)SC - fy) + ((pb >>  8) & 0xFF) * fy);
+        INTN lb = (((pa      ) & 0xFF) * ((INTN)SC - fy) + ((pb      ) & 0xFF) * fy);
+        INTN rr = (((pc >> 16) & 0xFF) * ((INTN)SC - fy) + ((pd >> 16) & 0xFF) * fy);
+        INTN rg = (((pc >>  8) & 0xFF) * ((INTN)SC - fy) + ((pd >>  8) & 0xFF) * fy);
+        INTN rb = (((pc      ) & 0xFF) * ((INTN)SC - fy) + ((pd      ) & 0xFF) * fy);
+
+        INTN cnt = (INTN)SC - fx;
+        if (cnt > n - i) cnt = n - i;
+        INTN ar = lr * (INTN)SC + (rr - lr) * fx;
+        INTN ag = lg * (INTN)SC + (rg - lg) * fx;
+        INTN ab = lb * (INTN)SC + (rb - lb) * fx;
+        INTN dr = rr - lr, dg = rg - lg, db = rb - lb;
+        INTN sh = (INTN)(2 * S);
+        for (INTN k = 0; k < cnt; k++) {
+            out[i + k] = (0xFFu << 24)
+                       | ((UINT32)((ar >> sh) & 0xFF) << 16)
+                       | ((UINT32)((ag >> sh) & 0xFF) << 8)
+                       |  (UINT32)((ab >> sh) & 0xFF);
+            ar += dr; ag += dg; ab += db;
+        }
+        i += cnt;
+    }
 }
 
 static void draw_frost(gui_state_t *state, INTN x, INTN y, INTN w, INTN h, INTN a) {
@@ -1855,7 +1979,9 @@ static void draw_frost(gui_state_t *state, INTN x, INTN y, INTN w, INTN h, INTN 
     if (r * 2 > w) r = w / 2;
     if (r * 2 > h) r = h / 2;
 
-    UINTN W = state->screen_width;
+    int have_blur = (state->blur_cache && state->blur_line && state->blur_valid &&
+                     w <= (INTN)state->screen_width);
+    UINT32 flat = color_to_u32(state->bg_color);
     INTN base_fill = clear ? (a * 255 / 255) : (a * 220 / 255);
     INTN tint_a = clear ? 0 : 34;
     INTN lift   = clear ? 0 : 8;
@@ -1866,6 +1992,7 @@ static void draw_frost(gui_state_t *state, INTN x, INTN y, INTN w, INTN h, INTN 
         else if (j >= h - r)  { INTN dy = j - (h - r); INTN q = r*r - dy*dy; inset = r - (INTN)isqrt_(q > 0 ? q : 0); }
         INTN yy = y + j;
         if (yy < 0 || yy >= (INTN)state->screen_height) continue;
+        if (have_blur) blur_fill_line(state, yy, x, w);
         INTN edy = (j < h - 1 - j) ? j : (h - 1 - j);
         for (INTN i = inset; i < w - inset; i++) {
             INTN xx = x + i;
@@ -1876,9 +2003,7 @@ static void draw_frost(gui_state_t *state, INTN x, INTN y, INTN w, INTN h, INTN 
             INTN fill_a = base_fill;
             if (ed < feather) fill_a = base_fill * ed / feather;
             if (fill_a <= 0) continue;
-            UINT32 src;
-            if (state->blur_cache) src = state->blur_cache[(UINTN)yy * W + (UINTN)xx];
-            else                   src = color_to_u32(state->bg_color);
+            UINT32 src = have_blur ? state->blur_line[i] : flat;
             INTN sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
             sr += lift; sg += lift; sb += lift;
             sr = (sr * (255 - tint_a) + tint.r * tint_a) / 255;
@@ -3135,9 +3260,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
             fill_rect_alpha(state, 0, 0, state->screen_width, state->screen_height,
                             COLOR_BLACK, 60);
 
-        if ((state->blur || state->blur_title ||
-             (state->show_clock && state->clock_blur)) &&
-            (!state->blur_cache || !state->bg_anim))
+        if (state->blur || state->blur_title ||
+            (state->show_clock && state->clock_blur))
             build_blur_cache(state);
 
         draw_header(state);
@@ -4100,6 +4224,11 @@ static void gptw_do_repair(gui_state_t *state) {
 }
 
 static void cap_do_screenshot(gui_state_t *state);
+static int  cap_tick(gui_state_t *state);
+static void cap_draw_overlay(gui_state_t *state);
+static int  cap_overlay_live(gui_state_t *state) {
+    return state->cap_mode != 0 || state->cap_status_ms > 0;
+}
 static void gpt_warn_run(gui_state_t *state) {
     if (state->gptw_suppressed) return;
 
@@ -4157,17 +4286,27 @@ static void gpt_warn_run(gui_state_t *state) {
     state->gptw_confirm[0] = 0;
     efi_log(L"gpt: primary GPT corruption detected - offering repair");
 
+    int dirty = 1;
     while (state->gptw_state != 0) {
-        gui_draw_menu(state, 0);
-        gptw_draw(state);
-        gui_present(state);
+        if (anim_tick(state)) dirty = 1;
+        if (cap_overlay_live(state) && cap_tick(state) == 2) dirty = 1;
+
+        if (dirty) {
+            gui_draw_menu(state, 0);
+            gptw_draw(state);
+            if (cap_overlay_live(state)) cap_draw_overlay(state);
+            gui_present(state);
+            dirty = 0;
+        }
 
         EFI_INPUT_KEY key;
         EFI_STATUS ks = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
         if (EFI_ERROR(ks)) {
-            efi_sleep(30);
+            efi_sleep(state->bg_anim ? 8
+                      : (cap_overlay_live(state) ? 12 : 30));
             continue;
         }
+        dirty = 1;
         CHAR16 u = key.UnicodeChar;
         int esc = (u == 0x1B || (u == 0x00 && key.ScanCode == 0x17));
 
@@ -4383,6 +4522,7 @@ static int poll_pointer(gui_state_t *state, int *menu_redraw) {
 #define CAP_MAX_WIDTH      960u
 #define CAP_BUDGET_BYTES   (20u * 1024u * 1024u)
 #define CAP_TOAST_MS       2600
+#define CAP_TOAST_FADE_MS  500
 #define CAP_SHOTS_DIR      L"\\EFI\\visor\\shots"
 
 static UINTN cap_record_ms(gui_state_t *state) {
@@ -4559,7 +4699,7 @@ static int cap_tick(gui_state_t *state) {
             state->cap_status_ms = -1;
             return 2;
         }
-        return 0;
+        return state->cap_status_ms < CAP_TOAST_FADE_MS ? 2 : 0;
     }
 
     UINT64 el = now - state->cap_start_ms;
@@ -4722,7 +4862,8 @@ static void cap_draw_toast(gui_state_t *state) {
     if (by < 0) by = 0;
 
     INTN a = 255;
-    if (state->cap_status_ms < 500) a = (INTN)state->cap_status_ms * 255 / 500;
+    if (state->cap_status_ms < CAP_TOAST_FADE_MS)
+        a = (INTN)state->cap_status_ms * 255 / CAP_TOAST_FADE_MS;
     if (a < 0) a = 0;
 
     INTN r = bh / 2;
@@ -4801,6 +4942,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
             continue;
         }
 
+        if (cap_overlay_live(state)) state->ss_last_input_ms = efi_get_tick();
+
         if (ss_tick(state) && state->ss_level == SS_LEVEL_DIM) {
             ss_transition_to_saver(state);
             continue;
@@ -4823,7 +4966,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 ghost_y = state->cur_prev_y;
                 state->cursor_saved = 0;
             }
-            if (state->cap_mode != 0 || state->cap_status_ms > 0) full_redraw = 1;
+            if (cap_overlay_live(state)) full_redraw = 1;
             gui_draw_menu(state, !full_redraw);
             if (state->editing) draw_editor_overlay(state);
 
@@ -4841,7 +4984,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
                 }
             }
 
-            if (state->cap_mode != 0 || state->cap_status_ms > 0) cap_draw_overlay(state);
+            if (cap_overlay_live(state)) cap_draw_overlay(state);
 
             if (state->cap_mode == 4) {
                 gui_present(state);
@@ -5187,7 +5330,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
         }
 
         if (state->hotplug_poll && !state->editing &&
-            !state->page_anim && !state->hp_anim && !state->anim_active) {
+            !state->page_anim && !state->hp_anim && !state->anim_active &&
+            !cap_overlay_live(state)) {
             UINT64 now = efi_get_tick();
             if (!state->hp_last_ms) state->hp_last_ms = now;
             if (now - state->hp_last_ms >= 1200) {
@@ -5245,15 +5389,17 @@ boot_entry_t* gui_run(gui_state_t *state) {
             if (!state->clock_drawn) full_redraw = 1;
         }
 
-        if (state->cap_mode != 0 || state->cap_status_ms > 0) {
+        if (cap_overlay_live(state)) {
             if (cap_tick(state) == 2) { need_redraw = 1; full_redraw = 1; }
         }
 
         efi_sleep((state->anim_active || state->page_anim ||
                    state->ver_fading || state->hp_anim) ? 6
                   : (state->cap_mode == 2 || state->cap_mode == 3 ? 6
+                  : (state->cap_status_ms > 0 &&
+                     state->cap_status_ms < CAP_TOAST_FADE_MS ? 8
                   : (state->bg_anim ? 8
-                  : (state->cursor_active ? 12 : 30))));
+                  : (state->cursor_active ? 12 : 30)))));
     }
 
     if (state->action != VISOR_ACTION_BOOT) return NULL;
@@ -5359,6 +5505,10 @@ void gui_shutdown(gui_state_t *state) {
     if (state->blur_cache) {
         efi_free_pool(state->blur_cache);
         state->blur_cache = NULL;
+    }
+    if (state->blur_line) {
+        efi_free_pool(state->blur_line);
+        state->blur_line = NULL;
     }
     glyph_cache_flush();
 }

@@ -207,8 +207,16 @@ typedef struct gui_state {
     INTN  pwr_y0, pwr_y1;
 
     UINT32 *scene_cache;
-    UINT32 *blur_cache;
     int     scene_valid;
+
+    UINT32 *blur_cache;
+    UINT32 *blur_line;
+    UINTN   blur_w, blur_h;
+    UINTN   blur_shift;
+    UINTN   blur_gen;
+    int     blur_valid;
+
+    UINTN   bg_gen;
 
     CHAR16 *title;
     int     show_title;
