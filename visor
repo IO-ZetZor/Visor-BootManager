@@ -124,8 +124,10 @@ Config validate options:
 Studio options:
   --update           Pull the latest Visor Studio before running
   --port PORT        Backend port (default 8000)
+  --esp PATH         ESP mount point for local config access
   --docker           Require the Docker runtime (otherwise Docker is used when
                      available, falling back to python3+node)
+  --native           Run with local python3+npm even when Docker is available
   --detach           Run in the background and return immediately
 EOF
 }
@@ -1536,19 +1538,24 @@ studio_dir() {
 
 cmd_studio() {
     local port=8000
+    local esp=""
     local force_docker=0
+    local force_native=0
     local detach=0
     local update=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --update) update=1; shift ;;
             --port) port="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --docker) force_docker=1; shift ;;
+            --native) force_native=1; shift ;;
             --detach) detach=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown studio option: $1" ;;
         esac
     done
+    [ "$force_docker" -eq 1 ] && [ "$force_native" -eq 1 ] && die "--docker and --native are mutually exclusive"
 
     need_cmd git
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "curl or wget is required"
@@ -1564,19 +1571,57 @@ cmd_studio() {
         git -C "$dir" pull --ff-only
     fi
 
-    if [ "$force_docker" -eq 1 ] || command -v docker >/dev/null 2>&1; then
+    local visor_dir_host="${VISOR_DIR:-}"
+    local visor_dir_explicit=0
+    local boot_dir_host="${VISOR_BOOT_DIR:-/boot}"
+    [ -n "$visor_dir_host" ] && visor_dir_explicit=1
+    if [ -n "$visor_dir_host" ]; then
+        [ -d "$visor_dir_host" ] || die "VISOR_DIR is not a directory: $visor_dir_host"
+        [ -r "$visor_dir_host" ] || die "VISOR_DIR is not readable: $visor_dir_host"
+    else
+        local esp_path
+        esp_path="$(resolve_esp "$esp" || true)"
+        if [ -n "$esp_path" ] && [ -d "$esp_path/EFI/visor" ]; then
+            visor_dir_host="$esp_path/EFI/visor"
+        fi
+    fi
+    if [ -n "$visor_dir_host" ] && [ ! -f "$visor_dir_host/boot.conf" ]; then
+        if [ "$visor_dir_explicit" -eq 1 ]; then
+            die "VISOR_DIR does not contain boot.conf: $visor_dir_host"
+        fi
+        warn "Found $visor_dir_host, but boot.conf is missing; Studio will use hosted/export mode."
+        visor_dir_host=""
+    fi
+    if [ -n "$boot_dir_host" ] && [ ! -d "$boot_dir_host" ]; then
+        warn "VISOR_BOOT_DIR is not a directory: $boot_dir_host"
+        boot_dir_host=""
+    fi
+    if [ -n "$visor_dir_host" ]; then
+        say "Local Visor install: $visor_dir_host"
+    else
+        warn "Could not find an installed Visor directory; Studio will use hosted/export mode."
+    fi
+
+    if [ "$force_native" -eq 0 ] && { [ "$force_docker" -eq 1 ] || command -v docker >/dev/null 2>&1; }; then
         if command -v docker >/dev/null 2>&1; then
+            local docker_args=(-p "$port:8000")
+            if [ -n "$visor_dir_host" ]; then
+                docker_args+=(-e VISOR_DIR=/mnt/visor -v "$visor_dir_host:/mnt/visor")
+            fi
+            if [ -n "$boot_dir_host" ] && [ -d "$boot_dir_host" ]; then
+                docker_args+=(-e VISOR_BOOT_DIR=/mnt/boot -v "$boot_dir_host:/mnt/boot:ro")
+            fi
             say "Building Visor Studio image (docker)"
             docker build -t visor-studio "$dir" || die "docker build failed"
             if [ "$detach" -eq 1 ]; then
                 docker rm -f visor-studio >/dev/null 2>&1 || true
-                docker run -d --name visor-studio -p "$port:8000" visor-studio >/dev/null
+                docker run -d --name visor-studio "${docker_args[@]}" visor-studio >/dev/null
                 say "Visor Studio running at http://127.0.0.1:$port"
                 say "Stop it with: docker rm -f visor-studio"
                 return 0
             fi
             say "Starting Visor Studio at http://127.0.0.1:$port (Ctrl-C to stop)"
-            exec docker run --rm -p "$port:8000" visor-studio
+            exec docker run --rm "${docker_args[@]}" visor-studio
         elif [ "$force_docker" -eq 1 ]; then
             die "docker is not installed (install docker or drop --docker)"
         fi
@@ -1595,9 +1640,13 @@ cmd_studio() {
     say "Installing and starting frontend"
     (cd "$dir/frontend" && npm install --silent) || die "npm install failed in $dir/frontend"
 
+    local studio_env=()
+    [ -n "$visor_dir_host" ] && studio_env+=(VISOR_DIR="$visor_dir_host")
+    [ -n "$boot_dir_host" ] && [ -d "$boot_dir_host" ] && studio_env+=(VISOR_BOOT_DIR="$boot_dir_host")
+
     if [ "$detach" -eq 1 ]; then
         (cd "$dir/frontend" && nohup npm run dev >/tmp/visor-studio-frontend.log 2>&1 &) || true
-        (cd "$dir" && nohup uvicorn main:app --port "$port" >/tmp/visor-studio.log 2>&1 &) || true
+        (cd "$dir" && nohup env "${studio_env[@]}" uvicorn main:app --port "$port" >/tmp/visor-studio.log 2>&1 &) || true
         say "Backend:  http://127.0.0.1:$port"
         say "Frontend: http://127.0.0.1:5173"
         say "Logs: /tmp/visor-studio.log, /tmp/visor-studio-frontend.log"
@@ -1607,7 +1656,7 @@ cmd_studio() {
     (cd "$dir/frontend" && npm run dev >/tmp/visor-studio-frontend.log 2>&1 &) || true
     say "Starting Visor Studio backend at http://127.0.0.1:$port"
     say "Open http://127.0.0.1:5173 in your browser (Ctrl-C to stop)"
-    (cd "$dir" && exec uvicorn main:app --port "$port")
+    (cd "$dir" && exec env "${studio_env[@]}" uvicorn main:app --port "$port")
 }
 
 main() {
