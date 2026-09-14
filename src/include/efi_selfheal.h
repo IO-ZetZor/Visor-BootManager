@@ -1,3 +1,4 @@
+/* efi_selfheal.h - NVRAM boot-order self-heal (feature: selfheal) */
 #ifndef EFI_SELFHEAL_H
 #define EFI_SELFHEAL_H
 
@@ -6,12 +7,6 @@
 #include <efi.h>
 #endif
 
-/* Boot-order repair policies:
- * OFF    - never touch NVRAM Boot entries or BootOrder.
- * ENSURE - recreate a missing Boot#### and append it to BootOrder.
- * FIRST  - ENSURE plus: promote our entry to the head of BootOrder on a
- *          normal boot-manager boot; behaves like ENSURE otherwise.
- */
 #define NVSH_ORDER_OFF     0
 #define NVSH_ORDER_ENSURE  1
 #define NVSH_ORDER_FIRST   2
@@ -56,8 +51,6 @@ nvsh_report_t nvram_self_heal(nvsh_policy_t *policy);
 
 const CHAR16* nvsh_order_name(int mode);
 const CHAR16* nvsh_err_text(int err);
-
-/* Pure helpers, also exercised by the host unit harness */
 
 UINTN nvsh_load_option_size(const CHAR16 *desc, UINTN path_len);
 int   nvsh_build_load_option(UINT8 *out, UINTN cap, UINT32 attributes,

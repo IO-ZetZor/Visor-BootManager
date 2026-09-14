@@ -12,8 +12,6 @@
 #define VISOR_CRYPT_MAX_ITERATIONS 5000000U
 #define VISOR_CRYPT_HEADER_AUTH_SIZE 52
 
-int mem_equal(const void *a, const void *b, UINTN n);
-
 typedef struct {
     UINT8  magic[8];
     UINT32 version;

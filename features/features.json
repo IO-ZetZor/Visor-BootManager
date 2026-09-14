@@ -1,0 +1,457 @@
+{
+  "$comment": [
+    "features.json - the human/UI half of the Visor feature registry.",
+    "features.mk is the build half; the two are cross-checked by",
+    "tools/check_features.py, which asserts the id sets match exactly.",
+    "",
+    "This file answers the questions a build manifest has to answer but a",
+    "config schema cannot: what does this feature DO, which config keys stop",
+    "meaning anything without it, which hotkeys disappear, and which host-side",
+    "`visor` subcommands become useless or dangerous.",
+    "",
+    "Fields per feature:",
+    "  summary   one line, shown in `visor features` and install.sh prompts",
+    "  group     heading the interactive picker files it under; purely for",
+    "            display, and features are listed within a group in the order",
+    "            features.mk declares them",
+    "  detail    the tradeoff, shown in --list-features and Visor Studio",
+    "  keys      global boot.conf keys that only mean something with it on",
+    "  entrykeys per-entry keys that only mean something with it on",
+    "  hotkeys   menu keys the feature owns",
+    "  cli       `visor` subcommands that require it on the installed build",
+    "  section   boot.conf.example section header it owns, for [feat:] tagging",
+    "  size_kb   allocated .text+.rodata+.data of its objects, per arch, at -O2.",
+    "            Measured, not guessed; re-measure with tools/check_features.py",
+    "            --sizes after adding sources. Excludes what the linker shares.",
+    "  arch      architectures it is meaningful on; absent means all",
+    "  profiles  profiles it may appear in; absent means any.  Outside those",
+    "            it is forced off even when named in --features, and the",
+    "            custom picker does not offer it.  Mirrors FEAT_<f>_PROFILES."
+  ],
+  "version": 1,
+  "schema_version": "1.4.0",
+  "features": {
+    "gui": {
+      "summary": "The graphical menu: framebuffer, font, icons",
+      "group": "Graphics",
+      "detail": "The single biggest thing in the image. Dropping it makes the text menu unconditional rather than a fallback, and takes the baked font and the PNG decoder with it. Everything else visual depends on this.",
+      "keys": [
+        "resolution",
+        "font",
+        "logo",
+        "logo_gap",
+        "logo_mode",
+        "logo_size",
+        "icon_size",
+        "icon_spacing",
+        "icon_y",
+        "box_radius",
+        "name_size",
+        "title_size",
+        "show_names",
+        "entries_per_page",
+        "power_icons",
+        "power_icon_size",
+        "power_position",
+        "shutdown_icon",
+        "reboot_icon",
+        "firmware_icon",
+        "background",
+        "bg_color",
+        "highlight_color",
+        "underline_color",
+        "underline_length",
+        "underline_thickness",
+        "center_info",
+        "info_color",
+        "name_color",
+        "title_color",
+        "shutdown_color",
+        "reboot_color",
+        "firmware_color",
+        "theme"
+      ],
+      "entrykeys": ["icon", "color", "icon_size"],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Menu appearance and input",
+      "size_kb": { "x86_64": 162, "aarch64": 149 }
+    },
+    "fade": {
+      "summary": "Fades and crossfades between menu states",
+      "group": "Graphics",
+      "detail": "Cosmetic. Without it transitions are instant cuts.",
+      "keys": ["fade_speed"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 2, "aarch64": 2 }
+    },
+    "screensaver": {
+      "summary": "Idle screensaver and display blanking",
+      "group": "Graphics",
+      "detail": "Blanks or dims the menu after an idle timeout. Only matters if a machine sits at the menu for a long time.",
+      "keys": [
+        "screensaver",
+        "screensaver_delay",
+        "screensaver_blank",
+        "screensaver_clock"
+      ],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Screensaver",
+      "size_kb": { "x86_64": 1, "aarch64": 1 }
+    },
+    "blur": {
+      "summary": "Blurred highlight behind the selected entry",
+      "group": "Graphics",
+      "detail": "Cosmetic. The selection still highlights without it, just without the blur.",
+      "keys": ["blur", "blur_color", "blur_title", "clock_blur"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Blur highlight",
+      "size_kb": { "x86_64": 6, "aarch64": 4 }
+    },
+    "clock": {
+      "summary": "On-screen clock",
+      "group": "Graphics",
+      "detail": "Reads the firmware RTC and draws the time on the menu.",
+      "keys": [
+        "clock",
+        "show_clock",
+        "clock_format",
+        "clock_position",
+        "clock_color",
+        "clock_size",
+        "clock_seconds",
+        "clock_date",
+        "clock_date_format",
+        "clock_shadow",
+        "accent_clock"
+      ],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Clock",
+      "size_kb": { "x86_64": 5, "aarch64": 3 }
+    },
+    "pointer": {
+      "summary": "Mouse and touchpad support",
+      "group": "Graphics",
+      "detail": "Pointer cursor and click-to-select. Keyboard navigation is core and always works.",
+      "keys": ["mouse", "mouse_speed"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 3, "aarch64": 3 }
+    },
+    "editor": {
+      "summary": "In-menu kernel cmdline editor (E)",
+      "group": "Graphics",
+      "detail": "Lets anyone at the keyboard edit the kernel command line before booting - which means adding init=/bin/sh. Drop it on machines where physical access should not mean root.",
+      "keys": ["editor"],
+      "entrykeys": [],
+      "hotkeys": ["E - edit the selected entry's cmdline"],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 2, "aarch64": 1 }
+    },
+    "accent": {
+      "summary": "Accent colours sampled from the wallpaper",
+      "group": "Graphics",
+      "detail": "Extracts a palette from the background image and recolours the menu to match. Costs real space for a purely cosmetic result.",
+      "keys": [
+        "accent",
+        "accent_variant",
+        "accent_text",
+        "accent_icons",
+        "accent_os_icons",
+        "accent_logo",
+        "accent_underline"
+      ],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Dynamic accent (palette from wallpaper)",
+      "size_kb": { "x86_64": 25, "aarch64": 21 }
+    },
+    "anim": {
+      "summary": "Animated background playback",
+      "group": "Animated backgrounds",
+      "detail": "The playback engine only. It needs at least one decoder - anim_gif or anim_mp4 - to have anything to play.",
+      "keys": ["animation", "anim_speed"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Animation",
+      "size_kb": { "x86_64": 0, "aarch64": 0 }
+    },
+    "anim_gif": {
+      "summary": "Animated GIF backgrounds",
+      "group": "Animated backgrounds",
+      "detail": "A GIF parser running before the OS is loaded, on a file read from the ESP. Attack surface if that file is not trusted.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 6, "aarch64": 4 }
+    },
+    "anim_mp4": {
+      "summary": "MP4/MJPEG and VBG video backgrounds",
+      "group": "Animated backgrounds",
+      "detail": "The largest parser in the image: MP4 container, MJPEG frames, and the compact VBG format. Same caveat as anim_gif, more of it.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": ["convert"],
+      "section": null,
+      "size_kb": { "x86_64": 19, "aarch64": 15 }
+    },
+    "capture": {
+      "summary": "Screenshots (F6) and GIF screen recording (F10)",
+      "group": "Extras",
+      "detail": "Writes PNG and GIF files to the ESP from the menu. Useful for bug reports and for showing the thing off; nothing depends on it.",
+      "keys": ["record_seconds"],
+      "entrykeys": [],
+      "hotkeys": [
+        "F6 - PNG screenshot to \\EFI\\visor\\shots",
+        "F10 - record an animated GIF of the menu"
+      ],
+      "cli": [],
+      "section": "Screenshots and screen recording",
+      "size_kb": { "x86_64": 20, "aarch64": 16 }
+    },
+    "filebrowse": {
+      "summary": "Browse and boot files from any readable filesystem (B)",
+      "group": "Extras",
+      "detail": "Walks every filesystem the firmware can read and boots an arbitrary EFI binary from it. Convenient, and a way around a curated boot menu. Works in text mode too.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": ["B - open the file browser"],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 14, "aarch64": 10 }
+    },
+    "audio": {
+      "summary": "Boot sound through the HD Audio controller",
+      "group": "Extras",
+      "detail": "Plays a WAV when the menu opens. The HDA controller is x86 chipset hardware, so this is x86-only. It adds a DMA-programming driver to the pre-OS environment.",
+      "keys": ["menu_sound"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Sound",
+      "arch": ["x86_64"],
+      "size_kb": { "x86_64": 19 }
+    },
+    "rbd": {
+      "summary": "Return by Death",
+      "group": "Extras",
+      "detail": "A hidden animated sequence with baked-in audio, on a 1-in-50 roll. Roughly 53 KB, nearly all of it the audio sample. Pure fun, zero function. x86-only, because it needs the audio feature. Only ever built into the full profile - you get it by installing full, not by picking it off a list.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "arch": ["x86_64"],
+      "profiles": ["full"],
+      "size_kb": { "x86_64": 53 }
+    },
+    "recovery": {
+      "summary": "The rescue console (Esc at the menu)",
+      "group": "Recovery and disk",
+      "detail": "The text console you reach when the menu is up but something is wrong. Worth keeping on anything you cannot easily reimage.",
+      "keys": ["recovery_entries"],
+      "entrykeys": [],
+      "hotkeys": ["Esc - open the options/rescue console"],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 14, "aarch64": 12 }
+    },
+    "gptrepair": {
+      "summary": "GPT diagnosis and partition-table repair",
+      "group": "Recovery and disk",
+      "detail": "Detects a damaged GPT and can restore it from the backup header. The one feature here that can make a machine bootable again after the disk is already broken.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 29, "aarch64": 25 }
+    },
+    "snapshots": {
+      "summary": "Boot into btrfs snapshots",
+      "group": "Entry discovery",
+      "detail": "Finds btrfs snapshots and offers them as alternate boot targets under an entry (V to cycle).",
+      "keys": ["snapshots"],
+      "entrykeys": [],
+      "hotkeys": ["V - cycle deployments and snapshots for the selected entry"],
+      "cli": [],
+      "section": "Snapshots (boot into btrfs snapshots)",
+      "size_kb": { "x86_64": 11, "aarch64": 9 }
+    },
+    "bls": {
+      "summary": "Boot Loader Specification entry discovery",
+      "group": "Entry discovery",
+      "detail": "Reads /loader/entries/*.conf, the format systemd-boot and kernel-install write. Without it, distro kernel hooks stop producing menu entries.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 6, "aarch64": 5 }
+    },
+    "discover": {
+      "summary": "Find kernels and OSes with no boot.conf",
+      "group": "Entry discovery",
+      "detail": "The reason Visor works out of the box. install.sh tells users they can delete boot.conf and let Visor find things, so this is in every profile.",
+      "keys": [
+        "scan",
+        "quick_scan",
+        "deep_scan",
+        "default",
+        "remember_last",
+        "restore_fallback"
+      ],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Entry discovery",
+      "size_kb": { "x86_64": 6, "aarch64": 5 }
+    },
+    "hotplug": {
+      "summary": "Rescan when a USB disk appears at the menu",
+      "group": "Entry discovery",
+      "detail": "Picks up removable media plugged in after the menu is already drawn.",
+      "keys": ["hotplug", "scan_existing"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 6, "aarch64": 5 }
+    },
+    "luks": {
+      "summary": "LUKS passphrase prompt and keyfile handover",
+      "group": "Security",
+      "detail": "Collects the passphrase at the menu and hands it to the initramfs in a cpio keyfile, so you type it once instead of twice. Dropping it does not make an encrypted root unbootable - the initramfs still prompts.",
+      "keys": [],
+      "entrykeys": [
+        "luks",
+        "luks_confirm",
+        "luks_verbose",
+        "luks_key_path",
+        "luks_cmdline",
+        "luks_preset"
+      ],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 5, "aarch64": 4 }
+    },
+    "verify": {
+      "summary": "SHA-256 verification of kernels and initrds",
+      "group": "Security",
+      "detail": "Checks an entry's sha256 before booting it. Cheap, and the base that crypto builds on.",
+      "keys": [],
+      "entrykeys": ["sha256"],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "size_kb": { "x86_64": 3, "aarch64": 2 }
+    },
+    "crypto": {
+      "summary": "Encrypted kernel and initrd support",
+      "group": "Security",
+      "detail": "Decrypts AES-encrypted kernels and initrds at boot with a passphrase. Without it the loader physically cannot boot anything `visor encrypt` produced, so the CLI refuses to encrypt against a build that lacks it.",
+      "keys": [],
+      "entrykeys": ["encrypted", "kernel_encrypted", "initrd_encrypted"],
+      "hotkeys": [],
+      "cli": ["encrypt"],
+      "section": null,
+      "size_kb": { "x86_64": 4, "aarch64": 3 }
+    },
+    "tpm": {
+      "summary": "TPM2 measured boot (TCG2 log extension)",
+      "group": "Security",
+      "detail": "Measures the kernel, initrd and cmdline into PCRs before handing off, so a TPM-sealed secret can depend on what actually booted. Dropping it silently changes PCR values and can break an existing seal.",
+      "keys": ["tpm", "tpm_pcr_cmdline", "tpm_pcr_config"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "TPM2 measured boot",
+      "size_kb": { "x86_64": 1, "aarch64": 2 }
+    },
+    "selfheal": {
+      "summary": "Repair a broken or reordered UEFI boot entry",
+      "group": "Recovery and disk",
+      "detail": "Notices when firmware has dropped or demoted Visor's NVRAM boot entry and puts it back. Aimed squarely at the laptops that quietly reset BootOrder.",
+      "keys": ["selfheal", "selfheal_order"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Boot self-heal",
+      "size_kb": { "x86_64": 8, "aarch64": 7 }
+    },
+    "loader_iface": {
+      "summary": "systemd Boot Loader Interface EFI variables",
+      "group": "Interfaces",
+      "detail": "Publishes LoaderInfo, LoaderEntrySelected and friends, so systemd tooling on the booted system can see what loaded it. Also what `bootctl` reads.",
+      "keys": ["loader_vars"],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": "Boot Loader Interface (systemd)",
+      "size_kb": { "x86_64": 3, "aarch64": 3 }
+    },
+    "rawboot": {
+      "summary": "Legacy x86 boot protocol handover",
+      "group": "Interfaces",
+      "detail": "Boots kernels that have no EFI stub, via the 16-bit/32-bit boot protocol. x86-only. Needed for some very old or unusually built kernels; most modern distro kernels boot fine without it.",
+      "keys": [],
+      "entrykeys": [],
+      "hotkeys": [],
+      "cli": [],
+      "section": null,
+      "arch": ["x86_64"],
+      "size_kb": { "x86_64": 3 }
+    }
+  },
+  "profiles": {
+    "minimal": {
+      "summary": "Text menu only",
+      "detail": "No graphics at all - the text menu becomes the only menu. For servers, tiny ESPs, and anything where you want the smallest thing that boots. Keeps entry discovery and sha256 verification.",
+      "recommended_for": "servers, headless machines, small ESPs"
+    },
+    "standard": {
+      "summary": "The graphical menu and everything most people use",
+      "detail": "The graphical menu, discovery, security features, and self-heal - without the animation decoders, screen capture, file browser, audio or the easter egg.",
+      "recommended_for": "most installs",
+      "default": true
+    },
+    "hardened": {
+      "summary": "Smallest pre-OS parser surface",
+      "detail": "This is about attack surface, not size. No GIF/MP4/MJPEG decoders, no file browser reading arbitrary ESP paths, no in-menu cmdline editor, no audio DMA driver. PNG stays, because a graphical menu without icons is not a menu - so this is a smaller target, not an airtight one.",
+      "recommended_for": "machines where physical access should not mean root"
+    },
+    "ricer": {
+      "summary": "Everything visual, turned all the way up",
+      "detail": "Every decoder, the accent engine, screen capture, the file browser and boot audio.",
+      "recommended_for": "desktops you want to look at"
+    },
+    "full": {
+      "summary": "Every feature",
+      "detail": "Exactly what Visor built before this system existed, and the default when no profile is chosen. What packagers and CI build. The only profile that carries everything - including the parts that are not offered anywhere else.",
+      "recommended_for": "packagers, CI, anyone who does not want to think about it"
+    },
+    "custom": {
+      "summary": "Pick features individually",
+      "detail": "An interactive checklist seeded from another profile. Also what --features gives you non-interactively.",
+      "recommended_for": null
+    }
+  }
+}

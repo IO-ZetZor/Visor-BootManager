@@ -16,7 +16,6 @@
 #define GPT_NAME_CHARS          36u
 #define GPT_REVISION_1_0        0x00010000u
 
-/* Smallest disk that can hold MBR + both headers + two 16 KiB entry arrays. */
 #define GPT_MIN_DISK_SECTORS    67u
 
 #define GPT_SIGNATURE           0x5452415020494645ULL

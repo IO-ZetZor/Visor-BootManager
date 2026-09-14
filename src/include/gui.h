@@ -1,3 +1,4 @@
+/* gui.h - graphical boot menu state, screen stack and captures (feature: gui) */
 #ifndef GUI_H
 #define GUI_H
 
@@ -372,7 +373,6 @@ typedef struct gui_state {
     UINTN   hit_idx[32];
     int     hit_n;
 
-    /* capture (F6 screenshot / F10 GIF record) state */
     int     cap_mode;
     UINT64  cap_start_ms;
     UINTN   cap_frames;
@@ -387,8 +387,6 @@ typedef struct gui_state {
     UINTN   record_seconds;
     cap_gif *cap_gif;
 
-    /* GPT corruption warning modal (gptw_state: 0=hidden, 2=overview,
-     * 3=details, 6=confirm, 4=working, 5=done) */
     int      gptw_state;
     int      gptw_found;
     int      gptw_suppressed;

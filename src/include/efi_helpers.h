@@ -1,3 +1,4 @@
+/* efi_helpers.h - utility API; see efi_helpers_internal.h for internals */
 #ifndef EFI_HELPERS_H
 #define EFI_HELPERS_H
 
@@ -10,6 +11,10 @@ void efi_free_pool(void *ptr);
 CHAR16* efi_strdup(CHAR16 *src);
 int efi_strcmp(CHAR16 *s1, CHAR16 *s2);
 UINTN efi_strlen16(CHAR16 *s);
+int text_eq_ci(CHAR16 *a, const CHAR16 *b);
+int visor_cmdline_has_word(CHAR16 *cmdline, CHAR16 *word);
+int mem_equal(const void *a, const void *b, UINTN n);
+UINTN efi_strlen8(const char *s);
 CHAR16* efi_strchr(CHAR16 *s, CHAR16 c);
 
 typedef struct {
@@ -96,7 +101,6 @@ void efi_log_rotate(void);
 
 void efi_log_close(void);
 
-/* Number of OpenVolume calls issued. Each open can cost tens of seconds. */
 UINTN efi_volume_open_count(void);
 
 EFI_HANDLE* efi_locate_handle_buffer(EFI_GUID *proto, UINTN *count);

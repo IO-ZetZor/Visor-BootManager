@@ -326,13 +326,6 @@ REFINE = 1
 MIN_COARSE_TILE = 2
 MV_TILE_COST = 4
 
-# The dead zone discards any per-channel delta at or below it, so it also
-# discards real motion whose per-frame edge change is that small: a
-# low-contrast object drifting a couple of px/frame stops moving entirely
-# somewhere above 16, and it costs nothing in size to keep it (measured 25 KB
-# either way on a 90-frame clip).  Grain belongs to --denoise, which removes it
-# without touching signal; raising the dead zone to cover grain trades away the
-# motion that made the wallpaper worth playing.
 AUTO_THRESH_MAX = 12
 
 def motion_search(cur, prev, tlog, mv_range):

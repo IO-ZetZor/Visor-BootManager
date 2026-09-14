@@ -64,6 +64,7 @@ Commands:
                                 install to the ESP, and set up the boot entry
   convert <video> [options]     Convert video to animated background (MJPEG or
                                 compact VBG via --vbg, 10–20× smaller)
+  features [options]            Show the feature set compiled into a binary
   uninstall [options]           Remove installed Visor files
   status [options]              Show install/source status
   config validate [options]      Validate a config file
@@ -75,6 +76,9 @@ Commands:
 
 Update options:
   --esp PATH         ESP mount point to pass to install.sh
+  --profile NAME     feature profile to pass to install.sh (default: reuse the
+                     last installed profile, or prompt)
+  --features LIST    feature tweaks to pass to install.sh (see install --features)
   --repo URL         Git repository URL
   --branch NAME      Git branch to track
   --source-dir PATH  Local checkout path (default: ~/.cache/visor/source)
@@ -110,6 +114,11 @@ Uninstall options:
 Status options:
   --esp PATH         ESP mount point
   --source-dir PATH  Local checkout path
+
+Features options:
+  --esp PATH         ESP mount point
+  --binary PATH      EFI binary to inspect (default: ESP install, then packaged)
+  --json             Machine-readable JSON on stdout
 
 Doctor options:
   --esp PATH         ESP mount point
@@ -261,8 +270,6 @@ resolve_esp() {
     detect_esp
 }
 
-# Print lines of valid (correctly-numbered, 4-digit Boot####) Visor entries.
-# Exit 0 if at least one valid entry is present.
 valid_visor_entries() {
     efibootmgr 2>/dev/null | awk '
         /^[Bb]oot[0-9A-Fa-f]{4}[^0-9A-Fa-f]/ && /[Vv]isor/ { print; found=1 }
@@ -270,7 +277,6 @@ valid_visor_entries() {
     '
 }
 
-# Print lines of corrupted (malformed, non-4-digit Boot####) Visor entries.
 corrupted_visor_entries() {
     efibootmgr 2>/dev/null | awk '
         /^[Bb]oot[0-9A-Fa-f]{5,}[^0-9A-Fa-f]/ && /[Vv]isor/ { print }
@@ -460,6 +466,7 @@ EOF
         esp="$(resolve_esp "$esp")"
         [ -n "$esp" ] || die "could not find ESP (pass --esp PATH)"
         [ -d "$esp/EFI/visor" ] || die "Visor not installed at $esp/EFI/visor — run 'visor install' first"
+        require_feature anim_mp4 "install an animated background for this loader" "$esp"
         local base
         base="$(basename "$input")"
         base="${base%.*}"
@@ -633,14 +640,20 @@ cmd_doctor() {
         fi
     done
 
-    if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
-        printf 'ok  x86_64-linux-gnu-gcc\n'
-    elif command -v gcc >/dev/null 2>&1; then
-        printf 'ok  gcc\n'
-    elif command -v cc >/dev/null 2>&1; then
-        printf 'ok  cc\n'
+    local host_arch crt0_name cc_cands cc_found=""
+    case "$(uname -m 2>/dev/null)" in
+        aarch64) host_arch=aarch64; crt0_name=crt0-efi-aarch64.o
+                 cc_cands="aarch64-linux-gnu-gcc" ;;
+        *)       host_arch=x86_64;  crt0_name=crt0-efi-x86_64.o
+                 cc_cands="x86_64-linux-gnu-gcc gcc cc" ;;
+    esac
+    for c in $cc_cands; do
+        if command -v "$c" >/dev/null 2>&1; then cc_found="$c"; break; fi
+    done
+    if [ -n "$cc_found" ]; then
+        printf 'ok  %s\n' "$cc_found"
     else
-        printf 'miss C compiler\n'
+        printf 'miss C compiler for %s (want: %s)\n' "$host_arch" "${cc_cands%% *}"
         ok=0
     fi
 
@@ -657,14 +670,15 @@ cmd_doctor() {
         ok=0
     fi
 
-    if [ -f /usr/lib/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib64/gnuefi/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib/gnuefi/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib/x86_64-linux-gnu/crt0-efi-x86_64.o ] ||
-       [ -f /usr/lib/x86_64-linux-gnu/gnuefi/crt0-efi-x86_64.o ]; then
-        printf 'ok  gnu-efi crt0\n'
+    if [ -f "/usr/lib/$crt0_name" ] ||
+       [ -f "/usr/lib64/gnuefi/$crt0_name" ] ||
+       [ -f "/usr/lib/gnuefi/$crt0_name" ] ||
+       [ -f "/usr/lib/$host_arch-linux-gnu/$crt0_name" ] ||
+       [ -f "/usr/lib/$host_arch-linux-gnu/gnuefi/$crt0_name" ] ||
+       [ -f "$source_dir/gnu-efi/$host_arch/gnuefi/$crt0_name" ]; then
+        printf 'ok  gnu-efi crt0 (%s)\n' "$crt0_name"
     else
-        printf 'miss gnu-efi crt0\n'
+        printf 'miss gnu-efi crt0 (%s)\n' "$crt0_name"
         ok=0
     fi
 
@@ -677,8 +691,8 @@ cmd_doctor() {
         ok=0
     fi
 
-    if [ -f "$source_dir/visor_x64.efi" ]; then
-        printf 'ok  built EFI: %s\n' "$source_dir/visor_x64.efi"
+    if [ -f "$source_dir/$(host_efi_name)" ]; then
+        printf 'ok  built EFI: %s\n' "$source_dir/$(host_efi_name)"
     elif [ "$source_explicit" -eq 0 ] && [ -f "$PKG_LIB_DIR/$(host_efi_name)" ]; then
         printf 'ok  packaged EFI: %s\n' "$PKG_LIB_DIR/$(host_efi_name)"
     else
@@ -710,7 +724,7 @@ cmd_doctor() {
         local root="$esp/EFI/visor"
         printf 'ESP: %s\n' "$esp"
         [ -d "$root" ] && printf 'ok  install dir\n' || { printf 'miss install dir: %s\n' "$root"; ok=0; }
-        [ -f "$root/visor_x64.efi" ] && printf 'ok  installed EFI\n' || { printf 'miss installed EFI\n'; ok=0; }
+        [ -f "$root/$(host_efi_name)" ] && printf 'ok  installed EFI\n' || { printf 'miss installed EFI\n'; ok=0; }
         if [ -f "$root/boot.conf" ]; then
             if validate_config_file "$root/boot.conf"; then
                 printf 'ok  installed config\n'
@@ -988,6 +1002,291 @@ cmd_config_validate() {
     say "Config is valid: $file"
 }
 
+VISOR_VAR_GUID="4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+
+visor_var_path() {
+    printf '%s\n' "/sys/firmware/efi/efivars/VisorBuild-$VISOR_VAR_GUID"
+}
+
+manifest_blob() {
+    local efi="${1:-}"
+    [ -n "$efi" ] && [ -r "$efi" ] || return 0
+    grep -ao 'VISORFT1[^C]*VISORFTEND' "$efi" 2>/dev/null | head -1 || true
+}
+
+manifest_fields() {
+    local blob="${1:-}"
+    [ -n "$blob" ] || return 0
+    printf '%s\n' "$blob" | python3 -c '
+import json, sys
+b = sys.stdin.read()
+m = json.loads(b[b.index("{"): b.rindex("}") + 1])
+f = m.get("feat", []) or []
+o = m.get("opts", {}) or {}
+print("%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s" %
+      (m.get("profile", "?"), m.get("ver", "?"), m.get("arch", "?"),
+       m.get("schema", "?"), m.get("reg", "?"), len(f),
+       ",".join(f), o.get("font_px", "-")))' 2>/dev/null || true
+}
+
+runtime_manifest() {
+    local p="$(visor_var_path)"
+    [ -r "$p" ] || return 0
+    dd if="$p" bs=1 skip=4 2>/dev/null | tr -d '\000' || true
+}
+
+sidecar_path() {
+    local binary="${1:-}" esp="${2:-}" cand
+    if [ -n "$binary" ]; then
+        cand="$(dirname "$binary")/build.json"
+        [ -r "$cand" ] && { printf '%s\n' "$cand"; return 0; }
+    fi
+    if [ -n "$esp" ]; then
+        cand="$(resolve_esp "$esp" || true)/EFI/visor/build.json"
+        [ -r "$cand" ] && { printf '%s\n' "$cand"; return 0; }
+    fi
+    return 0
+}
+
+sidecar_fields() {
+    local path="${1:-}"
+    [ -n "$path" ] && [ -r "$path" ] || return 0
+    python3 - "$path" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        d = json.load(fh)
+    f = d.get("features") or []
+    print("%s\t%s\t%d\t%s" % (d.get("profile", "?"), d.get("arch", "?"),
+                              len(f), ",".join(f)))
+except Exception:
+    pass
+PY
+}
+
+find_visor_binary() {
+    local esp="${1:-}" candidate=""
+    if [ -n "$esp" ]; then
+        esp="$(resolve_esp "$esp" || true)"
+        for candidate in visor_x64.efi visor_aa64.efi; do
+            if [ -f "$esp/EFI/visor/$candidate" ]; then
+                printf '%s/EFI/visor/%s\n' "$esp" "$candidate"; return 0
+            fi
+        done
+    fi
+    if packaged_available; then
+        printf '%s\n' "$PKG_LIB_DIR/$(host_efi_name)"; return 0
+    fi
+    candidate="$(host_efi_name)"
+    if [ -f "$candidate" ]; then
+        printf '%s\n' "$candidate"; return 0
+    fi
+    return 0
+}
+
+build_has_feature() {
+    local efi="$1" feature="$2" blob fields
+    blob="$(manifest_blob "$efi")"
+    [ -n "$blob" ] || return 2
+    fields="$(manifest_fields "$blob")"
+    [ -n "$fields" ] || return 2
+    local nfeats feats
+    nfeats="$(printf '%s' "$fields" | cut -f6)"
+    feats="$(printf '%s' "$fields" | cut -f7)"
+    [ "$nfeats" -gt 0 ] || return 2
+    case ",$feats," in
+        *",$feature,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_feature() {
+    local feature="$1" action="$2" esp="${3:-}" binary=""
+    binary="$(find_visor_binary "$esp")"
+    if [ -z "$binary" ] || ! [ -r "$binary" ]; then
+        return 0
+    fi
+    case "$(build_has_feature "$binary" "$feature"; echo $?)" in
+        0) return 0 ;;
+        2) return 0 ;;
+    esac
+    die "refusing to $action: the installed Visor ($binary, $(printf '%s' "$binary" | sed 's/.*\///')) does not have the '$feature' feature. \
+This profile was built without it; pick a profile that includes $feature, or use the external tool and a matching loader."
+}
+
+cmd_features() {
+    local esp="" binary="" json=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --binary) binary="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --json) json=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown features option: $1" ;;
+        esac
+    done
+
+    if [ -z "$binary" ]; then
+        binary="$(find_visor_binary "$esp")"
+        [ -n "$esp" ] || esp=""
+    else
+        [ -e "$binary" ] || die "no such file: $binary"
+        [ -r "$binary" ] || die "cannot read $binary (try sudo)"
+    fi
+
+    local blob="" fields="" profile="" ver="" arch="" schema="" reg=""
+    local nfeats="" feats="" font_px=""
+
+    if [ -n "$binary" ] && [ -r "$binary" ]; then
+        blob="$(manifest_blob "$binary")"
+        if [ -n "$blob" ]; then
+            fields="$(manifest_fields "$blob")"
+            if [ -z "$fields" ]; then
+                warn "Embedded manifest present but python3 could not parse it - treating as legacy."
+                blob=""
+            else
+                profile="$(printf '%s' "$fields" | cut -f1)"
+                ver="$(printf '%s' "$fields" | cut -f2)"
+                arch="$(printf '%s' "$fields" | cut -f3)"
+                schema="$(printf '%s' "$fields" | cut -f4)"
+                reg="$(printf '%s' "$fields" | cut -f5)"
+                nfeats="$(printf '%s' "$fields" | cut -f6)"
+                feats="$(printf '%s' "$fields" | cut -f7)"
+                font_px="$(printf '%s' "$fields" | cut -f8)"
+            fi
+        fi
+    else
+        binary=""
+    fi
+
+    local runtime="unknown" rt_blob="" rt_fields="" rt_reg="" rt_ver=""
+    local rt_profile="" rt_feats=""
+    rt_blob="$(runtime_manifest)"
+    if [ -n "$rt_blob" ]; then
+        rt_fields="$(manifest_fields "$rt_blob")"
+        rt_profile="$(printf '%s' "$rt_fields" | cut -f1)"
+        rt_ver="$(printf '%s' "$rt_fields" | cut -f2)"
+        rt_reg="$(printf '%s' "$rt_fields" | cut -f5)"
+        rt_feats="$(printf '%s' "$rt_fields" | cut -f7)"
+        if [ -z "$reg" ]; then
+            runtime="unknown"
+        elif [ "$reg" = "$rt_reg" ] && [ "$ver" = "$rt_ver" ] && \
+             [ "$profile" = "$rt_profile" ] && [ "$feats" = "$rt_feats" ]; then
+            runtime="match"
+        else
+            runtime="mismatch"
+        fi
+    elif [ -e "$(visor_var_path)" ]; then
+        runtime="unreadable"
+    fi
+
+    local side="" side_profile="" side_arch="" side_feats="" side_n=""
+    if [ -z "$blob" ]; then
+        side="$(sidecar_path "$binary" "$esp")"
+        if [ -n "$side" ]; then
+            local sf
+            sf="$(sidecar_fields "$side")"
+            if [ -n "$sf" ]; then
+                side_profile="$(printf '%s' "$sf" | cut -f1)"
+                side_arch="$(printf '%s' "$sf" | cut -f2)"
+                side_n="$(printf '%s' "$sf" | cut -f3)"
+                side_feats="$(printf '%s' "$sf" | cut -f4)"
+            fi
+        fi
+    fi
+
+    if [ "$json" -eq 1 ]; then
+        if [ -n "$binary" ] && [ -n "$blob" ]; then
+            python3 - "$binary" "$runtime" "$fields" <<'PY'
+import json, sys
+bin_path, runtime, fields = sys.argv[1:4]
+profile, ver, arch, schema, reg, n, feats, font_px = fields.split("\t")
+m = {
+    "profile": profile,
+    "version": ver, "arch": arch, "schema": schema, "register": reg,
+    "features": feats.split(",") if feats else [],
+    "options": {"font_px": int(font_px) if font_px not in ("", "-") else None},
+    "source": bin_path, "runtime": runtime, "from": "manifest", "legacy": False,
+}
+print(json.dumps(m, indent=2))
+PY
+        else
+            if [ -n "$side_feats" ]; then
+                python3 - "$side" "$runtime" "$side_profile" "$side_arch" "$side_feats" "${binary:-}" <<'PY'
+import json, sys
+side, runtime, profile, arch, feats, bin_path = sys.argv[1:7]
+import os.path
+same = bool(bin_path) and os.path.dirname(bin_path) == os.path.dirname(side)
+print(json.dumps({
+    "profile": profile, "arch": arch,
+    "features": feats.split(",") if feats else [],
+    "source": bin_path if same else None,
+    "other_binary": None if same else (bin_path or None),
+    "sidecar": side, "from": "sidecar",
+    "legacy": False, "runtime": runtime,
+}, indent=2))
+PY
+            elif [ -n "$binary" ]; then
+                python3 - "$binary" "$runtime" <<'PY'
+import json, sys
+bin_path, runtime = sys.argv[1:3]
+print(json.dumps({
+    "profile": "legacy", "features": None, "legacy": True,
+    "source": bin_path, "runtime": runtime, "from": "legacy",
+}, indent=2))
+PY
+            else
+                printf '{ "source": null, "runtime": "%s", "features": null, "profile": "unknown", "legacy": false, "from": "none" }\n' "$runtime"
+            fi
+        fi
+        return 0
+    fi
+
+    if [ -z "$binary" ] && [ -z "$side_feats" ]; then
+        say "No Visor binary found (pass --esp or --binary)"
+        return 0
+    fi
+    if [ -z "$blob" ] && [ -n "$side_feats" ]; then
+        if [ -n "$binary" ] && [ "$(dirname "$binary")" = "$(dirname "$side")" ]; then
+            printf 'Binary:  %s\n' "$binary"
+        fi
+        printf 'Install: %s\n' "$(dirname "$side")"
+        printf 'Profile: %s   Arch: %s\n' "$side_profile" "$side_arch"
+        printf 'Features (%s):\n' "$side_n"
+        IFS=',' read -ra _sl <<< "$side_feats"
+        for f in "${_sl[@]}"; do printf '    %s\n' "$f"; done
+        say "Read from $side - no readable binary manifest at that location."
+        if [ -n "$binary" ] && [ "$(dirname "$binary")" != "$(dirname "$side")" ]; then
+            say "A separate Visor binary exists at $binary; pass --binary to inspect it."
+        fi
+        return 0
+    fi
+    if [ -n "$binary" ]; then
+        printf 'Binary:  %s\n' "$binary"
+    fi
+    if [ -z "$blob" ]; then
+        warn "No embedded manifest - legacy build. Assuming every feature is present."
+        return 0
+    fi
+    printf 'Profile: %s\n' "$profile"
+    printf 'Version: %s   Arch: %s   Schema: %s\n' "$ver" "$arch" "$schema"
+    printf 'Register id: %s   font_px: %s\n' "$reg" "$font_px"
+    printf 'Features (%s):\n' "$nfeats"
+    IFS=',' read -ra _fl <<< "$feats"
+    for f in "${_fl[@]}"; do printf '    %s\n' "$f"; done
+    case "$runtime" in
+        match) ok "Runtime: last boot used this build" ;;
+        mismatch)
+            warn "Runtime: the machine last booted a different Visor than $binary"
+            printf '    last boot: profile %s, v%s, %s features\n' \
+                "$rt_profile" "$rt_ver" "$(printf '%s' "$rt_feats" | tr ',' '\n' | grep -c . || true)"
+            printf '    this file: profile %s, v%s, %s features\n' "$profile" "$ver" "$nfeats"
+            ;;
+        unreadable) say "Runtime variable: present but unreadable (re-run with sudo)" ;;
+        *) say "Runtime variable: not set this boot" ;;
+    esac
+}
+
 cmd_status() {
     local source_dir=""
     local esp=""
@@ -1041,15 +1340,34 @@ cmd_status() {
             warn "cannot read ESP $esp (permission denied) - re-run with sudo"
             return 1
         fi
-        if [ -f "$root/visor_x64.efi" ]; then
-            printf 'Installed binary: %s\n' "$root/visor_x64.efi"
+        local installed_bin=""
+        for candidate in "$(host_efi_name)" visor_x64.efi visor_aa64.efi; do
+            if [ -f "$root/$candidate" ]; then installed_bin="$candidate"; break; fi
+        done
+        if [ -n "$installed_bin" ]; then
+            printf 'Installed binary: %s\n' "$root/$installed_bin"
             if command -v sha256sum >/dev/null 2>&1; then
                 local s
-                s="$(sha256sum "$root/visor_x64.efi" 2>/dev/null | awk '{print $1}')"
+                s="$(sha256sum "$root/$installed_bin" 2>/dev/null | awk '{print $1}')"
                 [ -n "$s" ] && printf 'Installed sha256: %s\n' "$s"
             fi
         else
             printf 'Installed binary: missing\n'
+        fi
+        if [ -n "$installed_bin" ]; then
+            local mblob mfields mprofile mnfeats mfeats mver
+            mblob="$(manifest_blob "$root/$installed_bin")"
+            if [ -n "$mblob" ]; then
+                mfields="$(manifest_fields "$mblob")"
+                mprofile="$(printf '%s' "$mfields" | cut -f1)"
+                mver="$(printf '%s' "$mfields" | cut -f2)"
+                mnfeats="$(printf '%s' "$mfields" | cut -f6)"
+                mfeats="$(printf '%s' "$mfields" | cut -f7)"
+                printf 'Profile:   %s (v%s, %s features)\n' "$mprofile" "$mver" "$mnfeats"
+                printf 'Features:  %s\n' "$mfeats"
+            else
+                printf 'Profile:   legacy build (no embedded manifest - all features assumed)\n'
+            fi
         fi
         [ -f "$root/boot.conf" ] && printf 'Config: %s\n' "$root/boot.conf" || printf 'Config: missing\n'
         [ -f "$root/boot.log" ] && printf 'Boot log: %s\n' "$root/boot.log" || printf 'Boot log: missing\n'
@@ -1088,10 +1406,23 @@ cmd_sign() {
 
     need_cmd sbctl
 
+    local efi_name
+    efi_name="$(host_efi_name)"
+
     esp="$(resolve_esp "$esp" || true)"
-    if [ -n "$esp" ] && [ -f "$esp/EFI/visor/visor_x64.efi" ]; then
-        say "Signing $esp/EFI/visor/visor_x64.efi"
-        run_root sbctl sign -s "$esp/EFI/visor/visor_x64.efi"
+    local installed=""
+    if [ -n "$esp" ]; then
+        local candidate
+        for candidate in "$efi_name" visor_x64.efi visor_aa64.efi; do
+            if [ -f "$esp/EFI/visor/$candidate" ]; then
+                installed="$esp/EFI/visor/$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -n "$installed" ]; then
+        say "Signing $installed"
+        run_root sbctl sign -s "$installed"
         if [ "$sign_drivers" -eq 1 ] && [ -d "$esp/EFI/visor/drivers" ]; then
             for f in "$esp"/EFI/visor/drivers/*.efi "$esp"/EFI/visor/drivers/*.EFI; do
                 [ -e "$f" ] || continue
@@ -1102,11 +1433,14 @@ cmd_sign() {
         return 0
     fi
 
-    if [ -f "$source_dir/visor_x64.efi" ]; then
-        say "Signing $source_dir/visor_x64.efi"
-        run_root sbctl sign -s "$source_dir/visor_x64.efi"
-        return 0
-    fi
+    local built
+    for built in "$source_dir/$efi_name" "$source_dir/visor_x64.efi" "$source_dir/visor_aa64.efi"; do
+        if [ -f "$built" ]; then
+            say "Signing $built"
+            run_root sbctl sign -s "$built"
+            return 0
+        fi
+    done
 
     die "could not find an EFI binary to sign"
 }
@@ -1319,6 +1653,7 @@ cmd_update() {
     local branch="${VISOR_BRANCH:-}"
     local source_dir="${VISOR_SOURCE_DIR:-$(source_dir_default)}"
     local esp=""
+    local profile="" features=""
     local boot_entry=0
     local sign=0
     local force_config=0
@@ -1326,6 +1661,8 @@ cmd_update() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --esp) esp="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --profile) profile="$(need_value "$1" "${2:-}")"; shift 2 ;;
+            --features) features="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --repo) repo="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --branch) branch="$(need_value "$1" "${2:-}")"; shift 2 ;;
             --source-dir) source_dir="$(need_value "$1" "${2:-}")"; shift 2 ;;
@@ -1342,17 +1679,15 @@ cmd_update() {
 
     ensure_source_for_update "$repo" "$branch" "$source_dir"
 
-    need_cmd make
-    say "Building latest Visor"
-    make --no-print-directory -C "$source_dir"
-
-    local install_args=(--no-build --no-boot-entry --no-sign --no-fs-drivers)
+    local install_args=(--no-boot-entry --no-sign --no-fs-drivers)
     [ -n "$esp" ] && install_args+=(--esp "$esp")
+    [ -n "$profile" ] && install_args+=(--profile "$profile")
+    [ -n "$features" ] && install_args+=(--features "$features")
     [ "$boot_entry" -eq 1 ] && install_args+=(--boot-entry)
     [ "$sign" -eq 1 ] && install_args+=(--sign)
     [ "$force_config" -eq 1 ] && install_args+=(--force-config)
 
-    say "Installing updated Visor"
+    say "Building and installing the updated Visor"
     run_install "$source_dir/install.sh" "${install_args[@]}"
     say "Visor is up to date"
 }
@@ -1394,6 +1729,8 @@ cmd_encrypt() {
     case "$name" in */*|'') die "--name must be a bare filename" ;; esac
     local initrd_name=""
     [ -z "$initrd_input" ] || initrd_name="$(basename "$initrd_input").enc"
+
+    require_feature crypto "encrypt a kernel/initrd for this loader" "$esp"
 
     local install_to_esp=0 target initrd_target=""
     if [ -n "$out" ]; then
@@ -1695,6 +2032,7 @@ main() {
         drivers) shift; cmd_drivers "$@" ;;
         encrypt) shift; cmd_encrypt "$@" ;;
         convert) shift; cmd_convert "$@" ;;
+        features) shift; cmd_features "$@" ;;
         uninstall) shift; cmd_uninstall "$@" ;;
         status) shift; cmd_status "$@" ;;
         config) shift; cmd_config "$@" ;;
