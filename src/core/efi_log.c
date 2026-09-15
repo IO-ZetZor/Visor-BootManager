@@ -29,7 +29,9 @@ void efi_log_slow(CHAR16 *what, UINT64 t0_us) {
     UINT64 now = arch_now_us();
     if (now <= t0_us) return;
     UINT64 ms = (now - t0_us) / 1000;
-    if (ms < SLOW_STEP_MIN_MS) return;
+#if SLOW_STEP_MIN_MS > 0
+    if (ms < (UINT64)SLOW_STEP_MIN_MS) return;
+#endif
     CHAR16 m[144];
     SPrint(m, sizeof(m), L"slow: %s took %d ms", what, (int)ms);
     efi_log(m);

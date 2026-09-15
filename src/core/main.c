@@ -97,9 +97,15 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     RT = system_table->RuntimeServices;
     IH = image_handle;
 
-    loader_mark_init();
-
+    /* First output, before anything that calls into firmware services.  On the
+     * boards that freeze with no output at all, the previous order put
+     * loader_mark_init() (a RuntimeServices GetTime call) ahead of this print,
+     * so a hang in there was indistinguishable from never being started.  If
+     * this banner appears and the machine still freezes, the fault is after
+     * console setup; if it never appears, it is before Visor gets control. */
     efi_print(L"Visor loading...\r\n");
+
+    loader_mark_init();
 
     efi_log_set_file(0);
     int early_file_log = config_early_file_log_enabled();
