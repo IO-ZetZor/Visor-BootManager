@@ -83,6 +83,12 @@ run `visor install` to deploy to your ESP.
 
 Full install guide, installer flags, and the configuration reference: **[here](https://visor-bootmanager.vercel.app/install)**
 
+### Secure Boot on Fedora-family distros
+
+`--sign` uses sbctl, which cannot boot kernels signed only by your distro's
+key. On Fedora, Bazzite and other shim-based distros, chain Visor from shim
+with a MOK key instead: see [docs/secure-boot-shim-mok.md](docs/secure-boot-shim-mok.md).
+
 ## How it compares
 
 |                        | Visor | GRUB 2 | systemd-boot | rEFInd | Limine |
