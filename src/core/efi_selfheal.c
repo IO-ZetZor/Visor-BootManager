@@ -303,8 +303,10 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
     if (bc) efi_free_pool(bc);
     if (!have_bc)
         nsh_log(L"selfheal: BootCurrent unavailable - treating as fallback/one-time boot");
-    else
-        nsh_log(L"selfheal: BootCurrent=Boot%04X", (unsigned)bootcurrent);
+    else {
+        CHAR16 bn[9]; efi_boot_var_name(bn, (UINT16)bootcurrent);
+        nsh_log(L"selfheal: BootCurrent=%s", bn);
+    }
 
     UINT8 used[NVSH_SLOTS];
     NVSH_ZERO(used, sizeof(used));
@@ -368,8 +370,8 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
             return;
         }
         if (dry_run) {
-            nsh_log(L"selfheal: dry run - would create Boot%04X -> %s",
-                    (unsigned)could, run);
+            CHAR16 bn[9]; efi_boot_var_name(bn, (UINT16)could);
+            nsh_log(L"selfheal: dry run - would create %s -> %s", bn, run);
             slot = could;
         } else {
             EFI_DEVICE_PATH *full = efi_make_file_path(
@@ -390,7 +392,7 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                 rep->error = NVSH_ERR_BOOTMGR;
                 nsh_log(L"selfheal: load-option for our entry exceeds the working buffer");
             } else {
-                SPrint(vn, sizeof(vn), L"Boot%04X", (unsigned)could);
+                efi_boot_var_name(vn, (UINT16)could);
                 EFI_STATUS as = RT->SetVariable(
                     vn, &gEfiGlobalVariableGuid,
                     EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
@@ -401,9 +403,8 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                                                            : NVSH_ERR_BOOTMGR;
                     if (as == EFI_INVALID_PARAMETER)
                         nsh_log(L"selfheal: firmware refuses to create a new "
-                                L"Boot%04X (variable-policy/reserved namespace); "
-                                L"the fallback copy still boots us",
-                                (unsigned)could);
+                                L"%s (variable-policy/reserved namespace); "
+                                L"the fallback copy still boots us", vn);
                     else
                         nsh_log(L"selfheal: SetVariable %s failed (%d)", vn,
                                 (int)as);
@@ -412,16 +413,15 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                     slot = could;
                     rep->our_entry = slot;
                     present = 1;
-                    nsh_log(L"selfheal: created Boot%04X -> %s",
-                            (unsigned)slot, run);
+                    nsh_log(L"selfheal: created %s -> %s", vn, run);
                 }
             }
             efi_free_pool(full);
             if (!present) return;
         }
     } else {
-        nsh_log(L"selfheal: found existing entry Boot%04X for %s",
-                (unsigned)slot, run);
+        CHAR16 bn[9]; efi_boot_var_name(bn, (UINT16)slot);
+        nsh_log(L"selfheal: found existing entry %s for %s", bn, run);
     }
 
     UINT8 *od = NULL;
@@ -482,9 +482,9 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
             rep->order_suppressed = 1;
         } else {
             rep->order_updated = 1;
-            nsh_log(L"selfheal: BootOrder needs %s (entry Boot%04X)",
-                    rep->normal_boot ? L"promotion to head" : L"re-add",
-                    (unsigned)slot);
+            CHAR16 bn[9]; efi_boot_var_name(bn, (UINT16)slot);
+            nsh_log(L"selfheal: BootOrder needs %s (entry %s)",
+                    rep->normal_boot ? L"promotion to head" : L"re-add", bn);
             if (!dry_run) {
                 UINT8 ob[(NVSH_SLOTS + 2) * 2];
                 UINTN k = 0;

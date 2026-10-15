@@ -112,6 +112,7 @@ UINT64 efi_get_tick(void);
 
 int efi_secure_boot_enabled(void);
 int efi_shim_verify(void *buf, UINTN size);
+void efi_boot_var_name(CHAR16 out[9], UINT16 n);
 
 CHAR16* efi_get_var_str(CHAR16 *name);
 void efi_set_var_str(CHAR16 *name, CHAR16 *val);
