@@ -59,7 +59,9 @@ static int bls_arch_ok(CHAR16 *arch) {
 static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
     int oa = a->ot_idx, ob = b->ot_idx;
     if (oa >= 0 || ob >= 0) {
-        if (oa != ob) return oa > ob;
+        /* OSTree titles "(ostree:N)": N=0 is the booted/default deployment,
+         * higher N are rollbacks - so the lower index comes first. */
+        if (oa != ob) return oa < ob;
     }
     if (a->sort_key && b->sort_key) {
         int c = efi_strcmp(a->sort_key, b->sort_key);
