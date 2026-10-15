@@ -100,6 +100,8 @@ SECTIONS
   . = ALIGN(4096);
   .dynstr   : { *(.dynstr) }
   . = ALIGN(4096);
+  .sbat     : { KEEP (*(.sbat)) }
+  . = ALIGN(4096);
   .ignored.reloc :
   {
     *(.rela.reloc)
