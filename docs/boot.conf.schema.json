@@ -924,6 +924,13 @@
       "$ref": "#/$defs/bool",
       "default": false
     },
+    "windows_bootnext": {
+      "x-feature": "core",
+      "x-group": "boot",
+      "description": "Boot Windows via the firmware's own Boot#### entry (BootNext + reset) instead of chainloading, keeping shim/Visor out of BitLocker's measured boot.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
     "reboot_color": {
       "x-feature": "gui",
       "x-group": "power",

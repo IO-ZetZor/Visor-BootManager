@@ -1,5 +1,6 @@
 /* config_keys.c - global and theme key application */
 #include "config_internal.h"
+#include "linux_boot.h"
 
 static int clock_position_from_str(CHAR16 *s) {
     if (!s || !s[0]) return -1;
@@ -128,6 +129,8 @@ void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->default_entry = (INTN)parse_uint(value);
     } else if (efi_strcmp(key, L"quiet") == 0) {
         config->quiet = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"windows_bootnext") == 0) {
+        visor_windows_bootnext = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"text_menu") == 0 || efi_strcmp(key, L"text_mode") == 0) {
         config->text_menu = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"cmdline") == 0 || efi_strcmp(key, L"options") == 0) {

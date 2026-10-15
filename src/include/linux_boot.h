@@ -74,4 +74,8 @@ typedef struct {
 
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st);
 
+/* windows_bootnext=1: boot Windows by setting BootNext to the firmware's own
+ * Windows Boot Manager entry and resetting, instead of chainloading it. */
+extern int visor_windows_bootnext;
+
 #endif
