@@ -1,7 +1,7 @@
 /* efi_path.c - device paths, partition UUIDs and path normalisation */
 #include "efi_helpers_internal.h"
 
-static int parse_partition_uuid(CHAR16 *s, EFI_GUID *out) {
+int efi_parse_partition_uuid(CHAR16 *s, EFI_GUID *out) {
     if (!s || !out) return 0;
     UINT8 raw[16];
     int pos = 0;
@@ -29,7 +29,7 @@ int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid)
     if (!partition_uuid || partition_uuid[0] == '\0') return 1;
 
     EFI_GUID want;
-    if (!parse_partition_uuid(partition_uuid, &want)) return 0;
+    if (!efi_parse_partition_uuid(partition_uuid, &want)) return 0;
 
     EFI_DEVICE_PATH *dp = NULL;
     if (EFI_ERROR(BS->HandleProtocol(handle, &gEfiDevicePathProtocolGuid, (void**)&dp)) || !dp)
