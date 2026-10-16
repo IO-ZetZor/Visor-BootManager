@@ -34,16 +34,18 @@ Tested on: Bazzite 44 (Fedora 44 base), shim 16.1, AMD fTPM, Secure Boot on.
 
 All paths assume the ESP is mounted at `/boot/efi`.
 
-1. **Create a MOK key** (once):
+1. **Create a MOK key** (once). The key directory is readable by root only,
+   so run steps 1 to 4 in a root shell (`sudo -i`) from that directory, with
+   `visor_x64.efi` and the EfiFs drivers copied into it:
 
    ```sh
-   sudo install -d -m 700 /var/lib/visor/mok
+   install -d -m 700 /var/lib/visor/mok
    cd /var/lib/visor/mok
-   sudo openssl req -new -x509 -newkey rsa:2048 -nodes -sha256 -days 36500 \
+   openssl req -new -x509 -newkey rsa:2048 -nodes -sha256 -days 36500 \
         -subj "/CN=Visor bootloader MOK/" -addext "extendedKeyUsage=codeSigning" \
         -keyout MOK.key -out MOK.crt
-   sudo openssl x509 -in MOK.crt -outform DER -out MOK.der
-   sudo chmod 600 MOK.key
+   openssl x509 -in MOK.crt -outform DER -out MOK.der
+   chmod 600 MOK.key
    ```
 
 2. **Add `.sbat` to EfiFs drivers** (Visor already has one):
@@ -69,10 +71,10 @@ All paths assume the ESP is mounted at `/boot/efi`.
    directory, so:
 
    ```sh
-   sudo cp /boot/efi/EFI/fedora/shimx64.efi /boot/efi/EFI/fedora/mmx64.efi /boot/efi/EFI/visor/
-   sudo cp visor_x64.efi /boot/efi/EFI/visor/grubx64.efi
-   sudo cp ext2_x64.efi  /boot/efi/EFI/visor/drivers/
-   sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 \
+   cp /boot/efi/EFI/fedora/shimx64.efi /boot/efi/EFI/fedora/mmx64.efi /boot/efi/EFI/visor/
+   cp visor_x64.efi /boot/efi/EFI/visor/grubx64.efi
+   cp ext2_x64.efi  /boot/efi/EFI/visor/drivers/
+   efibootmgr --create --disk /dev/nvme0n1 --part 1 \
         --label "Visor (shim)" --loader '\EFI\visor\shimx64.efi'
    ```
 
@@ -88,7 +90,7 @@ All paths assume the ESP is mounted at `/boot/efi`.
 
 6. **Enable Secure Boot** in the firmware setup.
 
-Re-run steps 2 to 4 (add `.sbat`, sign and copy) after every Visor update.
+Re-run steps 2 to 4 (add `.sbat`, sign and copy) as root after every Visor update.
 
 ## Windows and BitLocker
 
