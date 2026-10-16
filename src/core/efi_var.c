@@ -76,6 +76,10 @@ void efi_set_var_u32(CHAR16 *name, UINT32 val) {
     RT->SetVariable(name, &visor_var_guid, VISOR_VAR_ATTRS, sizeof(val), &val);
 }
 
+void efi_unset_var(CHAR16 *name) {
+    RT->SetVariable(name, &visor_var_guid, VISOR_VAR_ATTRS, 0, NULL);
+}
+
 static EFI_GUID loader_var_guid = { 0x4a67b082, 0x0a4c, 0x41cf,
     { 0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f } };
 

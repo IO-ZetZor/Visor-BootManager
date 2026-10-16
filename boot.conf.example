@@ -108,7 +108,8 @@ quiet=0
 # so BitLocker does not ask for the recovery key after a Visor or shim update.
 # Costs one extra reboot. If no such Boot#### entry exists Visor chainloads as
 # before, and an entry that pins a sha256= is always chainloaded so its hash is
-# checked. 0 = off (default).
+# checked. If the firmware fails to start its entry and falls back to Visor,
+# Visor chainloads Windows that time instead of looping. 0 = off (default).
 #windows_bootnext=0
 
 # Allow editing an entry's kernel command line at the menu: select an entry and

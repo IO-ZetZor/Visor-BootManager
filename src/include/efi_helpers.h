@@ -119,6 +119,7 @@ CHAR16* efi_get_var_str(CHAR16 *name);
 void efi_set_var_str(CHAR16 *name, CHAR16 *val);
 int efi_get_var_u32(CHAR16 *name, UINT32 *out);
 void efi_set_var_u32(CHAR16 *name, UINT32 val);
+void efi_unset_var(CHAR16 *name);
 
 CHAR16* efi_get_loader_var(CHAR16 *name);
 void efi_set_loader_var(CHAR16 *name, CHAR16 *val, int persist);

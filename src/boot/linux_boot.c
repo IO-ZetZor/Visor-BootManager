@@ -99,6 +99,26 @@ static int entry_partition(boot_entry_t *entry, EFI_GUID *out) {
     return ok;
 }
 
+/* The high half of the monotonic counter goes up once per platform boot. */
+static int boot_count(UINT32 *out) {
+    UINT64 c;
+    if (EFI_ERROR(BS->GetNextMonotonicCount(&c))) return 0;
+    *out = (UINT32)(c >> 32);
+    return 1;
+}
+
+/* Set to the boot count before each BootNext handoff. If the firmware cannot
+ * start that entry it carries on down BootOrder and starts Visor again in the
+ * very next boot; setting the same BootNext again there would loop. */
+#define BOOTNEXT_MARK L"VisorWinBootNext"
+
+static int bootnext_just_failed(void) {
+    UINT32 then, now;
+    if (!efi_get_var_u32(BOOTNEXT_MARK, &then)) return 0;
+    efi_unset_var(BOOTNEXT_MARK);
+    return boot_count(&now) && now == then + 1;
+}
+
 /* Returns only if it could not hand Windows to the firmware; the caller then
  * chainloads as usual. Booting straight from the firmware entry keeps shim and
  * Visor out of Windows' measured boot (PCR 4/7), so BitLocker does not ask for
@@ -106,6 +126,10 @@ static int entry_partition(boot_entry_t *entry, EFI_GUID *out) {
  * on the selected entry's partition; when that partition is unknown, only a
  * single candidate is used, so another Windows installation never starts. */
 static void windows_try_bootnext(boot_entry_t *entry) {
+    if (bootnext_just_failed()) {
+        efi_log(L"bootnext: the last handoff did not start Windows - chainloading instead");
+        return;
+    }
     EFI_GUID want;
     int have_want = entry_partition(entry, &want);
     UINTN order_size = 0;
@@ -151,6 +175,8 @@ static void windows_try_bootnext(boot_entry_t *entry) {
     }
 
     UINT16 next = (UINT16)found;
+    UINT32 boots;
+    if (boot_count(&boots)) efi_set_var_u32(BOOTNEXT_MARK, boots);
     EFI_STATUS s = RT->SetVariable(L"BootNext", &gEfiGlobalVariableGuid,
                                    EFI_VARIABLE_NON_VOLATILE |
                                    EFI_VARIABLE_BOOTSERVICE_ACCESS |
@@ -159,7 +185,10 @@ static void windows_try_bootnext(boot_entry_t *entry) {
     { CHAR16 bn[9]; efi_boot_var_name(bn, next);
       CHAR16 m[96]; SPrint(m, sizeof(m), L"bootnext: BootNext=%s (status=0x%lx)",
                            bn, (long)s); efi_log(m); }
-    if (EFI_ERROR(s)) return;
+    if (EFI_ERROR(s)) {
+        efi_unset_var(BOOTNEXT_MARK);
+        return;
+    }
     efi_log(L"bootnext: resetting so the firmware boots Windows directly");
     efi_log_close();
     RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
