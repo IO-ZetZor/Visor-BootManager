@@ -60,7 +60,10 @@ static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
     int oa = a->ot_idx, ob = b->ot_idx;
     if (oa >= 0 || ob >= 0) {
         /* OSTree titles "(ostree:N)": N=0 is the booted/default deployment,
-         * higher N are rollbacks - so the lower index comes first. */
+         * higher N are rollbacks - so the lower index comes first. Records
+         * without an index sort after every indexed one. */
+        if (oa < 0) return 0;
+        if (ob < 0) return 1;
         if (oa != ob) return oa < ob;
     }
     if (a->sort_key && b->sort_key) {
