@@ -133,8 +133,12 @@ EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     EFI_STATUS status;
     UINTN kernel_size = 0;
 
-    if (visor_windows_bootnext && entry_is_windows(entry))
-        windows_try_bootnext();
+    if (visor_windows_bootnext && entry_is_windows(entry)) {
+        if (entry->has_sha256)
+            efi_log(L"bootnext: entry pins a sha256 - chainloading so the hash is checked");
+        else
+            windows_try_bootnext();
+    }
 
     efi_print(L"Booting: ");
     efi_print(entry->name);

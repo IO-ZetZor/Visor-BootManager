@@ -106,7 +106,8 @@ quiet=0
 # bootmgfw.efi (in BootOrder order), sets BootNext to it and resets. Windows
 # then starts with no shim/Visor in its measured boot, so BitLocker does not ask
 # for the recovery key after a Visor or shim update. Costs one extra reboot. If
-# no such Boot#### entry exists Visor chainloads as before. 0 = off (default).
+# no such Boot#### entry exists Visor chainloads as before, and an entry that
+# pins a sha256= is always chainloaded so its hash is checked. 0 = off (default).
 #windows_bootnext=0
 
 # Allow editing an entry's kernel command line at the menu: select an entry and
