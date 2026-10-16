@@ -175,8 +175,16 @@ static void windows_try_bootnext(boot_entry_t *entry) {
     }
 
     UINT16 next = (UINT16)found;
-    UINT32 boots;
-    if (boot_count(&boots)) efi_set_var_u32(BOOTNEXT_MARK, boots);
+    UINT32 boots, stored;
+    if (!boot_count(&boots)) {
+        efi_log(L"bootnext: no monotonic counter to guard the handoff - chainloading instead");
+        return;
+    }
+    efi_set_var_u32(BOOTNEXT_MARK, boots);
+    if (!efi_get_var_u32(BOOTNEXT_MARK, &stored) || stored != boots) {
+        efi_log(L"bootnext: could not store the handoff marker - chainloading instead");
+        return;
+    }
     EFI_STATUS s = RT->SetVariable(L"BootNext", &gEfiGlobalVariableGuid,
                                    EFI_VARIABLE_NON_VOLATILE |
                                    EFI_VARIABLE_BOOTSERVICE_ACCESS |
