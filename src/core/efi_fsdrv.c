@@ -31,7 +31,10 @@ int efi_handle_has_filesystem(EFI_HANDLE handle) {
  * StartImage only supports applications: once the entry point returns it
  * unconditionally frees the image, which leaves a boot-service driver running
  * from freed memory and hangs the first time that memory is reused. For images
- * shim loaded, call the entry point ourselves so the driver stays resident. */
+ * shim loaded, call the entry point ourselves so the driver stays resident.
+ * Not covered: a driver that calls BS->Exit() from its entry point. shim's
+ * Exit() longjmps into a context that only its own StartImage sets up. EfiFs
+ * only calls Exit() from grub_exit(), on fatal errors. */
 static EFI_GUID shim_loaded_image_guid = { 0x6e6baeb8, 0x7108, 0x4179,
     { 0x94, 0x9d, 0xa3, 0x49, 0x34, 0x15, 0xec, 0x97 } };
 
