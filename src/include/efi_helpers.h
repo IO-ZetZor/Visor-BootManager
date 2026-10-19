@@ -38,6 +38,7 @@ int efi_readdir(efi_file_t *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
 int efi_file_exists_root(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 EFI_FILE_PROTOCOL* efi_open_dir(EFI_FILE_PROTOCOL *root, CHAR16 *path);
 int efi_read_dirent(EFI_FILE_PROTOCOL *dir, CHAR16 *name_out, UINTN name_cap, int *is_dir);
+int efi_parse_partition_uuid(CHAR16 *s, EFI_GUID *out);
 int efi_handle_matches_partition_uuid(EFI_HANDLE handle, CHAR16 *partition_uuid);
 
 CHAR16* efi_handle_partition_uuid(EFI_HANDLE handle);
@@ -112,11 +113,13 @@ UINT64 efi_get_tick(void);
 
 int efi_secure_boot_enabled(void);
 int efi_shim_verify(void *buf, UINTN size);
+void efi_boot_var_name(CHAR16 out[9], UINT16 n);
 
 CHAR16* efi_get_var_str(CHAR16 *name);
 void efi_set_var_str(CHAR16 *name, CHAR16 *val);
 int efi_get_var_u32(CHAR16 *name, UINT32 *out);
 void efi_set_var_u32(CHAR16 *name, UINT32 val);
+void efi_unset_var(CHAR16 *name);
 
 CHAR16* efi_get_loader_var(CHAR16 *name);
 void efi_set_loader_var(CHAR16 *name, CHAR16 *val, int persist);

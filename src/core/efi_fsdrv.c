@@ -27,6 +27,42 @@ int efi_handle_has_filesystem(EFI_HANDLE handle) {
                           &gEfiSimpleFileSystemProtocolGuid, &io)) && io;
 }
 
+/* shim's loader protocol (shim >= 16) hooks LoadImage/StartImage. Its
+ * StartImage only supports applications: once the entry point returns it
+ * unconditionally frees the image, which leaves a boot-service driver running
+ * from freed memory and hangs the first time that memory is reused. For images
+ * shim loaded, call the entry point ourselves so the driver stays resident.
+ * Not covered: a driver that calls BS->Exit() from its entry point. shim's
+ * Exit() longjmps into a context that only its own StartImage sets up. EfiFs
+ * only calls Exit() from grub_exit(), on fatal errors. */
+static EFI_GUID shim_loaded_image_guid = { 0x6e6baeb8, 0x7108, 0x4179,
+    { 0x94, 0x9d, 0xa3, 0x49, 0x34, 0x15, 0xec, 0x97 } };
+
+typedef EFI_STATUS (EFIAPI *efi_image_entry_t)(EFI_HANDLE, EFI_SYSTEM_TABLE *);
+
+static EFI_STATUS start_driver_image(EFI_HANDLE drv) {
+    void *shim_image = NULL;
+    EFI_LOADED_IMAGE *li = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(drv, &shim_loaded_image_guid, &shim_image)) ||
+        EFI_ERROR(BS->HandleProtocol(drv, &gEfiLoadedImageProtocolGuid, (void **)&li)) ||
+        !li || !li->ImageBase || li->ImageSize < 0x40)
+        return BS->StartImage(drv, NULL, NULL);
+
+    UINT8 *base = (UINT8 *)li->ImageBase;
+    UINT32 pe = *(UINT32 *)(base + 0x3c);
+    if (base[0] != 'M' || base[1] != 'Z' || pe > li->ImageSize - 0x2c ||
+        base[pe] != 'P' || base[pe + 1] != 'E') {
+        efi_log(L"WARN: shim-loaded driver has no PE header in memory - using StartImage");
+        return BS->StartImage(drv, NULL, NULL);
+    }
+    UINT32 aep = *(UINT32 *)(base + pe + 24 + 16); /* OptionalHeader.AddressOfEntryPoint */
+    if (aep == 0 || aep >= li->ImageSize) return BS->StartImage(drv, NULL, NULL);
+
+    efi_log(L"drivers: shim-loaded driver - calling entry point directly (keeps it resident)");
+    efi_image_entry_t entry = (efi_image_entry_t)(base + aep);
+    return entry(drv, ST);
+}
+
 void efi_start_deferred_images(void) {
     if (g_deferred_started) return;
     if (g_deferred_count == 0) { g_deferred_started = 1; return; }
@@ -34,7 +70,7 @@ void efi_start_deferred_images(void) {
     efi_log(L"drivers: starting deferred filesystem drivers");
     int started = 0;
     for (int i = 0; i < g_deferred_count; i++) {
-        if (!EFI_ERROR(BS->StartImage(g_deferred_drivers[i], NULL, NULL)))
+        if (!EFI_ERROR(start_driver_image(g_deferred_drivers[i])))
             started++;
         else
             BS->UnloadImage(g_deferred_drivers[i]);

@@ -690,9 +690,10 @@ static int execute_recovery_command(gui_state_t *state, boot_entry_t **selected_
             out_line(row, rows, cols, VT_DIM, L"usage: selfheal [status|off|ensure|first]");
         nvsh_report_t rep = nvram_self_heal(&pol);
         CHAR16 line[220];
+        CHAR16 bn[9]; efi_boot_var_name(bn, rep.our_entry);
         SPrint(line, sizeof(line),
-               L"selfheal: mode=%s entry=Boot%04X present=%d in_order=%d created=%d",
-               nvsh_order_name(pol.order_mode), rep.our_entry,
+               L"selfheal: mode=%s entry=%s present=%d in_order=%d created=%d",
+               nvsh_order_name(pol.order_mode), bn,
                rep.entry_present, rep.entry_in_order, rep.entry_created);
         out_line(row, rows, cols, VT_NORMAL, line);
         SPrint(line, sizeof(line),

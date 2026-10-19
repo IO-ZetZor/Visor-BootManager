@@ -101,6 +101,17 @@ default=0
 # the OS instead of "Booting <name>..."). 0 = show progress text.
 quiet=0
 
+# Boot Windows through the firmware instead of chainloading it. When the
+# Windows entry is chosen, Visor looks up the firmware's own Boot#### entry for
+# bootmgfw.efi on that entry's partition (in BootOrder order), sets BootNext
+# to it and resets. Windows then starts with no shim/Visor in its measured boot,
+# so BitLocker does not ask for the recovery key after a Visor or shim update.
+# Costs one extra reboot. If no such Boot#### entry exists Visor chainloads as
+# before, and an entry that pins a sha256= is always chainloaded so its hash is
+# checked. If the firmware fails to start its entry and falls back to Visor,
+# Visor chainloads Windows that time instead of looping. 0 = off (default).
+#windows_bootnext=0
+
 # Allow editing an entry's kernel command line at the menu: select an entry and
 # press 'e', edit, Enter boots with the change (one-shot, not saved). Set 0 to
 # disable (e.g. on locked-down machines). 1 = on (default).

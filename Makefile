@@ -284,11 +284,26 @@ $(GEN_OBJ): $(GEN_C) $(GEN_H)
 bakefont:
 	python3 tools/bake_font.py "$(FONT)" $(FONT_PX) jetbrains $(SRC_DIR)/gui/font_jetbrains.c
 
-$(TARGET): $(OBJS) $(GEN_OBJ)
+# SBAT metadata (.sbat section). shim refuses to start any image without one
+# while Secure Boot is on. The generation numbers only change when a security
+# fix needs older Visor builds revoked via shim's SbatLevel.
+SBAT_CSV = $(OBJDIR)/gen/sbat.csv
+SBAT_OBJ = $(OBJDIR)/gen/sbat.o
+
+$(SBAT_CSV): sbat.csv.in FORCE
+	@mkdir -p $(@D)
+	@sed 's/@VERSION@/$(VISOR_VERSION)/' sbat.csv.in > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm -f $@.tmp || mv -f $@.tmp $@
+
+$(SBAT_OBJ): $(SBAT_CSV)
+	printf '.section .sbat, "a"\n.incbin "%s"\n' "$(SBAT_CSV)" | \
+	    $(CC) -x assembler -c - -o $@
+
+$(TARGET): $(OBJS) $(GEN_OBJ) $(SBAT_OBJ)
 	@mkdir -p $(OBJDIR)
-	$(CC) $(EFI_LDFLAGS) -o $(OBJDIR)/visor.so $(OBJS) $(GEN_OBJ)
+	$(CC) $(EFI_LDFLAGS) -o $(OBJDIR)/visor.so $(OBJS) $(GEN_OBJ) $(SBAT_OBJ)
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic \
-		   -j .dynsym  -j .dynstr -j .rel* -j .rela* -j .reloc \
+		   -j .dynsym  -j .dynstr -j .rel* -j .rela* -j .reloc -j .sbat \
 		   $(EFI_OBJCOPY) $(OBJDIR)/visor.so $(TARGET)
 ifeq ($(RELOC_FIXUP),1)
 	@printf '\000\020\000\000\014\000\000\000\000\000\000\000' > $(OBJDIR)/reloc.bin

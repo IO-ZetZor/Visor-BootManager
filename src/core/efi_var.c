@@ -22,6 +22,16 @@ typedef struct {
     void *Context;
 } shim_lock_protocol_t;
 
+/* "Boot####" with exactly four upper-case hex digits, as the UEFI spec
+ * requires. Not via SPrint: gnu-efi ignores the width in "%04X" and prints
+ * eight digits, which names a variable the firmware never looks at. */
+void efi_boot_var_name(CHAR16 out[9], UINT16 n) {
+    static const CHAR16 hex[] = L"0123456789ABCDEF";
+    out[0] = L'B'; out[1] = L'o'; out[2] = L'o'; out[3] = L't';
+    for (int i = 0; i < 4; i++) out[4 + i] = hex[(n >> (12 - 4 * i)) & 0xF];
+    out[8] = 0;
+}
+
 int efi_shim_verify(void *buf, UINTN size) {
     static EFI_GUID shim_guid = { 0x605dab50, 0xe046, 0x4300,
         { 0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23 } };
@@ -64,6 +74,10 @@ int efi_get_var_u32(CHAR16 *name, UINT32 *out) {
 
 void efi_set_var_u32(CHAR16 *name, UINT32 val) {
     RT->SetVariable(name, &visor_var_guid, VISOR_VAR_ATTRS, sizeof(val), &val);
+}
+
+void efi_unset_var(CHAR16 *name) {
+    RT->SetVariable(name, &visor_var_guid, VISOR_VAR_ATTRS, 0, NULL);
 }
 
 static EFI_GUID loader_var_guid = { 0x4a67b082, 0x0a4c, 0x41cf,

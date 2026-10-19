@@ -12,9 +12,206 @@ static int linux_is_pe_image(const UINT8 *data, UINTN size) {
            data[pe_offset + 3] == 0;
 }
 
+int visor_windows_bootnext = 0;
+
+static CHAR16 lower16(CHAR16 c) {
+    return (c >= L'A' && c <= L'Z') ? (CHAR16)(c - L'A' + L'a') : c;
+}
+
+/* Case-insensitive "ends with" over a counted string (no NUL needed). */
+static int ends_with_ci(const CHAR16 *s, UINTN len, const CHAR16 *suffix) {
+    UINTN n = 0;
+    while (suffix[n]) n++;
+    while (len > 0 && s[len - 1] == 0) len--;
+    if (len < n) return 0;
+    for (UINTN i = 0; i < n; i++)
+        if (lower16(s[len - n + i]) != lower16(suffix[i])) return 0;
+    return len == n || s[len - n - 1] == L'\\' || s[len - n - 1] == L'/';
+}
+
+static int entry_is_windows(boot_entry_t *entry) {
+    if (!entry->kernel_path) return 1;
+    return ends_with_ci(entry->kernel_path, efi_strlen16(entry->kernel_path),
+                        L"bootmgfw.efi");
+}
+
+static void *get_global_var(CHAR16 *name, UINTN *size) {
+    UINTN sz = 0;
+    UINT32 attr;
+    EFI_STATUS s = RT->GetVariable(name, &gEfiGlobalVariableGuid, &attr, &sz, NULL);
+    if (s != EFI_BUFFER_TOO_SMALL || sz == 0) return NULL;
+    void *buf = efi_allocate_pool(sz);
+    if (!buf) return NULL;
+    s = RT->GetVariable(name, &gEfiGlobalVariableGuid, &attr, &sz, buf);
+    if (EFI_ERROR(s)) { efi_free_pool(buf); return NULL; }
+    *size = sz;
+    return buf;
+}
+
+/* EFI_LOAD_OPTION: UINT32 Attributes, UINT16 FilePathListLength,
+ * CHAR16 Description[] (NUL-terminated), then the device path list.
+ * *has_part is set when the path names a GPT partition (HD node). */
+static int load_option_is_bootmgfw(const UINT8 *opt, UINTN size,
+                                   EFI_GUID *part, int *has_part) {
+    *has_part = 0;
+    if (size < 6) return 0;
+    UINT32 attrs = (UINT32)opt[0] | ((UINT32)opt[1] << 8) |
+                   ((UINT32)opt[2] << 16) | ((UINT32)opt[3] << 24);
+    UINT16 fpl = (UINT16)(opt[4] | (opt[5] << 8));
+    if (!(attrs & LOAD_OPTION_ACTIVE)) return 0;
+    UINTN off = 6;
+    while (off + 2 <= size && (opt[off] | opt[off + 1]) != 0) off += 2;
+    off += 2;
+    if (off > size || fpl > size - off) return 0;
+    const UINT8 *dp = opt + off, *end = dp + fpl;
+    while (dp + 4 <= end) {
+        UINT8 type = dp[0], sub = dp[1];
+        UINT16 len = (UINT16)(dp[2] | (dp[3] << 8));
+        if (len < 4 || dp + len > end) return 0;
+        if (type == 0x7F) break;                       /* end of device path */
+        if (type == MEDIA_DEVICE_PATH && sub == MEDIA_HARDDRIVE_DP &&
+            len >= 42 && dp[41] == SIGNATURE_TYPE_GUID) {
+            /* HARDDRIVE_DEVICE_PATH: Signature at 24, SignatureType at 41. */
+            CopyMem(part, (VOID *)(dp + 24), sizeof(EFI_GUID));
+            *has_part = 1;
+        }
+        if (type == MEDIA_DEVICE_PATH && sub == MEDIA_FILEPATH_DP) {
+            /* Device path nodes are byte-packed: copy to an aligned buffer. */
+            CHAR16 path[260];
+            UINTN n = (UINTN)(len - 4) / sizeof(CHAR16);
+            if (n > 260) n = 260;
+            CopyMem(path, (VOID *)(dp + 4), n * sizeof(CHAR16));
+            if (ends_with_ci(path, n, L"bootmgfw.efi")) return 1;
+        }
+        dp += len;
+    }
+    return 0;
+}
+
+/* The GPT partition the selected entry would be chainloaded from: the volume
+ * it was detected on, else its uuid=. 0 when neither is known. */
+static int entry_partition(boot_entry_t *entry, EFI_GUID *out) {
+    CHAR16 *u = entry->hp_volume ? efi_handle_partition_uuid(entry->hp_volume) : NULL;
+    int ok = u ? efi_parse_partition_uuid(u, out) : 0;
+    if (u) efi_free_pool(u);
+    if (!ok && entry->uuid && entry->uuid[0])
+        ok = efi_parse_partition_uuid(entry->uuid, out);
+    return ok;
+}
+
+/* The high half of the monotonic counter goes up once per platform boot. */
+static int boot_count(UINT32 *out) {
+    UINT64 c;
+    if (EFI_ERROR(BS->GetNextMonotonicCount(&c))) return 0;
+    *out = (UINT32)(c >> 32);
+    return 1;
+}
+
+/* Set to the boot count before each BootNext handoff. If the firmware cannot
+ * start that entry it carries on down BootOrder and starts Visor again in the
+ * very next boot; setting the same BootNext again there would loop. */
+#define BOOTNEXT_MARK L"VisorWinBootNext"
+
+static int bootnext_just_failed(void) {
+    UINT32 then, now;
+    if (!efi_get_var_u32(BOOTNEXT_MARK, &then)) return 0;
+    efi_unset_var(BOOTNEXT_MARK);
+    return boot_count(&now) && now == then + 1;
+}
+
+/* Returns only if it could not hand Windows to the firmware; the caller then
+ * chainloads as usual. Booting straight from the firmware entry keeps shim and
+ * Visor out of Windows' measured boot (PCR 4/7), so BitLocker does not ask for
+ * its recovery key after a Visor or shim update. The firmware entry has to be
+ * on the selected entry's partition; when that partition is unknown, only a
+ * single candidate is used, so another Windows installation never starts. */
+static void windows_try_bootnext(boot_entry_t *entry) {
+    if (bootnext_just_failed()) {
+        efi_log(L"bootnext: the last handoff did not start Windows - chainloading instead");
+        return;
+    }
+    EFI_GUID want;
+    int have_want = entry_partition(entry, &want);
+    UINTN order_size = 0;
+    UINT16 *order = get_global_var(L"BootOrder", &order_size);
+    { CHAR16 m[96]; SPrint(m, sizeof(m), L"bootnext: BootOrder has %d entries, partition known=%d",
+                           (int)(order ? order_size / sizeof(UINT16) : 0), have_want); efi_log(m); }
+    if (!order) {
+        efi_log(L"bootnext: no BootOrder - chainloading Windows instead");
+        return;
+    }
+    INTN found = -1;
+    UINTN candidates = 0;
+    for (UINTN i = 0; i < order_size / sizeof(UINT16); i++) {
+        CHAR16 name[9];
+        efi_boot_var_name(name, order[i]);
+        UINTN opt_size = 0;
+        UINT8 *opt = get_global_var(name, &opt_size);
+        if (!opt) {
+            CHAR16 m[64]; SPrint(m, sizeof(m), L"bootnext: %s unreadable", name); efi_log(m);
+            continue;
+        }
+        EFI_GUID part;
+        int has_part;
+        int match = load_option_is_bootmgfw(opt, opt_size, &part, &has_part);
+        if (match && have_want)
+            match = has_part && CompareMem(&part, &want, sizeof(want)) == 0;
+        { CHAR16 m[96]; SPrint(m, sizeof(m), L"bootnext: %s size=%d match=%d",
+                               name, (int)opt_size, match); efi_log(m); }
+        if (match) {
+            if (found < 0) found = (INTN)order[i];
+            candidates++;
+        }
+        efi_free_pool(opt);
+    }
+    efi_free_pool(order);
+    if (found < 0) {
+        efi_log(L"bootnext: no active Boot#### entry for this bootmgfw.efi - chainloading instead");
+        return;
+    }
+    if (!have_want && candidates > 1) {
+        efi_log(L"bootnext: several Windows entries and no known partition - chainloading instead");
+        return;
+    }
+
+    UINT16 next = (UINT16)found;
+    UINT32 boots, stored;
+    if (!boot_count(&boots)) {
+        efi_log(L"bootnext: no monotonic counter to guard the handoff - chainloading instead");
+        return;
+    }
+    efi_set_var_u32(BOOTNEXT_MARK, boots);
+    if (!efi_get_var_u32(BOOTNEXT_MARK, &stored) || stored != boots) {
+        efi_log(L"bootnext: could not store the handoff marker - chainloading instead");
+        return;
+    }
+    EFI_STATUS s = RT->SetVariable(L"BootNext", &gEfiGlobalVariableGuid,
+                                   EFI_VARIABLE_NON_VOLATILE |
+                                   EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                                   EFI_VARIABLE_RUNTIME_ACCESS,
+                                   sizeof(next), &next);
+    { CHAR16 bn[9]; efi_boot_var_name(bn, next);
+      CHAR16 m[96]; SPrint(m, sizeof(m), L"bootnext: BootNext=%s (status=0x%lx)",
+                           bn, (long)s); efi_log(m); }
+    if (EFI_ERROR(s)) {
+        efi_unset_var(BOOTNEXT_MARK);
+        return;
+    }
+    efi_log(L"bootnext: resetting so the firmware boots Windows directly");
+    efi_log_close();
+    RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+}
+
 EFI_STATUS visor_boot(boot_entry_t *entry, EFI_SYSTEM_TABLE *st) {
     EFI_STATUS status;
     UINTN kernel_size = 0;
+
+    if (visor_windows_bootnext && entry_is_windows(entry)) {
+        if (entry->has_sha256)
+            efi_log(L"bootnext: entry pins a sha256 - chainloading so the hash is checked");
+        else
+            windows_try_bootnext(entry);
+    }
 
     efi_print(L"Booting: ");
     efi_print(entry->name);
