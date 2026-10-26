@@ -42,11 +42,12 @@ static int mp4_find_child(const mp4box_t *parent, UINT32 want, mp4box_t *out) {
     return 0;
 }
 
-static int mp4_samples(mp4box_t *stbl, UINT32 timescale, mjpeg_t *st) {
+static int mp4_samples(mp4box_t *stbl, UINT32 timescale, mjpeg_t *st,
+                       UINTN file_size) {
     mp4box_t stsz = {0}, stts = {0}, stsc = {0}, stco = {0}, co64 = {0};
-    if (!mp4_find_child(stbl, 0x7374737Au, &stsz) || stsz.size < 12) return 0;
-    if (!mp4_find_child(stbl, 0x73747473u, &stts)) return 0;
-    if (!mp4_find_child(stbl, 0x73747363u, &stsc)) return 0;
+    if (!mp4_find_child(stbl, 0x7374737Au, &stsz) || stsz.size < 20) return 0;
+    if (!mp4_find_child(stbl, 0x73747473u, &stts) || stts.size < 16) return 0;
+    if (!mp4_find_child(stbl, 0x73747363u, &stsc) || stsc.size < 16) return 0;
     int have_stco = mp4_find_child(stbl, 0x7374636Fu, &stco);
     int have_co64 = mp4_find_child(stbl, 0x636F3634u, &co64);
     if (!have_stco && !have_co64) return 0;
@@ -66,6 +67,7 @@ static int mp4_samples(mp4box_t *stbl, UINT32 timescale, mjpeg_t *st) {
     UINT32 stsc_n = rd32(pc + 4);
     if (stsc.size < 16 + (UINTN)stsc_n * 12) return 0;
 
+    if (have_stco ? (stco.size < 16) : (co64.size < 16)) return 0;
     const UINT8 *po = have_stco ? (stco.d + stco.pos) : (co64.d + co64.pos);
     UINT32 chunk_n = rd32(po + 4);
     UINTN chunk_bytes = have_stco ? (UINTN)chunk_n * 4 : (UINTN)chunk_n * 8;
@@ -96,6 +98,11 @@ static int mp4_samples(mp4box_t *stbl, UINT32 timescale, mjpeg_t *st) {
                                     : rd64(po + 8 + (UINTN)(c - 1) * 8);
             for (UINT32 s = 0; s < spc && idx < sample_count; s++) {
                 UINT32 len = sample_size ? sample_size : rd32(sztab + idx * 4);
+                /* Offsets are absolute file offsets and are attacker
+                 * controlled.  Reject anything that would wrap the later
+                 * off + len bounds check or point outside the file. */
+                if (base > file_size || len > file_size - (UINTN)base)
+                    return 0;
                 st->off[idx] = (UINTN)base;
                 st->len[idx] = len;
 
@@ -224,7 +231,7 @@ anim_t* mp4_load(UINT8 *data, UINTN size, UINTN tgt_w, UINTN tgt_h) {
                 if (t2.type == 0x7472616Bu) traks++;
             if (traks > 1) continue;
         }
-        if (!mp4_samples(&stbl, track_ts, st)) continue;
+        if (!mp4_samples(&stbl, track_ts, st, size)) continue;
         found = 1;
         break;
     }
@@ -234,7 +241,8 @@ anim_t* mp4_load(UINT8 *data, UINTN size, UINTN tgt_w, UINTN tgt_h) {
     }
 
     for (UINTN i = 0; i < st->n; i++) {
-        if (st->len[i] == 0 || st->off[i] + st->len[i] > size) {
+        if (st->len[i] == 0 || st->off[i] > size ||
+            st->len[i] > size - st->off[i]) {
             efi_log(L"  ERROR: MP4 sample table out of range");
             goto fail;
         }
