@@ -402,6 +402,40 @@ efi_file_buffer_t* efi_load_file_on_handle(EFI_HANDLE volume, CHAR16 *path) {
     return efi_read_open_file(file);
 }
 
+int efi_file_set_size(EFI_FILE_PROTOCOL *fh, UINT64 size) {
+    if (!fh) return 0;
+    UINTN info_size = SIZE_OF_EFI_FILE_INFO + sizeof(CHAR16);
+    EFI_FILE_INFO *info = efi_allocate_pool(info_size);
+    if (!info) return 0;
+    ZeroMem(info, info_size);
+    info->Size = info_size;
+    info->FileSize = size;
+    info->FileName[0] = 0;
+    EFI_STATUS s = fh->SetInfo(fh, &gEfiFileInfoGuid, info_size, info);
+    efi_free_pool(info);
+    return !EFI_ERROR(s);
+}
+
+int efi_write_file(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                   const void *data, UINTN size) {
+    if (!root || !path || (!data && size)) return 0;
+    EFI_FILE_PROTOCOL *f = NULL;
+    EFI_STATUS s = root->Open(root, &f, path,
+                              EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ |
+                                  EFI_FILE_MODE_WRITE, 0);
+    if (EFI_ERROR(s) || !f) return 0;
+
+    int ok = 0;
+    if (efi_file_set_size(f, 0)) {
+        UINTN written = size;
+        s = f->Write(f, &written, (void *)data);
+        if (!EFI_ERROR(s) && written == size && !EFI_ERROR(f->Flush(f)))
+            ok = 1;
+    }
+    f->Close(f);
+    return ok;
+}
+
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
     UINTN n = 0;
     EFI_HANDLE *h = efi_locate_handle_buffer(&gEfiSimpleFileSystemProtocolGuid, &n);
@@ -420,20 +454,14 @@ int efi_rename_file(CHAR16 *oldp, CHAR16 *newp) {
                 UINT8 *buf = efi_allocate_pool((UINTN)sz);
                 if (buf) {
                     UINTN rd = (UINTN)sz;
-                    if (!EFI_ERROR(fh->Read(fh, &rd, buf)) && rd == (UINTN)sz) {
-                        EFI_FILE_PROTOCOL *nf = NULL;
-                        if (!EFI_ERROR(root->Open(root, &nf, newp,
-                                EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && nf) {
-                            UINTN w = rd;
-                            EFI_STATUS ws = nf->Write(nf, &w, buf);
-                            EFI_STATUS fs = nf->Flush(nf);
-                            nf->Close(nf);
-                            if (!EFI_ERROR(ws) && !EFI_ERROR(fs) && w == rd) {
-                                EFI_STATUS ds = fh->Delete(fh);
-                                fh = NULL;
-                                ok = !EFI_ERROR(ds);
-                            }
-                        }
+                    if (!EFI_ERROR(fh->Read(fh, &rd, buf)) && rd == (UINTN)sz &&
+                        efi_write_file(root, newp, buf, rd)) {
+                        /* Only remove the old name after the replacement is
+                         * complete and flushed.  If the delete fails, leave
+                         * the old file alone rather than losing either copy. */
+                        EFI_STATUS ds = fh->Delete(fh);
+                        fh = NULL;
+                        ok = !EFI_ERROR(ds);
                     }
                     efi_free_pool(buf);
                 }
