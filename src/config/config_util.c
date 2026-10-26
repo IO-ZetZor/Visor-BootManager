@@ -19,6 +19,27 @@ static int is_space16(CHAR16 c) {
 }
 
 void strip_inline_comment(CHAR16 *s) {
+    /* A value such as "color = #1793D1" is a hex colour, not a comment.
+     * Only treat the leading '#' as a comment when it is not followed by a
+     * complete six-digit hex triplet. */
+    CHAR16 *first = s;
+    while (*first == ' ' || *first == '\t') first++;
+    int leading_color = 0;
+    if (*first == '#') {
+        int hex = 1;
+        for (int k = 1; k <= 6; k++) {
+            CHAR16 c = first[k];
+            if (!c || !((c >= '0' && c <= '9') ||
+                        (c >= 'a' && c <= 'f') ||
+                        (c >= 'A' && c <= 'F'))) {
+                hex = 0;
+                break;
+            }
+        }
+        leading_color = hex &&
+            (first[7] == '\0' || is_space16(first[7]));
+    }
+
     int in_quote = 0;
     for (UINTN i = 0; s[i]; i++) {
         if (s[i] == '"') {
@@ -26,6 +47,7 @@ void strip_inline_comment(CHAR16 *s) {
             continue;
         }
         if (!in_quote && s[i] == '#' && i > 0 && is_space16(s[i - 1])) {
+            if (leading_color && s + i == first) continue;
             s[i] = '\0';
             return;
         }
@@ -33,7 +55,7 @@ void strip_inline_comment(CHAR16 *s) {
 }
 
 CHAR16* dup_path(CHAR16 *value) {
-    if (!value) return NULL;
+    if (!value || !value[0]) return NULL;
 
     UINTN len = 0;
     while (value[len]) len++;
