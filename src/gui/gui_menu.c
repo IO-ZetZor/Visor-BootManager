@@ -1,11 +1,30 @@
 /* gui_menu.c - entry row layout and the main menu paint */
 #include "gui_internal.h"
 
+static UINTN entry_name_cap(gui_state_t *state, UINTN n, UINTN isp,
+                            UINTN max_ei) {
+    if (!n) return 0;
+    UINTN width = state->screen_width;
+    UINTN edge = clamp_uintn(width / 40, 8, 32);
+    UINTN gaps = n > 1 ? (n - 1) * isp : 0;
+    UINTN nav = 0;
+    if (state->entry_count > n) {
+        UINTN csz = max_ei / 2; if (csz < 18) csz = 18;
+        UINTN gap = isp ? isp : 24;
+        nav = 2 * (gap + csz);
+        if (nav > width / 2) nav = width / 2;
+    }
+    if (width <= gaps + 2 * edge + nav)
+        return width / n ? width / n : 1;
+    return (width - gaps - 2 * edge - nav) / n;
+}
+
 static UINTN entry_slot_width(gui_state_t *state, boot_entry_t *e,
-                              UINTN icon_size, UINTN name_px) {
+                              UINTN icon_size, UINTN name_px,
+                              UINTN name_cap) {
     UINTN w = icon_size;
     if (state->show_names && e && e->name) {
-        UINTN nw = text_width_px(e->name, name_px);
+        UINTN nw = text_fit_width_px(e->name, name_px, name_cap, NULL);
         if (nw > w) w = nw;
     }
     return w;
@@ -16,6 +35,14 @@ static void calc_row_layout(gui_state_t *state, UINTN start, UINTN n,
                             UINTN *total_w, INTN *sel_left, UINTN *sel_ei) {
     UINTN x = 0;
     boot_entry_t *e = entry_at(state, start);
+    UINTN max_ei = is;
+    for (UINTN i = 0; i < n && e; i++) {
+        UINTN ei = menu_icon_size(state, e, is);
+        if (ei > max_ei) max_ei = ei;
+        e = e->next;
+    }
+    e = entry_at(state, start);
+    UINTN name_cap = entry_name_cap(state, n, isp, max_ei);
 
     *total_w = 0;
     *sel_left = 0;
@@ -23,8 +50,8 @@ static void calc_row_layout(gui_state_t *state, UINTN start, UINTN n,
 
     for (UINTN i = 0; i < n && e; i++) {
         if (i) x += isp;
-        UINTN ei = entry_icon_size(e, is);
-        UINTN slot_w = entry_slot_width(state, e, ei, name_px);
+        UINTN ei = menu_icon_size(state, e, is);
+        UINTN slot_w = entry_slot_width(state, e, ei, name_px, name_cap);
         if (i == sel_local) {
             *sel_left = (INTN)x + (INTN)(slot_w - ei) / 2;
             *sel_ei = ei;
@@ -41,7 +68,7 @@ UINTN visible_row_width(gui_state_t *state) {
     UINTN n = state->entry_count > page_start ? state->entry_count - page_start : 0;
     if (n > per_page) n = per_page;
     if (!n) return 0;
-    UINTN is  = state->icon_size    ? state->icon_size    : default_icon_size(state);
+    UINTN is  = menu_icon_size(state, NULL, default_icon_size(state));
     UINTN isp = state->icon_spacing ? state->icon_spacing : default_icon_spacing(state, is);
     UINTN name_px = state->name_size ? state->name_size : default_name_px(state);
     UINTN w = 0, sei = is;
@@ -69,7 +96,7 @@ void gui_entries_added(gui_state_t *state, boot_entry_t *head,
     if (!gui_animation_on(state) || new_n <= old_n || first < page_start)
         return;
 
-    UINTN is  = state->icon_size    ? state->icon_size    : default_icon_size(state);
+    UINTN is  = menu_icon_size(state, NULL, default_icon_size(state));
     UINTN isp = state->icon_spacing ? state->icon_spacing : default_icon_spacing(state, is);
     UINTN name_px = state->name_size ? state->name_size : default_name_px(state);
     UINTN old_w = 0, new_w = 0, sei = is;
@@ -124,6 +151,7 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
 
     UINTN total_w = 0, sel_ei = is;
     INTN  sel_left = 0;
+    UINTN name_cap = entry_name_cap(state, n, isp, max_ei);
     calc_row_layout(state, start, n, sel_local, is, isp, name_px,
                     &total_w, &sel_left, &sel_ei);
     UINTN start_x = (state->screen_width > total_w) ? (state->screen_width - total_w) / 2 : 0;
@@ -154,8 +182,8 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
     UINTN x = start_x;
     for (UINTN i = 0; i < n && e; i++) {
         if (i) x += isp;
-        UINTN ei = entry_icon_size(e, is);
-        UINTN slot_w = entry_slot_width(state, e, ei, name_px);
+        UINTN ei = menu_icon_size(state, e, is);
+        UINTN slot_w = entry_slot_width(state, e, ei, name_px, name_cap);
         UINTN icon_x = x + (slot_w - ei) / 2;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
         if (e->icon) {
@@ -176,9 +204,10 @@ static void draw_page(gui_state_t *state, UINTN start, UINTN n, UINTN sel_local,
                                            state->name_color.g * 7 / 10,
                                            state->name_color.b * 7 / 10 };
             }
-            UINTN nw = text_width_px(e->name, name_px);
+            UINTN nw = text_fit_width_px(e->name, name_px, slot_w, NULL);
             INTN  nx = (INTN)x + (INTN)slot_w / 2 - (INTN)nw / 2;
-            draw_text_px_a(state, e->name, nx, (INTN)name_y, name_col, name_px, master);
+            draw_text_fit_px_a(state, e->name, nx, (INTN)name_y, name_col,
+                               name_px, master, slot_w);
         }
         x += slot_w;
         e = e->next;
@@ -207,77 +236,106 @@ static void draw_chevrons(gui_state_t *state, UINTN page, UINTN per_page,
     }
 }
 
-int header_box(gui_state_t *state, INTN *out_x, INTN *out_y,
-                      INTN *out_w, INTN *out_h) {
+typedef struct {
+    int   with_logo;
+    int   with_text;
+    UINTN title_px;
+    UINTN logo_px;
+    UINTN gap;
+    UINTN title_w;
+    UINTN title_maxw;
+    UINTN bw;
+    UINTN bh;
+} header_layout_t;
+
+static void header_metrics(gui_state_t *state, header_layout_t *h) {
     int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
-    int with_logo = (mode != LOGO_MODE_OFF);
-    int with_text = state->show_title && mode != LOGO_MODE_ONLY;
-    if (!with_logo && !with_text) return 0;
+    h->with_logo = (mode != LOGO_MODE_OFF);
+    h->with_text = state->show_title && mode != LOGO_MODE_ONLY;
+    h->title_px = state->title_size ? state->title_size : default_title_px(state);
+    h->logo_px = 0;
+    h->gap = 0;
 
     CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
-    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
-    UINTN tw = with_text ? text_width_px(title, title_px) : 0;
+    UINTN tw = h->with_text ? text_width_px(title, h->title_px) : 0;
 
-    UINTN lsz = 0, gap = 0;
-    if (with_logo) {
+    if (h->with_logo) {
         if (state->logo_size) {
-            lsz = state->logo_size;
-        } else if (mode == LOGO_MODE_TITLE && with_text) {
-            lsz = title_px * 3 / 2;
+            h->logo_px = state->logo_size;
+        } else if (mode == LOGO_MODE_TITLE && h->with_text) {
+            h->logo_px = h->title_px * 3 / 2;
         } else {
-            lsz = title_px * 2;
+            h->logo_px = h->title_px * 2;
         }
-        gap = state->logo_gap ? state->logo_gap : title_px / 2;
+        h->gap = state->logo_gap ? state->logo_gap : h->title_px / 2;
 
         UINTN room = state->screen_height / 3;
-        UINTN over = (mode == LOGO_MODE_ABOVE && with_text) ? gap + title_px : 0;
-        if (lsz + over > room) lsz = (room > over) ? room - over : title_px;
-        if (lsz > state->screen_width / 3) lsz = state->screen_width / 3;
-        if (lsz < 8) lsz = 8;
+        UINTN over = (mode == LOGO_MODE_ABOVE && h->with_text)
+                   ? h->gap + h->title_px : 0;
+        if (h->logo_px + over > room)
+            h->logo_px = (room > over) ? room - over : h->title_px;
+        if (h->logo_px > state->screen_width / 3)
+            h->logo_px = state->screen_width / 3;
+        if (h->logo_px < 8) h->logo_px = 8;
     }
 
-    UINTN bw, bh;
-    if (with_logo && with_text && mode == LOGO_MODE_ABOVE) {
-        bw = (lsz > tw) ? lsz : tw;
-        bh = lsz + gap + title_px;
-    } else if (with_logo && with_text) {
-        bw = lsz + gap + tw;
-        bh = (lsz > title_px) ? lsz : title_px;
-    } else if (with_logo) {
-        bw = lsz;
-        bh = lsz;
+    UINTN margin = clamp_uintn(state->screen_width / 32, 12, 32);
+    UINTN line_w = state->screen_width > 2 * margin
+                 ? state->screen_width - 2 * margin : state->screen_width;
+    h->title_maxw = 0;
+    if (h->with_text) {
+        h->title_maxw = line_w;
+        if (h->with_logo && mode != LOGO_MODE_ABOVE && h->logo_px + h->gap < line_w)
+            h->title_maxw = line_w - h->logo_px - h->gap;
+        else if (h->with_logo && mode != LOGO_MODE_ABOVE)
+            h->title_maxw = 0;
+        if (tw > h->title_maxw) tw = h->title_maxw;
+    }
+    h->title_w = tw;
+
+    if (h->with_logo && h->with_text && mode == LOGO_MODE_ABOVE) {
+        h->bw = (h->logo_px > tw) ? h->logo_px : tw;
+        h->bh = h->logo_px + h->gap + h->title_px;
+    } else if (h->with_logo && h->with_text) {
+        h->bw = h->logo_px + h->gap + tw;
+        h->bh = (h->logo_px > h->title_px) ? h->logo_px : h->title_px;
+    } else if (h->with_logo) {
+        h->bw = h->logo_px;
+        h->bh = h->logo_px;
     } else {
-        bw = tw;
-        bh = title_px;
+        h->bw = tw;
+        h->bh = h->title_px;
     }
+}
 
-    *out_x = (bw < state->screen_width) ? (INTN)(state->screen_width - bw) / 2 : 0;
+int header_box(gui_state_t *state, INTN *out_x, INTN *out_y,
+                      INTN *out_w, INTN *out_h) {
+    header_layout_t h;
+    header_metrics(state, &h);
+    if (!h.with_logo && !h.with_text) return 0;
+
+    *out_x = (h.bw < state->screen_width)
+           ? (INTN)(state->screen_width - h.bw) / 2 : 0;
     *out_y = (INTN)(state->screen_height / 14);
-    *out_w = (INTN)bw;
-    *out_h = (INTN)bh;
+    *out_w = (INTN)h.bw;
+    *out_h = (INTN)h.bh;
     return 1;
 }
 
 static void draw_header(gui_state_t *state) {
-    int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
-    int with_logo = (mode != LOGO_MODE_OFF);
-    int with_text = state->show_title && mode != LOGO_MODE_ONLY;
+    header_layout_t h;
+    header_metrics(state, &h);
+    if (!h.with_logo && !h.with_text) return;
 
-    INTN bx, by, bwi, bhi;
-    if (!header_box(state, &bx, &by, &bwi, &bhi)) return;
-    UINTN bw = (UINTN)bwi, bh = (UINTN)bhi;
+    int mode = state->logo ? state->logo_mode : LOGO_MODE_OFF;
+    INTN bx = (h.bw < state->screen_width)
+            ? (INTN)(state->screen_width - h.bw) / 2 : 0;
+    INTN by = (INTN)(state->screen_height / 14);
+    UINTN bw = h.bw, bh = h.bh;
 
     CHAR16 *title = (state->title && state->title[0]) ? state->title : L"Visor";
-    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
-    UINTN tw = with_text ? text_width_px(title, title_px) : 0;
-
-    UINTN lsz = 0, gap = 0;
-    if (with_logo) {
-        gap = state->logo_gap ? state->logo_gap : title_px / 2;
-        if (mode == LOGO_MODE_ABOVE && with_text) lsz = bh - gap - title_px;
-        else if (with_text)                       lsz = bw - gap - tw;
-        else                                      lsz = bh;
-    }
+    UINTN tw = h.with_text
+             ? text_fit_width_px(title, h.title_px, h.title_maxw, NULL) : 0;
 
     if (state->blur_title) {
         INTN pad = 18;
@@ -285,35 +343,37 @@ static void draw_header(gui_state_t *state) {
                    (INTN)bw + 2 * pad, (INTN)bh + 2 * pad, 255);
     }
 
-    if (with_logo) {
+    if (h.with_logo) {
         INTN lx, ly;
-        if (with_text && mode == LOGO_MODE_ABOVE) {
-            lx = bx + (INTN)(bw - lsz) / 2;
+        if (h.with_text && mode == LOGO_MODE_ABOVE) {
+            lx = bx + (INTN)(bw - h.logo_px) / 2;
             ly = by;
         } else {
             lx = bx;
-            ly = by + (INTN)(bh - lsz) / 2;
+            ly = by + (INTN)(bh - h.logo_px) / 2;
         }
         if (state->logo_tint_on)
-            draw_image_tinted_a(state, state->logo, (UINTN)lx, (UINTN)ly, lsz,
-                                state->logo_tint, 255);
+            draw_image_tinted_a(state, state->logo, (UINTN)lx, (UINTN)ly,
+                                h.logo_px, state->logo_tint, 255);
         else
-            draw_image_sized(state, state->logo, (UINTN)lx, (UINTN)ly, lsz);
+            draw_image_sized(state, state->logo, (UINTN)lx, (UINTN)ly,
+                             h.logo_px);
     }
 
-    if (with_text) {
+    if (h.with_text) {
         INTN tx, ty;
-        if (with_logo && mode == LOGO_MODE_ABOVE) {
+        if (h.with_logo && mode == LOGO_MODE_ABOVE) {
             tx = bx + (INTN)(bw - tw) / 2;
-            ty = by + (INTN)(lsz + gap);
-        } else if (with_logo) {
-            tx = bx + (INTN)(lsz + gap);
-            ty = by + (INTN)(bh - title_px) / 2;
+            ty = by + (INTN)(h.logo_px + h.gap);
+        } else if (h.with_logo) {
+            tx = bx + (INTN)(h.logo_px + h.gap);
+            ty = by + (INTN)(bh - h.title_px) / 2;
         } else {
             tx = bx;
             ty = by;
         }
-        draw_text_px(state, title, tx, ty, state->title_color, title_px);
+        draw_text_fit_px_a(state, title, tx, ty, state->title_color,
+                           h.title_px, 255, h.title_maxw);
     }
 }
 
@@ -392,7 +452,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
         return;
     }
 
-    UINTN is      = state->icon_size    ? state->icon_size    : default_icon_size(state);
+    UINTN is      = menu_icon_size(state, NULL, default_icon_size(state));
     UINTN isp     = state->icon_spacing ? state->icon_spacing : default_icon_spacing(state, is);
 
     UINTN per_page = state->per_page ? state->per_page : 3;
@@ -406,7 +466,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     {
         boot_entry_t *e = state->entries;
         for (UINTN i = 0; i < state->entry_count && e; i++) {
-            UINTN ei = e->icon_size ? e->icon_size : is;
+            UINTN ei = menu_icon_size(state, e, is);
             if (ei > max_ei) max_ei = ei;
             e = e->next;
         }
@@ -421,6 +481,7 @@ void gui_draw_menu(gui_state_t *state, int partial) {
 
     UINTN total_w = 0, sel_ei = is;
     INTN  sel_left = 0;
+    UINTN name_cap = entry_name_cap(state, page_n, isp, max_ei);
     calc_row_layout(state, page_start, page_n, sel_local, is, isp, name_px,
                     &total_w, &sel_left, &sel_ei);
     UINTN start_x = (state->screen_width > total_w) ? (state->screen_width - total_w) / 2 : 0;
@@ -691,8 +752,8 @@ void gui_draw_menu(gui_state_t *state, int partial) {
     state->hit_n = 0;
     for (UINTN i = 0; i < page_n && entry; i++) {
         if (i) x += isp;
-        UINTN ei = entry_icon_size(entry, is);
-        UINTN slot_w = entry_slot_width(state, entry, ei, name_px);
+        UINTN ei = menu_icon_size(state, entry, is);
+        UINTN slot_w = entry_slot_width(state, entry, ei, name_px, name_cap);
         UINTN icon_x = x + (slot_w - ei) / 2;
         UINTN iy = (icon_cy > ei / 2) ? icon_cy - ei / 2 : 0;
 
@@ -747,13 +808,14 @@ void gui_draw_menu(gui_state_t *state, int partial) {
                                       state->name_color.g * 7 / 10,
                                       state->name_color.b * 7 / 10 };
             }
-            UINTN nw = text_width_px(entry->name, name_px);
+            UINTN nw = text_fit_width_px(entry->name, name_px, slot_w, NULL);
             INTN  nx = (INTN)x + dx + (INTN)slot_w / 2 - (INTN)nw / 2;
             if (hp_new)
-                draw_text_px_a(state, entry->name, nx, (INTN)name_y, name_col,
-                               name_px, hp_a);
+                draw_text_fit_px_a(state, entry->name, nx, (INTN)name_y, name_col,
+                                   name_px, hp_a, slot_w);
             else
-                draw_text_px(state, entry->name, nx, (INTN)name_y, name_col, name_px);
+                draw_text_fit_px_a(state, entry->name, nx, (INTN)name_y, name_col,
+                                   name_px, 255, slot_w);
         }
 
         x += slot_w;
