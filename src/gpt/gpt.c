@@ -158,8 +158,10 @@ static void gpt_parse_entry(const UINT8 *e, gpt_entry_t *out) {
     for (UINTN i = 0; i < GPT_NAME_CHARS; i++)
         out->name[i] = le16(e + 56 + i * 2);
 
-    out->used = !guid_is_zero(out->type_guid) &&
-                !(out->first_lba == 0 && out->last_lba == 0);
+    /* An entry is used as soon as it has a type GUID.  A non-zero type with
+     * an empty LBA range is invalid and must be diagnosed, not silently
+     * treated as an unused slot. */
+    out->used = !guid_is_zero(out->type_guid);
 }
 
 static gpt_reason_t gpt_check_entries_layout(const gpt_entry_t *ents,
@@ -184,7 +186,7 @@ static gpt_reason_t gpt_check_entries_layout(const gpt_entry_t *ents,
             return GPT_R_INVALID_PARTITION_GUID;
         }
 
-        if ((e->first_lba == 0) != (e->last_lba == 0)) {
+        if (e->first_lba == 0 || e->last_lba == 0) {
             *first_bad = GPT_R_HALF_USED_ENTRY;
             if (bad_at) *bad_at = (INTN)i;
             return GPT_R_HALF_USED_ENTRY;
