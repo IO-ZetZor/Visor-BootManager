@@ -337,6 +337,8 @@ typedef struct gui_state {
     CHAR16  edit_buf[512];
     UINTN   edit_len;
     UINTN   edit_cursor;
+    UINTN   edit_scroll;     /* first visible wrapped line */
+    UINTN   edit_scroll_px;  /* horizontal scroll for the masked field */
     CHAR16 *override_cmdline;
     CHAR16 *override_kernel_path;
     CHAR16 *override_initrd_path;
