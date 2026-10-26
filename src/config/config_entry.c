@@ -236,10 +236,16 @@ void bls_decrement(boot_entry_t *e) {
     CHAR16 newp[MAX_PATH];
     SPrint(newp, sizeof(newp), L"%s+%d-%d.conf", base, d->tries_left - 1, d->tries_done + 1);
 
-    if (efi_rename_file(d->bls_path, newp))
+    if (efi_rename_file(d->bls_path, newp)) {
+        CHAR16 *np = efi_strdup(newp);
+        if (np) {
+            efi_free_pool(d->bls_path);
+            d->bls_path = np;
+        }
         efi_log(L"bls: decremented boot-counter for selected deployment");
-    else
+    } else {
         efi_log(L"WARN: could not update boot-counter (read-only /boot?)");
+    }
 }
 
 boot_entry_t* config_add_entry(config_t *config,
