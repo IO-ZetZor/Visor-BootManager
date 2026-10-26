@@ -2,6 +2,10 @@ ARCH ?= x86_64
 BUILD_DIR = build
 SRC_DIR = src
 
+# Diagnostic build flag for the x86_64 PE entry checkpoint: 1 prints one line
+# through ConOut before gnu-efi self-relocates the image.
+EARLY_DIAG ?= 0
+
 VISOR_VERSION ?= $(shell sed -n 's/^pkgver=//p' PKGBUILD 2>/dev/null | head -1)
 VISOR_VERSION := $(if $(VISOR_VERSION),$(VISOR_VERSION),1.4)
 
@@ -15,6 +19,7 @@ ifeq ($(ARCH),x86_64)
   OBJCOPY_DEF   = objcopy
   CRT0_NAME     = crt0-efi-x86_64.o
   RELOC_FIXUP   = 1
+  EARLY_START_SRC = $(SRC_DIR)/early_start_x86_64.S
 else ifeq ($(ARCH),aarch64)
   TARGET       ?= visor_aa64.efi
   CC_CANDIDATES = aarch64-linux-gnu-gcc
@@ -63,8 +68,8 @@ GNU_EFI_LIB ?= $(dir $(CRT0))
 VERS = $(SRC_DIR)/efi.vers
 
 EFI_LDFLAGS = -nostdlib -znocombreloc -z notext -T $(LDS) -shared \
-              -Bsymbolic -Wl,--version-script=$(VERS) -L $(GNU_EFI_LIB) \
-              $(CRT0) -lefi -lgnuefi
+              -Bsymbolic -Wl,--version-script=$(VERS) -L $(GNU_EFI_LIB)
+EFI_LDLIBS  = -lefi -lgnuefi
 
 include features/features.mk
 
@@ -149,6 +154,8 @@ visor_src_off := $(strip $(foreach f,$(VISOR_FEATURES_OFF),$(addprefix stubs/,$(
 SRCS = $(sort $(CORE_SRC) $(ARCH_SRC) $(visor_src_on) $(visor_src_off))
 OBJDIR = $(BUILD_DIR)/$(ARCH)
 OBJS = $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
+EARLY_START_OBJ = $(if $(EARLY_START_SRC),$(OBJDIR)/early_start_x86_64.o)
+EARLY_DIAG_STAMP = $(OBJDIR)/.early_diag
 
 GEN_DIR = $(OBJDIR)/gen
 GEN_H   = $(GEN_DIR)/visor_features.h
@@ -299,9 +306,23 @@ $(SBAT_OBJ): $(SBAT_CSV)
 	printf '.section .sbat, "a"\n.incbin "%s"\n' "$(SBAT_CSV)" | \
 	    $(CC) -x assembler -c - -o $@
 
-$(TARGET): $(OBJS) $(GEN_OBJ) $(SBAT_OBJ)
+ifneq ($(EARLY_START_SRC),)
+# The object embeds EARLY_DIAG as a compile-time constant, so it must be
+# rebuilt when the flag changes.  A plain file dependency cannot see that;
+# use a stamp whose contents are the current value.
+$(EARLY_DIAG_STAMP): FORCE
+	@mkdir -p $(@D)
+	@printf '%s\n' '$(EARLY_DIAG)' > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm -f $@.tmp || mv -f $@.tmp $@
+
+$(EARLY_START_OBJ): $(EARLY_START_SRC) $(EARLY_DIAG_STAMP)
+	@mkdir -p $(@D)
+	$(CC) -c -DVISOR_EARLY_DIAG=$(EARLY_DIAG) $< -o $@
+endif
+
+$(TARGET): $(OBJS) $(GEN_OBJ) $(SBAT_OBJ) $(EARLY_START_OBJ)
 	@mkdir -p $(OBJDIR)
-	$(CC) $(EFI_LDFLAGS) -o $(OBJDIR)/visor.so $(OBJS) $(GEN_OBJ) $(SBAT_OBJ)
+	$(CC) $(EFI_LDFLAGS) -o $(OBJDIR)/visor.so $(EARLY_START_OBJ) $(CRT0) $(OBJS) $(GEN_OBJ) $(SBAT_OBJ) $(EFI_LDLIBS)
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata -j .dynamic \
 		   -j .dynsym  -j .dynstr -j .rel* -j .rela* -j .reloc -j .sbat \
 		   $(EFI_OBJCOPY) $(OBJDIR)/visor.so $(TARGET)
