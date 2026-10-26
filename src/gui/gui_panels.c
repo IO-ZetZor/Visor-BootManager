@@ -124,7 +124,7 @@ void draw_center_info(gui_state_t *state, boot_entry_t *e,
         off += 4;
     }
 
-    UINTN nw = want_name ? text_width_px(e->name, name_px) : 0;
+    UINTN nw = want_name ? text_fit_width_px(e->name, name_px, maxw, NULL) : 0;
     UINTN pw = text_width_px(tbuf, path_px);
     UINTN block_w = nw > pw ? nw : pw;
     UINTN block_h = (want_name ? name_px + 6 : 0) + path_px;
@@ -136,7 +136,8 @@ void draw_center_info(gui_state_t *state, boot_entry_t *e,
                    (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, master);
     }
     if (want_name)
-        draw_text_px_a(state, e->name, cx - (INTN)nw / 2, (INTN)name_y, name_col, name_px, master);
+        draw_text_fit_px_a(state, e->name, cx - (INTN)nw / 2, (INTN)name_y,
+                           name_col, name_px, master, maxw);
     if (tbuf[0])
         draw_text_px_a(state, tbuf, cx - (INTN)pw / 2, (INTN)path_y, dim, path_px, master);
 }
@@ -246,7 +247,9 @@ void draw_version_info(gui_state_t *state, boot_entry_t *e,
 
     UINTN name_y = top_y;
     UINTN line_y = top_y + name_px + 6;
-    UINTN nw = text_width_px(e->name, name_px);
+    UINTN maxw = state->screen_width * 9 / 10;
+    chop_to_width(line, path_px, maxw);
+    UINTN nw = text_fit_width_px(e->name, name_px, maxw, NULL);
     UINTN lw = text_width_px(line, path_px);
     UINTN block_w = nw > lw ? nw : lw;
     UINTN block_h = name_px + 6 + path_px;
@@ -257,8 +260,10 @@ void draw_version_info(gui_state_t *state, boot_entry_t *e,
         draw_frost(state, cx - (INTN)block_w / 2 - fpad, (INTN)top_y - fpad,
                    (INTN)block_w + 2 * fpad, (INTN)block_h + 2 * fpad, master);
     }
-    draw_text_px_a(state, e->name, cx - (INTN)nw / 2, (INTN)name_y, name_col, name_px, master);
-    draw_text_px_a(state, line, cx - (INTN)lw / 2, (INTN)line_y, line_col, path_px, master);
+    draw_text_fit_px_a(state, e->name, cx - (INTN)nw / 2, (INTN)name_y,
+                       name_col, name_px, master, maxw);
+    draw_text_px_a(state, line, cx - (INTN)lw / 2, (INTN)line_y, line_col,
+                   path_px, master);
 }
 
 void snap_metrics(gui_state_t *state, boot_entry_t *e, UINTN name_px,
@@ -275,6 +280,32 @@ void snap_metrics(gui_state_t *state, boot_entry_t *e, UINTN name_px,
     if (r > 8) r = 8;
     if (r < 1) r = 1;
     *rows = r;
+}
+
+static void snap_head_text(CHAR16 *dst, UINTN cap, boot_entry_t *e,
+                           UINTN name_px, UINTN maxw) {
+    CHAR16 suffix[48];
+    SPrint(suffix, sizeof(suffix), L"   snapshot %d/%d",
+           (int)(e->snap_sel + 1), (int)e->snap_count);
+    UINTN sw = text_width_px(suffix, name_px);
+    UINTN name_maxw = maxw > sw + 2 ? maxw - sw - 2 : 0;
+    UINTN chars = 0;
+    UINTN nw = e->name ? text_fit_width_px(e->name, name_px, name_maxw, &chars) : 0;
+    UINTN full = e->name ? text_width_px(e->name, name_px) : 0;
+
+    UINTN k = 0;
+    if (e->name) {
+        for (UINTN i = 0; i < chars && k + 1 < cap; i++)
+            dst[k++] = e->name[i];
+    }
+    if (nw < full && name_maxw > 0) {
+        for (UINTN i = 0; i < 3 && k + 1 < cap; i++)
+            dst[k++] = L'.';
+    }
+    for (UINTN i = 0; suffix[i] && k + 1 < cap; i++)
+        dst[k++] = suffix[i];
+    dst[k] = 0;
+    chop_to_width(dst, name_px, maxw);
 }
 
 void draw_snap_info(gui_state_t *state, boot_entry_t *e,
@@ -303,9 +334,7 @@ void draw_snap_info(gui_state_t *state, boot_entry_t *e,
 
     UINTN maxw = state->screen_width * 8 / 10;
     CHAR16 head[144], line[192];
-    SPrint(head, sizeof(head), L"%s   snapshot %d/%d",
-           e->name, (int)(e->snap_sel + 1), (int)e->snap_count);
-    chop_to_width(head, name_px, maxw);
+    snap_head_text(head, 144, e, name_px, maxw);
     UINTN block_w = text_width_px(head, name_px);
     for (UINTN i = 0; i < rows && state->snap_scroll + i < e->snap_count; i++) {
         snapshot_t *s = &e->snapshots[state->snap_scroll + i];
