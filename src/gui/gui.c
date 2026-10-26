@@ -290,6 +290,8 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->edit_title = NULL;
     state->edit_len = 0;
     state->edit_cursor = 0;
+    state->edit_scroll = 0;
+    state->edit_scroll_px = 0;
     state->override_cmdline = NULL;
 
     state->mouse_enabled = 1;
