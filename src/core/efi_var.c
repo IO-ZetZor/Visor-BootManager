@@ -17,7 +17,10 @@ int efi_secure_boot_enabled(void) {
 }
 
 typedef struct {
-    EFI_STATUS (EFIAPI *Verify)(void *buffer, UINT32 size);
+    /* shim is built with the platform C ABI, not gnu-efi's MS ABI on
+     * x86_64.  Marking this EFIAPI shifts the arguments and crashes or
+     * corrupts the call. */
+    EFI_STATUS (*Verify)(void *buffer, UINT32 size);
     void *Hash;
     void *Context;
 } shim_lock_protocol_t;
