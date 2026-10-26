@@ -18,6 +18,68 @@
 
 EFI_HANDLE IH;
 
+EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table);
+
+typedef void (*visor_init_fn)(void);
+extern visor_init_fn __init_array_start[], __init_array_end[];
+extern visor_init_fn __CTOR_LIST__[], __CTOR_END__[];
+extern visor_init_fn __fini_array_start[], __fini_array_end[];
+extern visor_init_fn __DTOR_LIST__[], __DTOR_END__[];
+
+/* gnu-efi's stock entry point runs constructors before efi_main() and
+ * destructors afterwards.  Replacing _entry() means we must keep that
+ * contract; otherwise any vendor constructor/destructor is silently skipped. */
+static void visor_run_ctors(void) {
+    UINTN n = (UINTN)(__init_array_end - __init_array_start);
+    for (UINTN i = 0; i < n; i++)
+        if (__init_array_start[i]) __init_array_start[i]();
+    n = (UINTN)(__CTOR_END__ - __CTOR_LIST__);
+    for (UINTN i = 0; i < n; i++) {
+        visor_init_fn fn = __CTOR_LIST__[n - i - 1];
+        if (fn) fn();
+    }
+}
+
+static void visor_run_dtors(void) {
+    UINTN n = (UINTN)(__DTOR_END__ - __DTOR_LIST__);
+    for (UINTN i = 0; i < n; i++)
+        if (__DTOR_LIST__[i]) __DTOR_LIST__[i]();
+    n = (UINTN)(__fini_array_end - __fini_array_start);
+    for (UINTN i = 0; i < n; i++) {
+        visor_init_fn fn = __fini_array_start[n - i - 1];
+        if (fn) fn();
+    }
+}
+
+/*
+ * gnu-efi's stock _entry() calls InitializeLib() before efi_main().  That
+ * means a banner at the top of efi_main() is too late to tell a firmware PE
+ * loader failure apart from a hang inside gnu-efi itself.  Keep our own
+ * entry point so the first console write happens before any library setup.
+ */
+EFI_STATUS _entry(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
+    if (system_table && system_table->ConOut &&
+        system_table->ConOut->OutputString) {
+        system_table->ConOut->OutputString(system_table->ConOut,
+            L"Visor: self-relocation complete\r\n");
+    }
+
+    /*
+     * Passing a NULL image handle deliberately skips gnu-efi's early
+     * HandleProtocol/GetVariable/LocateHandle probing.  Those calls used to
+     * run before efi_main() could print anything, so a firmware bug there
+     * looked exactly like a PE-loader freeze.  Visor installs IH and the
+     * service pointers itself, so it does not need the loaded-image lookup
+     * or the Unicode collation table during startup.
+     */
+    InitializeLib(NULL, system_table);
+    IH = image_handle;
+    visor_run_ctors();
+    EFI_STATUS status = efi_main(image_handle, system_table);
+    visor_run_dtors();
+    return status;
+}
+
 static boot_entry_t* main_entry_at(gui_state_t *state, UINTN idx) {
     boot_entry_t *e = state ? state->entries : NULL;
     for (UINTN i = 0; i < idx && e; i++) e = e->next;
@@ -92,6 +154,9 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
 }
 
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
+    /* Our _entry() already ran InitializeLib(NULL, ...), so this call returns
+     * immediately.  Keep it for stock-entry builds and set the globals again
+     * explicitly: the project uses IH rather than gnu-efi's LibImageHandle. */
     InitializeLib(image_handle, system_table);
 
     ST = system_table;
@@ -99,12 +164,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     RT = system_table->RuntimeServices;
     IH = image_handle;
 
-    /* First output, before anything that calls into firmware services.  On the
-     * boards that freeze with no output at all, the previous order put
-     * loader_mark_init() (a RuntimeServices GetTime call) ahead of this print,
-     * so a hang in there was indistinguishable from never being started.  If
-     * this banner appears and the machine still freezes, the fault is after
-     * console setup; if it never appears, it is before Visor gets control. */
+    /* Second checkpoint.  _entry() printed the first one immediately after
+     * self-relocation; a diagnostic build also prints a stage-0 line from the
+     * PE entry point.  If this line appears and the machine still freezes, the
+     * fault is after console setup; if it never appears, it is in the entry
+     * path or the safe library initialization above. */
     efi_print(L"Visor loading...\r\n");
 
     loader_mark_init();
@@ -276,6 +340,21 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     gui.power_icons     = config.power_icons;
     gui.power_icon_size = config.power_icon_size;
+
+    /* boot.conf is user input; cap display sizes so extreme values cannot
+     * push the menu off-screen or overflow layout arithmetic. */
+    UINTN title_cap = gui.screen_height / 6;
+    if (title_cap < 48) title_cap = 48;
+    if (gui.title_size > title_cap) gui.title_size = title_cap;
+    UINTN name_cap = gui.screen_height / 10;
+    if (name_cap < 18) name_cap = 18;
+    if (gui.name_size > name_cap) gui.name_size = name_cap;
+    UINTN icon_cap = gui.screen_height * 2 / 5;
+    if (icon_cap < 32) icon_cap = 32;
+    if (icon_cap > 512) icon_cap = 512;
+    if (gui.icon_size > icon_cap) gui.icon_size = icon_cap;
+    if (gui.power_icon_size > icon_cap) gui.power_icon_size = icon_cap;
+
     gui.blur            = config.blur;
     gui.blur_title      = config.blur_title;
     gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
