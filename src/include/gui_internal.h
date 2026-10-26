@@ -137,10 +137,16 @@ static inline INTN scale_metric(INTN v, UINTN dh, UINTN size) {
 }
 void glyph_cache_flush(void);
 UINTN text_width_px(CHAR16 *text, UINTN dh);
+/* Unrounded advance in 1/64 px, for laying out long editable text without
+ * accumulating the rounding error of measuring each glyph separately. */
+UINTN text_advance_q6(CHAR16 c, UINTN dh);
+UINTN text_fit_width_px(CHAR16 *text, UINTN dh, UINTN maxw, UINTN *chars);
 void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
                            color_t color, UINTN dh, INTN master);
 void draw_text_px(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
                          color_t color, UINTN dh);
+void draw_text_fit_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
+                        color_t color, UINTN dh, INTN master, UINTN maxw);
 void draw_text_centered_px(gui_state_t *state, CHAR16 *text, INTN x, UINTN w,
                                   INTN y, color_t color, UINTN dh);
 int path_anim_kind(CHAR16 *path);
@@ -209,6 +215,20 @@ static inline boot_entry_t* entry_at(gui_state_t *state, UINTN idx) {
 
 static inline UINTN entry_icon_size(boot_entry_t *e, UINTN fallback) {
     return (e && e->icon_size) ? e->icon_size : fallback;
+}
+
+/* Custom icon_size values come straight from boot.conf.  Cap them against
+ * the screen so a large value cannot push names, underlines and the selection
+ * card outside the framebuffer. */
+static inline UINTN menu_icon_size(gui_state_t *state, boot_entry_t *e,
+                                   UINTN fallback) {
+    UINTN v = entry_icon_size(e, fallback);
+    UINTN cap = ui_base(state) * 2 / 5;
+    if (cap < 32) cap = 32;
+    if (cap > 512) cap = 512;
+    if (v > cap) v = cap;
+    if (v < 8) v = 8;
+    return v;
 }
 UINTN visible_row_width(gui_state_t *state);
 void gui_entries_added(gui_state_t *state, boot_entry_t *head,
