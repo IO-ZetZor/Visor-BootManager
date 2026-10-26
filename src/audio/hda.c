@@ -591,9 +591,19 @@ static int rings_init(hda_t *h) {
     UINTN mapped = bytes;
     st = h->pci->Map(h->pci, EfiPciIoOperationBusMasterCommonBuffer, host,
                      &mapped, &dev, &h->ring_map);
-    if (EFI_ERROR(st) || mapped < bytes) return -1;
+    if (EFI_ERROR(st) || mapped < bytes) {
+        if (h->ring_map) h->pci->Unmap(h->pci, h->ring_map);
+        h->pci->FreeBuffer(h->pci, pages, h->ring_host);
+        h->ring_map = NULL;
+        h->ring_host = NULL;
+        return -1;
+    }
 
     if (!GCAP_64OK(gcap) && (dev + bytes) > 0x100000000ULL) {
+        h->pci->Unmap(h->pci, h->ring_map);
+        h->pci->FreeBuffer(h->pci, pages, h->ring_host);
+        h->ring_map = NULL;
+        h->ring_host = NULL;
         return -1;
     }
 
@@ -1113,10 +1123,24 @@ static int stream_prepare(hda_t *h, const INT16 *pcm, UINTN frames) {
     EFI_PHYSICAL_ADDRESS dev = 0;
     st = h->pci->Map(h->pci, EfiPciIoOperationBusMasterCommonBuffer, host,
                      &mapped, &dev, &h->samp_map);
-    if (EFI_ERROR(st) || mapped < padded) return -1;
+    if (EFI_ERROR(st) || mapped < padded) {
+        if (h->samp_map) h->pci->Unmap(h->pci, h->samp_map);
+        h->pci->FreeBuffer(h->pci, pages, h->samples);
+        h->samp_map = NULL;
+        h->samples = NULL;
+        h->samp_pages = 0;
+        return -1;
+    }
 
     UINT16 gcap = mm_read16(h, REG_GCAP);
-    if (!GCAP_64OK(gcap) && (dev + padded) > 0x100000000ULL) return -1;
+    if (!GCAP_64OK(gcap) && (dev + padded) > 0x100000000ULL) {
+        h->pci->Unmap(h->pci, h->samp_map);
+        h->pci->FreeBuffer(h->pci, pages, h->samples);
+        h->samp_map = NULL;
+        h->samples = NULL;
+        h->samp_pages = 0;
+        return -1;
+    }
     h->samp_dev = dev;
 
     UINTN half = padded / 2;
