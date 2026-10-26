@@ -18,7 +18,13 @@ EFI_STATUS cap_png_encode(const UINT32 *pixels, UINTN w, UINTN h,
     cap_buf png;
     png.buf = NULL; png.len = 0; png.cap = 0;
 
-    UINTN rsize = h * (1 + w * 3);
+    /* IHDR stores 32-bit dimensions and the row/pixel product must not wrap
+     * before it is handed to the allocator. */
+    if (w > 0xFFFFFFFFu || h > 0xFFFFFFFFu) return EFI_INVALID_PARAMETER;
+    if (w > (((UINTN)-1) - 1) / 3) return EFI_INVALID_PARAMETER;
+    UINTN stride = 1 + w * 3;
+    if (h > ((UINTN)-1) / stride) return EFI_INVALID_PARAMETER;
+    UINTN rsize = h * stride;
     if (!cap_buf_reserve(&raw, rsize)) goto fail;
 
     for (UINTN y = 0; y < h; y++) {
