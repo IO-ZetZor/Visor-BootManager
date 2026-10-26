@@ -450,7 +450,16 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
         return;
     }
     UINTN cnt = 0;
-    nvsh_parse_bootorder(od, osz, list, n + 2, &cnt);
+    int parsed = nvsh_parse_bootorder(od, osz, list, n + 2, &cnt);
+    if (parsed != 0) {
+        /* A malformed or oversized BootOrder must never be replaced by a
+         * single-entry list: that silently hides every other boot target. */
+        nsh_log(L"selfheal: cannot parse BootOrder (%d) - leaving it untouched",
+                parsed);
+        efi_free_pool(list);
+        efi_free_pool(od);
+        return;
+    }
     n = cnt;
     int in = 0;
     for (UINTN i = 0; i < n; i++) if (list[i] == slot) in = 1;
@@ -580,10 +589,12 @@ static void nvsh_fallback_restore(const CHAR16 *run, int dry_run,
     } else if (dry_run) {
         rep->fallback_restored = 1;
         nsh_log(L"selfheal: dry run - would restore %s", fbpath);
+    } else if (sz == 0) {
+        nsh_log(L"selfheal: our binary is empty - fallback copy skipped");
     } else if (sz > 0x400000) {
         nsh_log(L"selfheal: binary too large to buffer for fallback copy");
     } else {
-        UINT8 *data = efi_allocate_pool(sz ? sz : 1);
+        UINT8 *data = efi_allocate_pool(sz);
         if (!data) {
             nsh_log(L"selfheal: out of memory buffering our binary");
         } else {
@@ -605,29 +616,11 @@ static void nvsh_fallback_restore(const CHAR16 *run, int dry_run,
                 if (d) d->Close(d);
                 if (EFI_ERROR(es)) {
                     nsh_log(L"selfheal: cannot create \\EFI\\BOOT directory");
+                } else if (!efi_write_file(root, (CHAR16 *)fbpath, data, sz)) {
+                    nsh_log(L"selfheal: writing fallback file failed");
                 } else {
-                    EFI_FILE_PROTOCOL *w = NULL;
-                    EFI_STATUS ws = root->Open(
-                        root, &w, (CHAR16 *)fbpath,
-                        EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ |
-                            EFI_FILE_MODE_WRITE,
-                        0);
-                    if (EFI_ERROR(ws) || !w) {
-                        if (w) w->Close(w);
-                        nsh_log(L"selfheal: cannot open fallback file for writing");
-                    } else {
-                        UINTN ww = sz;
-                        EFI_STATUS ws2 = w->Write(w, &ww, data);
-                        if (!EFI_ERROR(ws2)) ws2 = w->Flush(w);
-                        if (EFI_ERROR(ws2)) {
-                            nsh_log(L"selfheal: writing fallback file failed (%d)",
-                                    (int)ws2);
-                        } else {
-                            rep->fallback_restored = 1;
-                            nsh_log(L"selfheal: restored %s", fbpath);
-                        }
-                        w->Close(w);
-                    }
+                    rep->fallback_restored = 1;
+                    nsh_log(L"selfheal: restored %s", fbpath);
                 }
             }
             efi_free_pool(data);
