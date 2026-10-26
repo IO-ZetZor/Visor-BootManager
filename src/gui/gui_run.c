@@ -585,11 +585,13 @@ EFI_STATUS gui_prompt_password(gui_state_t *state, CHAR16 *title, CHAR16 *hint,
     if (!accepted) {
         wipe16(state->edit_buf, 512);
         state->edit_len = state->edit_cursor = 0;
+        state->edit_scroll = state->edit_scroll_px = 0;
         return EFI_ABORTED;
     }
     *out = efi_strdup(state->edit_buf);
     wipe16(state->edit_buf, 512);
     state->edit_len = state->edit_cursor = 0;
+    state->edit_scroll = state->edit_scroll_px = 0;
     return *out ? EFI_SUCCESS : EFI_OUT_OF_RESOURCES;
 }
 
