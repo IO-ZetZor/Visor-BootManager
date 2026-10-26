@@ -165,7 +165,8 @@ EFI_STATUS linux_raw_handover(boot_entry_t *entry, EFI_SYSTEM_TABLE *st,
     UINTN startup_offset = (setup_sects + 1) * 0x200;
     if (startup_offset > source_size ||
         source.handover_offset < startup_offset ||
-        source.handover_offset >= source_size)
+        source.handover_offset >= source_size ||
+        source.handover_offset > source_size - 0x200)
         return EFI_INVALID_PARAMETER;
 
     EFI_PHYSICAL_ADDRESS image_alloc = 0, image = 0;
