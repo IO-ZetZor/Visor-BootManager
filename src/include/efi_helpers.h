@@ -66,6 +66,9 @@ efi_file_buffer_t* efi_load_file_from_root(EFI_FILE_PROTOCOL *root, CHAR16 *path
                                            int *opened_out);
 
 int efi_rename_file(CHAR16 *oldp, CHAR16 *newp);
+int efi_file_set_size(EFI_FILE_PROTOCOL *fh, UINT64 size);
+int efi_write_file(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                   const void *data, UINTN size);
 
 void efi_load_fs_drivers(void);
 
