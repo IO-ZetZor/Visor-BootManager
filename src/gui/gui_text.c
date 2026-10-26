@@ -176,21 +176,25 @@ static void blend_glyph(gui_state_t *state, const glyph_entry_t *e, UINT32 rgb,
     }
 }
 
+UINTN text_advance_q6(CHAR16 c, UINTN dh) {
+    if (!dh) return 0;
+    UINTN size = g_font->size;
+    if (c < g_font->first || c > g_font->last) c = '?';
+    const glyph_t *g = &g_font->glyphs[c - g_font->first];
+    return (UINTN)(((UINT64)g->advance_q6 * dh) / size);
+}
+
 UINTN text_width_px(CHAR16 *text, UINTN dh) {
     if (!text) return 0;
     UINTN pen = 0;
-    UINTN size = g_font->size;
-    while (*text) {
-        CHAR16 c = *text++;
-        if (c < g_font->first || c > g_font->last) c = '?';
-        const glyph_t *g = &g_font->glyphs[c - g_font->first];
-        pen += (UINTN)g->advance_q6 * dh / size;
-    }
+    while (*text)
+        pen += text_advance_q6(*text++, dh);
     return (pen + 32) / 64;
 }
 
-void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
-                           color_t color, UINTN dh, INTN master) {
+static void draw_text_span_px_a(gui_state_t *state, CHAR16 *text, UINTN count,
+                                INTN x, INTN y, color_t color, UINTN dh,
+                                INTN master) {
     if (!text || master <= 0 || !dh) return;
     if (master > 255) master = 255;
     font_ensure_decoded();
@@ -198,8 +202,8 @@ void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
     UINTN size = g_font->size;
     INTN baseline = y + scale_metric((INTN)g_font->ascent, dh, size);
     INTN pen64 = x * 64;
-    while (*text) {
-        CHAR16 c = *text++;
+    for (UINTN i = 0; i < count && text[i]; i++) {
+        CHAR16 c = text[i];
         if (c < g_font->first || c > g_font->last) c = '?';
         const glyph_t *g = &g_font->glyphs[c - g_font->first];
 
@@ -217,9 +221,66 @@ void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
     }
 }
 
+void draw_text_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
+                           color_t color, UINTN dh, INTN master) {
+    draw_text_span_px_a(state, text, ~(UINTN)0, x, y, color, dh, master);
+}
+
 void draw_text_px(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
                          color_t color, UINTN dh) {
     draw_text_px_a(state, text, x, y, color, dh, 255);
+}
+
+static UINTN text_fit_metrics(CHAR16 *text, UINTN dh, UINTN maxw,
+                              UINTN *out_chars, UINTN *out_prefix_px) {
+    if (out_chars) *out_chars = 0;
+    if (out_prefix_px) *out_prefix_px = 0;
+    if (!text || !text[0] || !dh) return 0;
+
+    UINTN full = text_width_px(text, dh);
+    if (full <= maxw) {
+        UINTN n = 0;
+        while (text[n]) n++;
+        if (out_chars) *out_chars = n;
+        if (out_prefix_px) *out_prefix_px = full;
+        return full;
+    }
+
+    UINTN dots = text_width_px(L"...", dh);
+    UINTN use_dots = maxw > dots;
+    UINT64 budget = (UINT64)(use_dots ? maxw - dots : maxw) << 6;
+    UINT64 wq = 0;
+    UINTN n = 0;
+    while (text[n]) {
+        UINTN adv = text_advance_q6(text[n], dh);
+        if (wq + (UINT64)adv > budget) break;
+        wq += adv;
+        n++;
+    }
+
+    UINTN prefix = (UINTN)((wq + 32) >> 6);
+    if (out_chars) *out_chars = n;
+    if (out_prefix_px) *out_prefix_px = prefix;
+    return prefix + (use_dots ? dots : 0);
+}
+
+UINTN text_fit_width_px(CHAR16 *text, UINTN dh, UINTN maxw, UINTN *chars) {
+    return text_fit_metrics(text, dh, maxw, chars, NULL);
+}
+
+void draw_text_fit_px_a(gui_state_t *state, CHAR16 *text, INTN x, INTN y,
+                        color_t color, UINTN dh, INTN master, UINTN maxw) {
+    if (!text || !text[0] || !dh) return;
+    UINTN chars = 0, prefix = 0;
+    UINTN fitted = text_fit_metrics(text, dh, maxw, &chars, &prefix);
+    if (fitted >= text_width_px(text, dh)) {
+        draw_text_px_a(state, text, x, y, color, dh, master);
+        return;
+    }
+    if (chars)
+        draw_text_span_px_a(state, text, chars, x, y, color, dh, master);
+    if (fitted > prefix)
+        draw_text_px_a(state, L"...", x + (INTN)prefix, y, color, dh, master);
 }
 
 void draw_text_centered_px(gui_state_t *state, CHAR16 *text, INTN x, UINTN w,
