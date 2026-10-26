@@ -86,12 +86,18 @@ static void intro_clear(gui_state_t *state, const intro_fit_t *fit) {
 static void intro_label(gui_state_t *state, CHAR16 *text, INTN y, UINTN size,
                         color_t color, UINTN alpha) {
     INTN pad = (INTN)(size / 2);
-    INTN w   = (INTN)text_width_px(text, size) + pad * 2;
+    UINTN maxw = state->screen_width > (UINTN)(2 * pad + 16)
+               ? state->screen_width - (UINTN)(2 * pad) : state->screen_width;
+    UINTN tw = text_fit_width_px(text, size, maxw, NULL);
+    INTN w = (INTN)tw + pad * 2;
+    if (w > (INTN)state->screen_width) w = (INTN)state->screen_width;
     if (w > 0)
         fill_round_rect(state, ((INTN)state->screen_width - w) / 2, y - pad,
                         w, (INTN)size + pad * 2, pad, COLOR_BLACK,
                         (UINT8)(alpha * 190 / 255));
-    draw_text_centered_px(state, text, 0, state->screen_width, y, color, size);
+    draw_text_fit_px_a(state, text,
+                       ((INTN)state->screen_width - (INTN)tw) / 2, y,
+                       color, size, (INTN)alpha, maxw);
 }
 
 /* The splash is the same UI as the menu, so it wears the configured title at
