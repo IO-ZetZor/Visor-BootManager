@@ -107,7 +107,6 @@ void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {
 
 int tpm_init(void) {
     if (g_probed) return g_present;
-    g_probed = 1;
 
     static EFI_GUID tcg2_guid = EFI_TCG2_PROTOCOL_GUID;
     tcg2_protocol_t *tcg = NULL;
@@ -115,6 +114,9 @@ int tpm_init(void) {
         efi_log(L"tpm: no EFI_TCG2_PROTOCOL - measured boot unavailable");
         return 0;
     }
+    /* Cache only a completed probe.  A protocol that is installed later
+     * must still be discoverable by a subsequent call. */
+    g_probed = 1;
     if (!tcg->GetCapability || !tcg->HashLogExtendEvent) {
         efi_log(L"tpm: TCG2 protocol is missing required methods - skipping");
         return 0;
