@@ -73,6 +73,8 @@ EFI_STATUS config_parse(config_t *config) {
     config->recovery_entries = 0;
     config->snapshots_mode = 1;
     config->autoboot = 0;
+    config->autoboot_key_unicode = 0;
+    config->autoboot_key_scancode = 0;
     config->mouse = 1;
     config->pointer_speed = 4;
     config->cursor = NULL;

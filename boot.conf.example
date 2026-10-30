@@ -54,9 +54,16 @@ default=0
 
 # Skip the menu and boot straight away. 1 = if only one entry exists, boot it; if
 # several exist, boot the remembered/default entry (the one default=/remember_last
-# would have preselected) - all without drawing a menu. Hold any key during power-on
-# to interrupt and show the menu anyway. 0 = always show the menu (default).
-#autoboot=0
+# would have preselected) - all without drawing a menu. Press the autoboot_key during
+# power-on to interrupt and show the menu. 0 = always show the menu (default).
+autoboot=0
+
+# Key that interrupts autoboot and opens the menu: any (default), one printable
+# character, Enter, Esc, Space, Tab, Backspace, arrows, Home/End, Insert/Delete,
+# PageUp/PageDown, or F1-F12. Printable characters are case-insensitive. UEFI reports
+# keystrokes without key-release state, so a tap and a hold both trigger the menu.
+# Example: autoboot=1 with autoboot_key=F2 skips the menu unless F2 is pressed.
+#autoboot_key=any
 
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)

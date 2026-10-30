@@ -39,6 +39,8 @@ typedef struct {
     int   file_log;
     int   editor;
     int   autoboot;
+    UINT16 autoboot_key_unicode;
+    UINT16 autoboot_key_scancode;
     CHAR16 *theme;
     CHAR16 *title;
     int   no_title;

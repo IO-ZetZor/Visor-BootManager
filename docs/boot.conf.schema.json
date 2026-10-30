@@ -447,9 +447,16 @@
     "autoboot": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one). Hold any key during power-on to force the menu.",
+      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one). Defaults to false; set autoboot_key to choose the key event that opens the menu during autoboot.",
       "$ref": "#/$defs/bool",
       "default": false
+    },
+    "autoboot_key": {
+      "x-feature": "core",
+      "x-group": "boot",
+      "description": "Key event that interrupts autoboot and opens the menu. Accepts any, one printable character, Enter, Esc, Space, Tab, Backspace, arrow and navigation keys, or F1-F12. Printable characters are case-insensitive. UEFI input does not expose key-release state, so taps and holds both trigger the menu.",
+      "type": "string",
+      "default": "any"
     },
     "background": {
       "x-feature": "gui",
