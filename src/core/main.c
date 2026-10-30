@@ -86,6 +86,29 @@ static boot_entry_t* main_entry_at(gui_state_t *state, UINTN idx) {
     return e;
 }
 
+static int autoboot_key_matches(const config_t *config,
+                                const EFI_INPUT_KEY *key) {
+    if (!config->autoboot_key_unicode && !config->autoboot_key_scancode)
+        return 1;
+
+    if (config->autoboot_key_scancode)
+        return key->ScanCode == config->autoboot_key_scancode;
+
+    CHAR16 expected = (CHAR16)config->autoboot_key_unicode;
+    CHAR16 actual = key->UnicodeChar;
+    if (expected >= L'A' && expected <= L'Z') expected += L'a' - L'A';
+    if (actual >= L'A' && actual <= L'Z') actual += L'a' - L'A';
+    return actual == expected;
+}
+
+static int autoboot_menu_requested(const config_t *config) {
+    EFI_INPUT_KEY key;
+    while (!EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &key))) {
+        if (autoboot_key_matches(config, &key)) return 1;
+    }
+    return 0;
+}
+
 static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
                            UINTN *first_new) {
     config_t *cfg = (config_t*)ctx;
@@ -506,8 +529,7 @@ select_entry:
     }
 
     if (!force_menu && (config.autoboot || intro_boot) && gui.entry_count >= 1) {
-        EFI_INPUT_KEY abk;
-        if (EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &abk))) {
+        if (!autoboot_menu_requested(&config)) {
             UINTN pick = (gui.entry_count == 1) ? 0
                        : (gui.selected < gui.entry_count ? gui.selected : 0);
             selected = gui.entries;
@@ -522,7 +544,7 @@ select_entry:
             if (intro_boot)
                 efi_log(L"main: intro_action=boot cancelled by a key - showing menu");
             else
-                efi_log(L"main: autoboot armed but a key was pressed - showing menu");
+                efi_log(L"main: autoboot interrupt key pressed - showing menu");
         }
     }
 

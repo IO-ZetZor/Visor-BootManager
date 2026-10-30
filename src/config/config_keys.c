@@ -121,6 +121,66 @@ static int parse_hotspot(CHAR16 *value, INTN *out_x, INTN *out_y) {
     return 1;
 }
 
+static int autoboot_key_value(CHAR16 *value, UINT16 *unicode,
+                              UINT16 *scancode) {
+    static const struct { const CHAR16 *name; UINT16 unicode, scancode; } keys[] = {
+        { L"enter",     0x0D, 0 },
+        { L"return",    0x0D, 0 },
+        { L"esc",       0x1B, 0 },
+        { L"escape",    0x1B, 0 },
+        { L"space",     0x20, 0 },
+        { L"tab",       0x09, 0 },
+        { L"backspace", 0x08, 0 },
+        { L"up",        0, 0x01 },
+        { L"down",      0, 0x02 },
+        { L"right",     0, 0x03 },
+        { L"left",      0, 0x04 },
+        { L"home",      0, 0x05 },
+        { L"end",       0, 0x06 },
+        { L"insert",    0, 0x07 },
+        { L"delete",    0, 0x08 },
+        { L"pageup",    0, 0x09 },
+        { L"pagedown",  0, 0x0A },
+        { NULL, 0, 0 }
+    };
+
+    if (!value || !value[0]) return 0;
+    if (text_eq_ci(value, L"any")) {
+        *unicode = 0;
+        *scancode = 0;
+        return 1;
+    }
+
+    for (UINTN i = 0; keys[i].name; i++) {
+        if (text_eq_ci(value, keys[i].name)) {
+            *unicode = keys[i].unicode;
+            *scancode = keys[i].scancode;
+            return 1;
+        }
+    }
+
+    if ((value[0] == L'F' || value[0] == L'f') && value[1]) {
+        UINTN number = 0;
+        for (UINTN i = 1; value[i]; i++) {
+            if (value[i] < L'0' || value[i] > L'9') return 0;
+            number = number * 10 + (UINTN)(value[i] - L'0');
+        }
+        if (number >= 1 && number <= 12) {
+            *unicode = 0;
+            *scancode = (UINT16)(0x0A + number);
+            return 1;
+        }
+        return 0;
+    }
+
+    if (value[0] >= 0x20 && value[0] <= 0x7E && !value[1]) {
+        *unicode = value[0];
+        *scancode = 0;
+        return 1;
+    }
+    return 0;
+}
+
 void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     if (efi_strcmp(key, L"timeout") == 0) {
         config->timeout = (*value == '-') ? -1 : (INTN)parse_uint(value);
@@ -144,6 +204,14 @@ void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         center_info_set = 1;
     } else if (efi_strcmp(key, L"autoboot") == 0) {
         config->autoboot = (*value == '1' || *value == 't' || *value == 'y');
+    } else if (efi_strcmp(key, L"autoboot_key") == 0) {
+        UINT16 unicode = 0, scancode = 0;
+        if (autoboot_key_value(value, &unicode, &scancode)) {
+            config->autoboot_key_unicode = unicode;
+            config->autoboot_key_scancode = scancode;
+        } else {
+            efi_log(L"WARN: invalid autoboot_key; use any, one printable character, a named key, or F1-F12");
+        }
     } else if (efi_strcmp(key, L"remember_last") == 0 || efi_strcmp(key, L"remember") == 0) {
         config->remember_last = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"selfheal") == 0) {
