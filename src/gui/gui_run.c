@@ -26,6 +26,7 @@ boot_entry_t* gui_run(gui_state_t *state) {
     int  need_redraw = 1;
     int  full_redraw = 1;
     int  intro_fade = 1;
+    int  first_present_done = 0;
 
     state->ss_last_input_ms = efi_get_tick();
 
@@ -81,6 +82,8 @@ boot_entry_t* gui_run(gui_state_t *state) {
         }
 
         if (need_redraw) {
+            if (!first_present_done)
+                efi_log(L"gui: first redraw begin");
             INTN ghost_y = cursor_lift(state);
             if (cap_overlay_live(state)) full_redraw = 1;
             gui_draw_menu(state, !full_redraw);
@@ -127,11 +130,17 @@ boot_entry_t* gui_run(gui_state_t *state) {
             }
 
             if (intro_fade && full_redraw && !state->editing) {
+                if (!first_present_done)
+                    efi_log(L"gui: first present path=fade");
                 gui_fade_in_current(state);
                 intro_fade = 0;
             } else if (full_redraw || state->editing) {
+                if (!first_present_done)
+                    efi_log(L"gui: first present path=full");
                 gui_present(state);
             } else {
+                if (!first_present_done)
+                    efi_log(L"gui: first present path=bands");
                 for (int b = 0; b < state->band_n; b++)
                     gui_present_band(state, state->band_y[b], state->band_h[b]);
                 if (ghost_y >= 0) gui_present_band(state, ghost_y, state->cursor_box_h);
@@ -143,6 +152,10 @@ boot_entry_t* gui_run(gui_state_t *state) {
                  * redrew, so its own strip still has to be pushed out. */
                 if (cursor_on)
                     gui_present_band(state, cursor_box_y(state), state->cursor_box_h);
+            }
+            if (!first_present_done) {
+                efi_log(L"gui: first present complete");
+                first_present_done = 1;
             }
             if (state->editing) intro_fade = 0;
             need_redraw = state->anim_active || state->page_anim || state->hp_anim;

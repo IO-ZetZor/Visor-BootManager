@@ -137,11 +137,12 @@ static UINT64 pte_set_wc(UINT64 va) {
     UINT64 *pdpt = (UINT64*)(*e & PTE_ADDR);
     e = &pdpt[(va >> 30) & 0x1FF];
     if (!(*e & PTE_P)) return 0;
-    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 30; }
+    /* Do not retag huge mappings: a 1 GiB PAT flip can affect unrelated MMIO. */
+    if (*e & PTE_PS) return 0;
     UINT64 *pd = (UINT64*)(*e & PTE_ADDR);
     e = &pd[(va >> 21) & 0x1FF];
     if (!(*e & PTE_P)) return 0;
-    if (*e & PTE_PS) { *e = (*e & ~(PTE_PCD | PTE_PATLG)) | PTE_PWT; return 1ull << 21; }
+    if (*e & PTE_PS) return 0;
     UINT64 *pt = (UINT64*)(*e & PTE_ADDR);
     e = &pt[(va >> 12) & 0x1FF];
     if (!(*e & PTE_P)) return 0;
