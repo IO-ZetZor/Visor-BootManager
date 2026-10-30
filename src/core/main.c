@@ -239,8 +239,10 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         (int)config.entry_count, config.entry_count == 1 ? L"y" : L"ies"); efi_log(d); }
     if (config.entry_count == 0)
         efi_log(L"WARN: no boot entries found - starting from zero");
+    efi_log(L"main: post-config - applying boot/runtime features");
 
     if (config.tpm) {
+        efi_log(L"main: post-config - initialising TPM measurements");
         tpm_set_pcrs(config.tpm_pcr_config, config.tpm_pcr_cmdline);
         if (tpm_init()) {
 
@@ -257,8 +259,10 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     } else {
         efi_log(L"main: tpm=0 in config - skipping measured boot");
     }
+    efi_log(L"main: post-config - TPM stage complete");
 
     if (config.loader_vars) {
+        efi_log(L"main: post-config - exporting Loader* variables");
         loader_export_common(&config);
         loader_export_entries(config.entries);
         loader_pick = loader_apply_overrides(&config, config.entries,
@@ -285,6 +289,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     } else {
         efi_log(L"main: selfheal=0 in config - boot self-heal disabled");
     }
+    efi_log(L"main: post-config - self-heal stage complete");
 
     if (config.text_menu && !text_mode) {
         efi_log(L"main: text_menu=1 in config - using text mode despite available graphics");
@@ -309,6 +314,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         config_hotplug_arm(&config);
         efi_log(L"main: hotplug volume watch armed");
     }
+    efi_log(L"main: post-config - preparing GUI state");
     gui.entries         = config.entries;
     gui.entry_count     = config.entry_count;
     gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
@@ -441,6 +447,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     if (!text_mode) {
         /* Before the first pixel: if the ESP is armed, everything drawn from
          * here on - easter egg, fade-in, menu, fade-out - is recorded. */
+        efi_log(L"main: pre-menu - arming capture/session hooks");
         cap_session_arm();
 
         int rbd_played = rbd_check_and_play(&gui);
@@ -455,6 +462,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     gui.editor_enabled = config.editor;
     gui.mouse_enabled  = config.mouse;
     gui.pointer_speed  = config.pointer_speed;
+    if (!text_mode && config.mouse)
+        efi_log(L"main: pre-menu - configuring pointer");
     if (!text_mode && config.mouse)
         gui_set_cursor(&gui, config.cursor, config.cursor_size,
                        config.cursor_hot_x, config.cursor_hot_y);
@@ -550,6 +559,7 @@ select_entry:
 
     if (!autobooted && !retry_selected) {
 
+        efi_log(L"main: pre-menu - resetting console input");
         ST->ConIn->Reset(ST->ConIn, FALSE);
         if (!text_mode && !gui_closed && config.background && !gui.background) {
             efi_log(L"main: loading background image");
