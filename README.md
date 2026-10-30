@@ -63,6 +63,8 @@ Afterwards, edit `<ESP>/EFI/visor/boot.conf` to point at your real kernels — o
 delete it and let auto-detection do the work. `visor update` pulls and
 reinstalls the latest version at any time.
 
+To install Visor on a removable USB drive, see the [USB setup guide](docs/usb-setup.md).
+
 ### Arch Linux (AUR)
 
 Visor is available on the AUR. Install it with your favourite AUR helper:
