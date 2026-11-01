@@ -105,11 +105,79 @@ void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {
     g_pcr_cmdline = cmdline_pcr;
 }
 
+/* Vendor variable holding the TPM stage marker.  Non-volatile so it survives
+ * the reset that a hung probe forces the user to perform.
+ *
+ *   absent   - never probed
+ *   PROBING  - armed, tpm_init() has not returned yet
+ *   DONE     - the probe completed
+ *   DISABLED - a previous boot died inside the probe; do not probe again until
+ *              the user clears the variable (after fixing the TPM in firmware
+ *              setup) - from Linux:
+ *                rm /sys/firmware/efi/efivars/VisorTpmStage-9f1c2d34-5a6b-4c7d-8e9f-a0b1c2d3e4f5 */
+#define VISOR_TPM_STAGE_PROBING  1
+#define VISOR_TPM_STAGE_DONE     2
+#define VISOR_TPM_STAGE_DISABLED 3
+
+static EFI_GUID g_visor_tpm_guid = {
+    0x9f1c2d34, 0x5a6b, 0x4c7d, { 0x8e, 0x9f, 0xa0, 0xb1, 0xc2, 0xd3, 0xe4, 0xf5 }
+};
+
+static int tpm_stage_read(void) {
+    UINT8  v   = 0;
+    UINTN  sz  = sizeof(v);
+    UINT32 attr = 0;
+    EFI_STATUS s = RT->GetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
+                                   &attr, &sz, &v);
+    if (EFI_ERROR(s) || sz != sizeof(v)) return 0;
+    return (int)v;
+}
+
+static EFI_STATUS tpm_stage_write(UINT8 v) {
+    return RT->SetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
+                           EFI_VARIABLE_NON_VOLATILE |
+                           EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                           EFI_VARIABLE_RUNTIME_ACCESS,
+                           sizeof(v), &v);
+}
+
+int tpm_probe_skip(void) {
+    int stage = tpm_stage_read();
+    if (stage == VISOR_TPM_STAGE_PROBING) {
+        /* This boot is running after a reset in the middle of the probe, so
+         * the probe is what killed the machine.  Record it permanently: the
+         * firmware state that caused it does not change on its own, and a
+         * second hang would cost the user another power cycle. */
+        efi_log(L"tpm: last boot stopped inside the TPM probe - disabling measured boot");
+        tpm_stage_write(VISOR_TPM_STAGE_DISABLED);
+        return 1;
+    }
+    if (stage == VISOR_TPM_STAGE_DISABLED) {
+        efi_log(L"tpm: measured boot stays off; clear the VisorTpmStage variable to retry");
+        return 1;
+    }
+    return 0;
+}
+
+EFI_STATUS tpm_stage_begin(void) {
+    /* Armed on every boot.  Leaving DONE in place would make the next hang
+     * undetectable - which is exactly the case the marker exists for. */
+    return tpm_stage_write(VISOR_TPM_STAGE_PROBING);
+}
+
+void tpm_stage_end(void) {
+    tpm_stage_write(VISOR_TPM_STAGE_DONE);
+}
+
 int tpm_init(void) {
     if (g_probed) return g_present;
 
     static EFI_GUID tcg2_guid = EFI_TCG2_PROTOCOL_GUID;
     tcg2_protocol_t *tcg = NULL;
+    /* Checkpoints around the two firmware calls that can hang.  If a future
+     * log stops after one of these lines and before the next, that call is
+     * the one blocking on this platform. */
+    efi_log(L"tpm: locating EFI_TCG2_PROTOCOL");
     if (EFI_ERROR(BS->LocateProtocol(&tcg2_guid, NULL, (void**)&tcg)) || !tcg) {
         efi_log(L"tpm: no EFI_TCG2_PROTOCOL - measured boot unavailable");
         return 0;
@@ -123,10 +191,26 @@ int tpm_init(void) {
     }
 
     tcg2_capability_t cap;
-    ZeroMem(&cap, sizeof(cap));
+    SetMem(&cap, sizeof(cap), 0xFF);
     cap.Size = (UINT8)sizeof(cap);
+    efi_log(L"tpm: querying TCG2 capabilities");
     if (EFI_ERROR(tcg->GetCapability(tcg, &cap))) {
         efi_log(L"tpm: TCG2 GetCapability failed - skipping measurements");
+        return 0;
+    }
+    /* A protocol whose capability block is empty or carries a placeholder
+     * manufacturer id cannot drive a real TPM; do not build measurements on
+     * top of it.  The structure starts out filled with 0xFF because cap.Size
+     * is caller-initialised: a firmware that returns success and writes
+     * nothing would otherwise look like a complete block of zeroes.  A short
+     * response has to leave that pattern in ManufacturerID. */
+    if (cap.Size != (UINT8)sizeof(cap) ||
+        cap.ManufacturerID == 0 || cap.ManufacturerID == 0xFFFFFFFF) {
+        CHAR16 why[96];
+        SPrint(why, sizeof(why),
+               L"tpm: incomplete capability block (size=%d mfr=0x%08x) - skipping",
+               (int)cap.Size, (unsigned)cap.ManufacturerID);
+        efi_log(why);
         return 0;
     }
     if (!cap.TPMPresentFlag) {
@@ -134,10 +218,20 @@ int tpm_init(void) {
         return 0;
     }
 
+    /* ActivePcrBanks is part of the block we just validated, so a 0xFFFFFFFF
+     * value means the firmware answered only the leading fields.  Ask for the
+     * bank mask explicitly instead of publishing it unset, and treat a failed
+     * or missing query as a reason to stay out of measured boot. */
+    UINT32 banks = cap.ActivePcrBanks;
+    if (banks == 0xFFFFFFFF || banks == 0) {
+        if (!tcg->GetActivePcrBanks || EFI_ERROR(tcg->GetActivePcrBanks(tcg, &banks))) {
+            efi_log(L"tpm: capability block has no active banks and GetActivePcrBanks failed - skipping");
+            return 0;
+        }
+    }
+
     g_tcg2  = tcg;
-    g_banks = cap.ActivePcrBanks;
-    if (!g_banks && tcg->GetActivePcrBanks)
-        tcg->GetActivePcrBanks(tcg, &g_banks);
+    g_banks = banks;
     g_present = 1;
 
     CHAR16 d[160];

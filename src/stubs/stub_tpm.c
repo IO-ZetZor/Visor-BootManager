@@ -25,3 +25,9 @@ void tpm_publish_banks(void) { }
 void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {
     (void)config_pcr; (void)cmdline_pcr;
 }
+
+int tpm_probe_skip(void) { return 0; }
+
+EFI_STATUS tpm_stage_begin(void) { return EFI_SUCCESS; }
+
+void tpm_stage_end(void) { }
