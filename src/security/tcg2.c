@@ -191,7 +191,7 @@ int tpm_init(void) {
     }
 
     tcg2_capability_t cap;
-    ZeroMem(&cap, sizeof(cap));
+    SetMem(&cap, sizeof(cap), 0xFF);
     cap.Size = (UINT8)sizeof(cap);
     efi_log(L"tpm: querying TCG2 capabilities");
     if (EFI_ERROR(tcg->GetCapability(tcg, &cap))) {
@@ -200,14 +200,15 @@ int tpm_init(void) {
     }
     /* A protocol whose capability block is empty or carries a placeholder
      * manufacturer id cannot drive a real TPM; do not build measurements on
-     * top of it.  The size has to cover the field itself, not just its
-     * offset: a block that stops at ActivePcrBanks does not contain it, and
-     * reading it would publish an empty bank list. */
-    if (cap.Size < (UINT8)sizeof(tcg2_capability_t) ||
+     * top of it.  The structure starts out filled with 0xFF because cap.Size
+     * is caller-initialised: a firmware that returns success and writes
+     * nothing would otherwise look like a complete block of zeroes.  A short
+     * response has to leave that pattern in ManufacturerID. */
+    if (cap.Size != (UINT8)sizeof(cap) ||
         cap.ManufacturerID == 0 || cap.ManufacturerID == 0xFFFFFFFF) {
         CHAR16 why[96];
         SPrint(why, sizeof(why),
-               L"tpm: bogus capability block (size=%d mfr=0x%08x) - skipping",
+               L"tpm: incomplete capability block (size=%d mfr=0x%08x) - skipping",
                (int)cap.Size, (unsigned)cap.ManufacturerID);
         efi_log(why);
         return 0;
@@ -217,10 +218,20 @@ int tpm_init(void) {
         return 0;
     }
 
+    /* ActivePcrBanks is part of the block we just validated, so a 0xFFFFFFFF
+     * value means the firmware answered only the leading fields.  Ask for the
+     * bank mask explicitly instead of publishing it unset, and treat a failed
+     * or missing query as a reason to stay out of measured boot. */
+    UINT32 banks = cap.ActivePcrBanks;
+    if (banks == 0xFFFFFFFF || banks == 0) {
+        if (!tcg->GetActivePcrBanks || EFI_ERROR(tcg->GetActivePcrBanks(tcg, &banks))) {
+            efi_log(L"tpm: capability block has no active banks and GetActivePcrBanks failed - skipping");
+            return 0;
+        }
+    }
+
     g_tcg2  = tcg;
-    g_banks = cap.ActivePcrBanks;
-    if (!g_banks && tcg->GetActivePcrBanks)
-        tcg->GetActivePcrBanks(tcg, &g_banks);
+    g_banks = banks;
     g_present = 1;
 
     CHAR16 d[160];
