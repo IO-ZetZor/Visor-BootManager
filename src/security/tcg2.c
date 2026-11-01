@@ -105,11 +105,60 @@ void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {
     g_pcr_cmdline = cmdline_pcr;
 }
 
+/* Vendor variable holding the TPM stage marker.  Non-volatile so it survives
+ * the reset that a hung probe forces the user to perform. */
+#define VISOR_TPM_STAGE_PROBING 1
+#define VISOR_TPM_STAGE_DONE    2
+
+static EFI_GUID g_visor_tpm_guid = {
+    0x9f1c2d34, 0x5a6b, 0x4c7d, { 0x8e, 0x9f, 0xa0, 0xb1, 0xc2, 0xd3, 0xe4, 0xf5 }
+};
+
+static int tpm_stage_read(void) {
+    UINT8  v   = 0;
+    UINTN  sz  = sizeof(v);
+    UINT32 attr = 0;
+    EFI_STATUS s = RT->GetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
+                                   &attr, &sz, &v);
+    if (EFI_ERROR(s) || sz != sizeof(v)) return 0;
+    return (int)v;
+}
+
+static void tpm_stage_write(UINT8 v) {
+    RT->SetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
+                    EFI_VARIABLE_NON_VOLATILE |
+                    EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                    EFI_VARIABLE_RUNTIME_ACCESS,
+                    sizeof(v), &v);
+}
+
+int tpm_previous_probe_hung(void) {
+    if (tpm_stage_read() != VISOR_TPM_STAGE_PROBING) return 0;
+    efi_log(L"tpm: last boot stopped inside the TPM probe - skipping measured boot");
+    efi_log(L"tpm: set tpm=0 in boot.conf to skip it permanently");
+    return 1;
+}
+
+void tpm_stage_begin(void) {
+    /* Steady state writes nothing: the marker is only rewritten when a
+     * previous boot did not reach the end of the TPM stage. */
+    if (tpm_stage_read() != VISOR_TPM_STAGE_DONE)
+        tpm_stage_write(VISOR_TPM_STAGE_PROBING);
+}
+
+void tpm_stage_end(void) {
+    tpm_stage_write(VISOR_TPM_STAGE_DONE);
+}
+
 int tpm_init(void) {
     if (g_probed) return g_present;
 
     static EFI_GUID tcg2_guid = EFI_TCG2_PROTOCOL_GUID;
     tcg2_protocol_t *tcg = NULL;
+    /* Checkpoints around the two firmware calls that can hang.  If a future
+     * log stops after one of these lines and before the next, that call is
+     * the one blocking on this platform. */
+    efi_log(L"tpm: locating EFI_TCG2_PROTOCOL");
     if (EFI_ERROR(BS->LocateProtocol(&tcg2_guid, NULL, (void**)&tcg)) || !tcg) {
         efi_log(L"tpm: no EFI_TCG2_PROTOCOL - measured boot unavailable");
         return 0;
@@ -125,8 +174,21 @@ int tpm_init(void) {
     tcg2_capability_t cap;
     ZeroMem(&cap, sizeof(cap));
     cap.Size = (UINT8)sizeof(cap);
+    efi_log(L"tpm: querying TCG2 capabilities");
     if (EFI_ERROR(tcg->GetCapability(tcg, &cap))) {
         efi_log(L"tpm: TCG2 GetCapability failed - skipping measurements");
+        return 0;
+    }
+    /* A protocol whose capability block is empty or carries a placeholder
+     * manufacturer id cannot drive a real TPM; do not build measurements on
+     * top of it. */
+    if (cap.Size < (UINT8)__builtin_offsetof(tcg2_capability_t, ActivePcrBanks) ||
+        cap.ManufacturerID == 0 || cap.ManufacturerID == 0xFFFFFFFF) {
+        CHAR16 why[96];
+        SPrint(why, sizeof(why),
+               L"tpm: bogus capability block (size=%d mfr=0x%08x) - skipping",
+               (int)cap.Size, (unsigned)cap.ManufacturerID);
+        efi_log(why);
         return 0;
     }
     if (!cap.TPMPresentFlag) {

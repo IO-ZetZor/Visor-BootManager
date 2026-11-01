@@ -26,4 +26,16 @@ int tpm_measure_cmdline(CHAR16 *cmdline);
 
 void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr);
 
+/* Boot-loop breaker around the firmware TPM probe.  The probe can hang inside
+ * firmware when the platform advertises a TPM it has actually disabled, and no
+ * software watchdog can recover from that.  So: a non-volatile marker is set
+ * before tpm_init() and cleared once the TPM stage completes.  If the marker
+ * is still "probing" on the next boot, the previous boot died in that probe
+ * and measured boot is skipped for this boot instead of hanging again. */
+int tpm_previous_probe_hung(void);
+
+void tpm_stage_begin(void);
+
+void tpm_stage_end(void);
+
 #endif

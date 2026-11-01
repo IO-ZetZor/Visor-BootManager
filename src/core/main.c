@@ -240,7 +240,16 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     if (config.entry_count == 0)
         efi_log(L"WARN: no boot entries found - starting from zero");
 
+    /* A platform can advertise a TPM through EFI_TCG2_PROTOCOL while BIOS has
+     * it disabled; the probe then blocks inside firmware with no way back.
+     * If the previous boot died in that probe, do not repeat it. */
+    if (config.tpm && tpm_previous_probe_hung()) {
+        efi_log(L"main: last boot hung in the TPM probe - skipping measured boot this boot");
+        config.tpm = 0;
+    }
+
     if (config.tpm) {
+        tpm_stage_begin();
         tpm_set_pcrs(config.tpm_pcr_config, config.tpm_pcr_cmdline);
         if (tpm_init()) {
 
@@ -254,6 +263,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
                 efi_log(L"tpm: no boot.conf on disk - nothing to measure into the config PCR");
             }
         }
+        tpm_stage_end();
     } else {
         efi_log(L"main: tpm=0 in config - skipping measured boot");
     }
