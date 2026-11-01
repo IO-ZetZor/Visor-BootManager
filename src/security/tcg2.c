@@ -106,9 +106,18 @@ void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr) {
 }
 
 /* Vendor variable holding the TPM stage marker.  Non-volatile so it survives
- * the reset that a hung probe forces the user to perform. */
-#define VISOR_TPM_STAGE_PROBING 1
-#define VISOR_TPM_STAGE_DONE    2
+ * the reset that a hung probe forces the user to perform.
+ *
+ *   absent   - never probed
+ *   PROBING  - armed, tpm_init() has not returned yet
+ *   DONE     - the probe completed
+ *   DISABLED - a previous boot died inside the probe; do not probe again until
+ *              the user clears the variable (after fixing the TPM in firmware
+ *              setup) - from Linux:
+ *                rm /sys/firmware/efi/efivars/VisorTpmStage-9f1c2d34-5a6b-4c7d-8e9f-a0b1c2d3e4f5 */
+#define VISOR_TPM_STAGE_PROBING  1
+#define VISOR_TPM_STAGE_DONE     2
+#define VISOR_TPM_STAGE_DISABLED 3
 
 static EFI_GUID g_visor_tpm_guid = {
     0x9f1c2d34, 0x5a6b, 0x4c7d, { 0x8e, 0x9f, 0xa0, 0xb1, 0xc2, 0xd3, 0xe4, 0xf5 }
@@ -124,26 +133,36 @@ static int tpm_stage_read(void) {
     return (int)v;
 }
 
-static void tpm_stage_write(UINT8 v) {
-    RT->SetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
-                    EFI_VARIABLE_NON_VOLATILE |
-                    EFI_VARIABLE_BOOTSERVICE_ACCESS |
-                    EFI_VARIABLE_RUNTIME_ACCESS,
-                    sizeof(v), &v);
+static EFI_STATUS tpm_stage_write(UINT8 v) {
+    return RT->SetVariable(L"VisorTpmStage", &g_visor_tpm_guid,
+                           EFI_VARIABLE_NON_VOLATILE |
+                           EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                           EFI_VARIABLE_RUNTIME_ACCESS,
+                           sizeof(v), &v);
 }
 
-int tpm_previous_probe_hung(void) {
-    if (tpm_stage_read() != VISOR_TPM_STAGE_PROBING) return 0;
-    efi_log(L"tpm: last boot stopped inside the TPM probe - skipping measured boot");
-    efi_log(L"tpm: set tpm=0 in boot.conf to skip it permanently");
-    return 1;
+int tpm_probe_skip(void) {
+    int stage = tpm_stage_read();
+    if (stage == VISOR_TPM_STAGE_PROBING) {
+        /* This boot is running after a reset in the middle of the probe, so
+         * the probe is what killed the machine.  Record it permanently: the
+         * firmware state that caused it does not change on its own, and a
+         * second hang would cost the user another power cycle. */
+        efi_log(L"tpm: last boot stopped inside the TPM probe - disabling measured boot");
+        tpm_stage_write(VISOR_TPM_STAGE_DISABLED);
+        return 1;
+    }
+    if (stage == VISOR_TPM_STAGE_DISABLED) {
+        efi_log(L"tpm: measured boot stays off; clear the VisorTpmStage variable to retry");
+        return 1;
+    }
+    return 0;
 }
 
-void tpm_stage_begin(void) {
-    /* Steady state writes nothing: the marker is only rewritten when a
-     * previous boot did not reach the end of the TPM stage. */
-    if (tpm_stage_read() != VISOR_TPM_STAGE_DONE)
-        tpm_stage_write(VISOR_TPM_STAGE_PROBING);
+EFI_STATUS tpm_stage_begin(void) {
+    /* Armed on every boot.  Leaving DONE in place would make the next hang
+     * undetectable - which is exactly the case the marker exists for. */
+    return tpm_stage_write(VISOR_TPM_STAGE_PROBING);
 }
 
 void tpm_stage_end(void) {

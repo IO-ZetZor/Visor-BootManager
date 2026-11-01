@@ -31,10 +31,14 @@ void tpm_set_pcrs(UINTN config_pcr, UINTN cmdline_pcr);
  * software watchdog can recover from that.  So: a non-volatile marker is set
  * before tpm_init() and cleared once the TPM stage completes.  If the marker
  * is still "probing" on the next boot, the previous boot died in that probe
- * and measured boot is skipped for this boot instead of hanging again. */
-int tpm_previous_probe_hung(void);
+ * and measured boot stays off until the user clears the marker.
+ *
+ * The marker is armed on every boot on purpose: if it were only written when
+ * missing, a machine that probed successfully once would carry DONE forever
+ * and a later hang would go undetected. */
+int tpm_probe_skip(void);
 
-void tpm_stage_begin(void);
+EFI_STATUS tpm_stage_begin(void);
 
 void tpm_stage_end(void);
 

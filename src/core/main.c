@@ -154,116 +154,127 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         } else if (key.UnicodeChar >= 0x20 && len < 511) {
             buf[len++] = key.UnicodeChar;
         } else {
-            continue;
+                continue;
+            }
+
+            buf[len] = 0;
+            CHAR16 echo[520];
+            UINTN k = 0;
+            echo[k++] = L'\r';
+            for (UINTN i = 0; label[i] && k < 500; i++) echo[k++] = label[i];
+            for (UINTN i = 0; i < len && k < 515; i++) echo[k++] = reveal ? buf[i] : L'*';
+            echo[k++] = L' ';
+            echo[k] = 0;
+            efi_print(echo);
         }
 
         buf[len] = 0;
-        CHAR16 echo[520];
-        UINTN k = 0;
-        echo[k++] = L'\r';
-        for (UINTN i = 0; label[i] && k < 500; i++) echo[k++] = label[i];
-        for (UINTN i = 0; i < len && k < 515; i++) echo[k++] = reveal ? buf[i] : L'*';
-        echo[k++] = L' ';
-        echo[k] = 0;
-        efi_print(echo);
+        efi_print(L"\r\n");
+        CHAR16 *out = efi_strdup(buf);
+        for (UINTN i = 0; i < 512; i++) buf[i] = 0;
+        if (!out) efi_log(L"ERROR: out of memory copying encrypted boot password");
+        return out;
     }
 
-    buf[len] = 0;
-    efi_print(L"\r\n");
-    CHAR16 *out = efi_strdup(buf);
-    for (UINTN i = 0; i < 512; i++) buf[i] = 0;
-    if (!out) efi_log(L"ERROR: out of memory copying encrypted boot password");
-    return out;
-}
+    EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
+        /* Our _entry() already ran InitializeLib(NULL, ...), so this call returns
+         * immediately.  Keep it for stock-entry builds and set the globals again
+         * explicitly: the project uses IH rather than gnu-efi's LibImageHandle. */
+        InitializeLib(image_handle, system_table);
 
-EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
-    /* Our _entry() already ran InitializeLib(NULL, ...), so this call returns
-     * immediately.  Keep it for stock-entry builds and set the globals again
-     * explicitly: the project uses IH rather than gnu-efi's LibImageHandle. */
-    InitializeLib(image_handle, system_table);
+        ST = system_table;
+        BS = system_table->BootServices;
+        RT = system_table->RuntimeServices;
+        IH = image_handle;
 
-    ST = system_table;
-    BS = system_table->BootServices;
-    RT = system_table->RuntimeServices;
-    IH = image_handle;
+        /* Second checkpoint.  _entry() printed the first one immediately after
+         * self-relocation; a diagnostic build also prints a stage-0 line from the
+         * PE entry point.  If this line appears and the machine still freezes, the
+         * fault is after console setup; if it never appears, it is in the entry
+         * path or the safe library initialization above. */
+        efi_print(L"Visor loading...\r\n");
 
-    /* Second checkpoint.  _entry() printed the first one immediately after
-     * self-relocation; a diagnostic build also prints a stage-0 line from the
-     * PE entry point.  If this line appears and the machine still freezes, the
-     * fault is after console setup; if it never appears, it is in the entry
-     * path or the safe library initialization above. */
-    efi_print(L"Visor loading...\r\n");
+        loader_mark_init();
 
-    loader_mark_init();
+        efi_log_set_file(0);
+        int early_file_log = config_early_file_log_enabled();
+        efi_log_set_file(early_file_log);
+        if (early_file_log) efi_log_begin();
+        else efi_print(L"Visor: boot logging disabled by config\r\n");
+        efi_log(L"main: efi_main entered, services initialised");
 
-    efi_log_set_file(0);
-    int early_file_log = config_early_file_log_enabled();
-    efi_log_set_file(early_file_log);
-    if (early_file_log) efi_log_begin();
-    else efi_print(L"Visor: boot logging disabled by config\r\n");
-    efi_log(L"main: efi_main entered, services initialised");
+        ST->ConOut->ClearScreen(ST->ConOut);
+        ST->ConOut->EnableCursor(ST->ConOut, FALSE);
 
-    ST->ConOut->ClearScreen(ST->ConOut);
-    ST->ConOut->EnableCursor(ST->ConOut, FALSE);
-
-    efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
-    gui_state_t gui = {0};
-    int text_mode = 0;
-    UINTN loader_pick = (UINTN)-1;
-    EFI_STATUS status = gui_init(&gui);
-    if (EFI_ERROR(status)) {
-        efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
-        efi_print(L"Graphics unavailable - using text menu\r\n");
-        text_mode = 1;
-        gui.selected = 0;
-        gui.timeout_active = 1;
-    } else {
-        efi_log(L"main: GUI ready");
-    }
-
-    efi_log(L"main: loading filesystem drivers from \\EFI\\visor\\drivers");
-    efi_load_fs_drivers();
-
-    efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
-    config_t config;
-
-    efi_fs_drivers_set_lazy(0);
-    status = config_parse(&config);
-    efi_log_set_file(config.file_log);
-    efi_log_rotate();
-    if (EFI_ERROR(status)) {
-        efi_log(L"WARN: config_parse returned error - using auto-detected entries");
-        efi_print(L"Warning: Config parse failed, using auto-detect\r\n");
-    }
-    { CHAR16 d[80]; SPrint(d, sizeof(d), L"main: config parsed, %d entr%s",
-        (int)config.entry_count, config.entry_count == 1 ? L"y" : L"ies"); efi_log(d); }
-    if (config.entry_count == 0)
-        efi_log(L"WARN: no boot entries found - starting from zero");
-
-    /* A platform can advertise a TPM through EFI_TCG2_PROTOCOL while BIOS has
-     * it disabled; the probe then blocks inside firmware with no way back.
-     * If the previous boot died in that probe, do not repeat it. */
-    if (config.tpm && tpm_previous_probe_hung()) {
-        efi_log(L"main: last boot hung in the TPM probe - skipping measured boot this boot");
-        config.tpm = 0;
-    }
-
-    if (config.tpm) {
-        tpm_stage_begin();
-        tpm_set_pcrs(config.tpm_pcr_config, config.tpm_pcr_cmdline);
-        if (tpm_init()) {
-
-            efi_file_buffer_t *cfg_raw = efi_load_file(CONFIG_FILE);
-            if (cfg_raw) {
-                if (cfg_raw->data && cfg_raw->size)
-                    tpm_measure_config(cfg_raw->data, cfg_raw->size, L"boot.conf");
-                if (cfg_raw->data) efi_free_pool(cfg_raw->data);
-                efi_free_pool(cfg_raw);
-            } else {
-                efi_log(L"tpm: no boot.conf on disk - nothing to measure into the config PCR");
-            }
+        efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
+        gui_state_t gui = {0};
+        int text_mode = 0;
+        UINTN loader_pick = (UINTN)-1;
+        EFI_STATUS status = gui_init(&gui);
+        if (EFI_ERROR(status)) {
+            efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
+            efi_print(L"Graphics unavailable - using text menu\r\n");
+            text_mode = 1;
+            gui.selected = 0;
+            gui.timeout_active = 1;
+        } else {
+            efi_log(L"main: GUI ready");
         }
-        tpm_stage_end();
+
+        efi_log(L"main: loading filesystem drivers from \\EFI\\visor\\drivers");
+        efi_load_fs_drivers();
+
+        efi_log(L"main: parsing config \\EFI\\visor\\boot.conf");
+        config_t config;
+
+        efi_fs_drivers_set_lazy(0);
+        status = config_parse(&config);
+        efi_log_set_file(config.file_log);
+        efi_log_rotate();
+        if (EFI_ERROR(status)) {
+            efi_log(L"WARN: config_parse returned error - using auto-detected entries");
+            efi_print(L"Warning: Config parse failed, using auto-detect\r\n");
+        }
+        { CHAR16 d[80]; SPrint(d, sizeof(d), L"main: config parsed, %d entr%s",
+            (int)config.entry_count, config.entry_count == 1 ? L"y" : L"ies"); efi_log(d); }
+        if (config.entry_count == 0)
+            efi_log(L"WARN: no boot entries found - starting from zero");
+
+        /* A platform can advertise a TPM through EFI_TCG2_PROTOCOL while firmware
+         * setup has it disabled; the probe then blocks inside firmware and the
+         * reset that follows is the only way out.  Skip the probe when the marker
+         * says an earlier boot died in it, or when it already disabled it. */
+        if (config.tpm && tpm_probe_skip()) {
+            efi_log(L"main: skipping measured boot this boot");
+            config.tpm = 0;
+        }
+
+        if (config.tpm) {
+            EFI_STATUS stage = tpm_stage_begin();
+            if (EFI_ERROR(stage)) {
+                /* Without a marker a hang here is unrecoverable, so not probing is
+                 * the safer failure: the machine still boots, unmeasured. */
+                CHAR16 d[128];
+                SPrint(d, sizeof(d),
+                       L"tpm: cannot store the boot-loop marker (status=%r) - skipping the probe",
+                       stage);
+                efi_log(d);
+            } else {
+            tpm_set_pcrs(config.tpm_pcr_config, config.tpm_pcr_cmdline);
+            if (tpm_init()) {
+
+                efi_file_buffer_t *cfg_raw = efi_load_file(CONFIG_FILE);
+                if (cfg_raw) {
+                    if (cfg_raw->data && cfg_raw->size)
+                        tpm_measure_config(cfg_raw->data, cfg_raw->size, L"boot.conf");
+                    if (cfg_raw->data) efi_free_pool(cfg_raw->data);
+                    efi_free_pool(cfg_raw);
+                } else {
+                    efi_log(L"tpm: no boot.conf on disk - nothing to measure into the config PCR");
+                }
+            }
+            tpm_stage_end();
+        }
     } else {
         efi_log(L"main: tpm=0 in config - skipping measured boot");
     }
