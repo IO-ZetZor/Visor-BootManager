@@ -200,8 +200,10 @@ int tpm_init(void) {
     }
     /* A protocol whose capability block is empty or carries a placeholder
      * manufacturer id cannot drive a real TPM; do not build measurements on
-     * top of it. */
-    if (cap.Size < (UINT8)__builtin_offsetof(tcg2_capability_t, ActivePcrBanks) ||
+     * top of it.  The size has to cover the field itself, not just its
+     * offset: a block that stops at ActivePcrBanks does not contain it, and
+     * reading it would publish an empty bank list. */
+    if (cap.Size < (UINT8)sizeof(tcg2_capability_t) ||
         cap.ManufacturerID == 0 || cap.ManufacturerID == 0xFFFFFFFF) {
         CHAR16 why[96];
         SPrint(why, sizeof(why),
