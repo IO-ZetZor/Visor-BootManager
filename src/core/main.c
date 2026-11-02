@@ -230,6 +230,11 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
 
         ST->ConOut->ClearScreen(ST->ConOut);
         ST->ConOut->EnableCursor(ST->ConOut, FALSE);
+        /* ClearScreen just erased the warning efi_log() printed when the first
+         * write failed.  Say it again, otherwise the rest of the boot looks as
+         * if the log is simply empty.  Logging stays off: no retry here. */
+        if (efi_log_write_failed())
+            efi_print(L"WARN: boot.log could not be written - this boot is console only\r\n");
 
         efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
         gui_state_t gui = {0};

@@ -19,6 +19,10 @@ void efi_log_set_file(int enabled) {
     visor_log_to_file = enabled ? 1 : 0;
 }
 
+int efi_log_write_failed(void) {
+    return log_write_failed;
+}
+
 int efi_log_file_enabled(void) {
     return visor_log_to_file;
 }
