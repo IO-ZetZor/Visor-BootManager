@@ -51,7 +51,17 @@ int config_early_file_log_enabled(void) {
     efi_free_pool(buf);
     return enabled;
 }
+/**
+  Read boot.conf and fill in the configuration, then discover boot entries.
 
+  Defaults are set first, then the file is parsed over them, then entries are
+  collected and filtered (including the self-exclusion pass at the end).
+
+  @param  config  Configuration to fill in.
+
+  @return EFI_SUCCESS when the configuration is usable, an error status
+          otherwise.
+**/
 EFI_STATUS config_parse(config_t *config) {
 
     config->timeout = 5;
@@ -84,6 +94,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->file_log = 1;
     config->scan_existing = -1;
     config->scan_mode = SCAN_MODE_DEEP;
+    config->exclude_self = 1;
     config->entries_from_config = 0;
     config->editor = 1;
     config->theme = NULL;
@@ -274,6 +285,7 @@ EFI_STATUS config_parse(config_t *config) {
     } else {
         config->entries_from_config = 1;
         efi_log(L"config: boot.conf supplied the entries - skipping volume scan");
+        config_exclude_self_entries(config);
     }
 
     snapshots_apply(config);

@@ -1035,6 +1035,13 @@
       ],
       "default": "deep"
     },
+    "exclude_self": {
+      "x-feature": "discover",
+      "x-group": "discovery",
+      "description": "Drop any auto-detected entry whose image is the loader that is running, so Visor never offers itself as a boot target. 0 allows it again for deliberate chainloading.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
     "scan_existing": {
       "x-feature": "hotplug",
       "x-group": "discovery",

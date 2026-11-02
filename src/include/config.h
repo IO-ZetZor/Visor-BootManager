@@ -135,6 +135,7 @@ typedef struct {
     int     hotplug;
     int     scan_existing;
     int     scan_mode;
+    int     exclude_self;
     int     entries_from_config;
     boot_entry_t *entries;
     boot_entry_t *tail;

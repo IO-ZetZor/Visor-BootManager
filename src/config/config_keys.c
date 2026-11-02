@@ -180,13 +180,24 @@ static int autoboot_key_value(CHAR16 *value, UINT16 *unicode,
     }
     return 0;
 }
+/**
+  Apply one top-level boot.conf key.
 
+  Unknown keys are ignored so a file written for a newer Visor still boots
+  with an older one.
+
+  @param  config  Configuration being updated.
+  @param  key     Key name, already trimmed and lower-cased by the parser.
+  @param  value   Raw value text for the key.
+**/
 void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     if (efi_strcmp(key, L"timeout") == 0) {
         config->timeout = (*value == '-') ? -1 : (INTN)parse_uint(value);
         config->timeout_set = 1;
     } else if (efi_strcmp(key, L"default") == 0) {
         config->default_entry = (INTN)parse_uint(value);
+    } else if (efi_strcmp(key, L"exclude_self") == 0) {
+        config->exclude_self = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"quiet") == 0) {
         config->quiet = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"windows_bootnext") == 0) {

@@ -1,6 +1,22 @@
 /* config_discover.c - automatic entry discovery (feature: autodetect) */
 #include "config_internal.h"
 
+/* Path of the running Visor binary, volume-relative (\EFI\visor\visor_x64.efi).
+   Discovery uses it to avoid offering the loader itself back as a boot target. */
+CHAR16 *dc_self_image;
+static EFI_HANDLE dc_self_volume;
+
+static CHAR16* self_image_path(void) {
+    EFI_LOADED_IMAGE *li = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(IH, &gEfiLoadedImageProtocolGuid, (void**)&li)) || !li)
+        return NULL;
+    if (!li->FilePath) return NULL;
+    const CHAR16 *path = NULL;
+    if (!nvsh_walk_filepath((const UINT8*)li->FilePath, DevicePathSize(li->FilePath), &path) || !path)
+        return NULL;
+    return efi_strdup((CHAR16*)path);
+}
+
 static int is_loader_efi(CHAR16 *name) {
     static const CHAR16 *skip[] = {
         L"grub", L"refind", L"shim", L"systemd-boot", L"bootx64",
@@ -434,7 +450,226 @@ static int detect_scan_volumes(config_t *config, int bls, int quick) {
     efi_free_pool(vols);
     return (int)(config->entry_count - start_count);
 }
+/**
+  Compare two paths the way the FAT driver would: case-insensitively.
 
+  @param  a  First path.
+  @param  b  Second path.
+
+  @retval 1  The paths name the same file.
+  @retval 0  They differ, or either pointer is NULL.
+**/
+static int path_ci_equal(const CHAR16 *a, const CHAR16 *b) {
+    if (!a || !b) return 0;
+    for (;; a++, b++) {
+        CHAR16 ca = (*a >= 'a' && *a <= 'z') ? (CHAR16)(*a - 32) : *a;
+        CHAR16 cb = (*b >= 'a' && *b <= 'z') ? (CHAR16)(*b - 32) : *b;
+        if (ca != cb) return 0;
+        if (!ca) return 1;
+    }
+}
+/**
+  Decide whether an entry would simply load the running loader again.
+
+  The path alone is not enough: every volume may carry the same
+  \EFI\visor\visor_x64.efi, and dropping another disk's copy would remove a
+  real chainload entry. The volume has to match too, falling back to the
+  partition uuid for entries parsed from boot.conf, which carry no handle.
+
+  @param  e     Entry being examined.
+  @param  path  Kernel or EFI path the entry would load.
+
+  @retval 1  The entry points at this loader on this volume.
+  @retval 0  It does not, or the running image is still unknown.
+**/
+static int path_is_self(boot_entry_t *e, const CHAR16 *path) {
+    if (!path || !dc_self_image) return 0;
+    if (!path_ci_equal(path, dc_self_image)) return 0;
+    if (e->hp_volume && dc_self_volume && e->hp_volume != dc_self_volume) return 0;
+    /* Boot.conf entries carry no volume handle; fall back to the partition uuid. */
+    if (!e->hp_volume && e->uuid && dc_self_volume) {
+        CHAR16 *mine = efi_handle_partition_uuid(dc_self_volume);
+        int same = mine && path_ci_equal(e->uuid, mine);
+        if (mine) efi_free_pool(mine);
+        if (!same) return 0;
+    }
+    return 1;
+}
+/**
+  Remove the deployments of one BLS/UKI group that load the running loader.
+
+  A group normally holds current plus rollback and older kernels, so dropping
+  the whole entry because one deployment points at the loader would throw away
+  working boots. Survivors are compacted in place; the default and selected
+  indices are resolved against the pre-prune numbering, and the entry keeps
+  (or releases) its own copy of the default command line depending on the
+  deployment that becomes the new default.
+
+  @param  config  Parsed configuration, for the default command line text.
+  @param  e       Entry whose deployments are filtered.
+
+  @return Number of deployments removed.
+**/
+static UINTN prune_self_deployments(config_t *config, boot_entry_t *e) {
+    if (!e->deploy_count) return 0;
+
+    /* Compare against the indices as they are now: decrementing inside the loop
+       would compare later removals against an already-shifted default. */
+    UINTN orig_default = e->deploy_default;
+    UINTN orig_sel     = e->deploy_sel;
+    UINTN below_default = 0, below_sel = 0;
+    UINTN keep = 0, dropped = 0;
+
+    /* config_add_entry() gives the entry its own copy of the default command
+       line when the deployment had no options of its own. That copy is not
+       part of the deployment array, so it has to be carried over (or released)
+       by hand when the default deployment changes. */
+    CHAR16 *own_cmdline = e->cmdline;
+    for (UINTN i = 0; own_cmdline && i < e->deploy_count; i++)
+        if (e->deployments[i].cmdline == e->cmdline) own_cmdline = NULL;
+
+    for (UINTN i = 0; i < e->deploy_count; i++) {
+        deployment_t *d = &e->deployments[i];
+        if (path_is_self(e, d->kernel)) {
+            if (i < orig_default) below_default++;
+            if (i < orig_sel)     below_sel++;
+            /* The entry's own path fields alias these strings, and
+               free_entry_contents() frees them when the group goes away. Clear
+               the aliases before freeing so nothing is released twice. */
+            if (e->kernel_path == d->kernel) e->kernel_path = NULL;
+            if (e->initrd_path == d->initrd) e->initrd_path = NULL;
+            if (e->cmdline     == d->cmdline) e->cmdline = NULL;
+            if (d->version)  efi_free_pool(d->version);
+            if (d->kernel)   efi_free_pool(d->kernel);
+            if (d->initrd)   efi_free_pool(d->initrd);
+            if (d->cmdline)  efi_free_pool(d->cmdline);
+            if (d->bls_path) efi_free_pool(d->bls_path);
+            d->version = d->kernel = d->initrd = d->cmdline = d->bls_path = NULL;
+            dropped++;
+            continue;
+        }
+        if (keep != i) e->deployments[keep] = e->deployments[i];
+        keep++;
+    }
+
+    e->deploy_count = keep;
+    if (!keep) return dropped;
+
+    e->deploy_default = orig_default - below_default;
+    e->deploy_sel     = orig_sel - below_sel;
+    if (e->deploy_default >= keep) e->deploy_default = keep - 1;
+    if (e->deploy_sel >= keep) e->deploy_sel = keep - 1;
+    deployment_t *d = &e->deployments[e->deploy_default];
+    e->kernel_path = d->kernel;
+    e->initrd_path = d->initrd;
+    if (d->cmdline) {
+        /* The surviving deployment brings its own options: drop the copy. */
+        if (own_cmdline) efi_free_pool(own_cmdline);
+        e->cmdline = d->cmdline;
+    } else if (own_cmdline) {
+        /* Keep the copy only if the surviving kernel still wants it. */
+        if (entry_takes_default_cmdline(d->kernel, e->type)) {
+            e->cmdline = own_cmdline;
+        } else {
+            efi_free_pool(own_cmdline);
+            e->cmdline = NULL;
+        }
+    } else if (config->def_cmdline && entry_takes_default_cmdline(d->kernel, e->type)) {
+        /* The old default did not want the default command line, the new one
+           does: give it the same text config_add_entry() would have. */
+        e->cmdline = efi_strdup(config->def_cmdline);
+    } else {
+        e->cmdline = NULL;
+    }
+    return dropped;
+}
+/**
+  Resolve the running image path and volume once, caching both.
+**/
+static void ensure_self_image(void) {
+    if (dc_self_image) return;
+    dc_self_image = self_image_path();
+    if (!dc_self_image) return;
+    EFI_LOADED_IMAGE *li = NULL;
+    if (!EFI_ERROR(BS->HandleProtocol(IH, &gEfiLoadedImageProtocolGuid, (void**)&li)) && li)
+        dc_self_volume = li->DeviceHandle;
+    efi_log(L"config: running image");
+    efi_log(dc_self_image);
+}
+/**
+  Remove every entry that would load Visor itself.
+
+  Runs after discovery and after boot.conf entries, so both sources are
+  covered. Entries with deployments are pruned per deployment first; an entry
+  is only removed once nothing is left in it. ``default_entry`` is recomputed
+  from the pre-removal numbering and clamped to the surviving count.
+
+  @param  config  Parsed configuration, filtered in place.
+**/
+void config_exclude_self_entries(config_t *config) {
+    ensure_self_image();
+    if (!config->exclude_self || !dc_self_image) return;
+
+    boot_entry_t *prev = NULL;
+    boot_entry_t *e = config->entries;
+    UINTN dropped = 0;
+    UINTN orig_default = config->default_entry;
+    UINTN below_default = 0;
+    int default_removed = 0;
+    while (e) {
+        boot_entry_t *next = e->next;
+        UINTN index = e->index;
+        int remove = 0;
+
+        if (e->deploy_count) {
+            if (prune_self_deployments(config, e)) {
+                efi_log(L"config: dropped deployments that load the running image");
+                efi_log(e->name);
+                remove = (e->deploy_count == 0);
+            }
+        } else if (path_is_self(e, e->kernel_path)) {
+            remove = 1;
+        }
+
+        if (remove) {
+            efi_log(L"config: dropping entry that points at the running image");
+            efi_log(e->name);
+            if (prev) prev->next = next;
+            else      config->entries = next;
+            if (config->tail == e) config->tail = prev;
+            free_entry_contents(e);
+            efi_free_pool(e);
+            config->entry_count--;
+            if (index < orig_default) below_default++;
+            else if (index == orig_default) default_removed = 1;
+            dropped++;
+        } else {
+            prev = e;
+        }
+        e = next;
+    }
+
+    if (!dropped) return;
+    UINTN idx = 0;
+    for (boot_entry_t *x = config->entries; x; x = x->next) x->index = idx++;
+    /* Same shifting problem as above, one level up: resolve the original
+       default once, then map it onto the compacted list. */
+    config->default_entry = default_removed ? 0 : orig_default - below_default;
+    if (config->default_entry >= config->entry_count)
+        config->default_entry = config->entry_count ? config->entry_count - 1 : 0;
+}
+/**
+  Discover every boot entry this firmware and these volumes offer.
+
+  Runs the BLS/UKI scan first, then the plain kernels, vendor loaders and
+  Windows probes, falling back to a raw kernel scan when BLS found nothing.
+  Ends with the self-exclusion pass so entries that would reload Visor are
+  dropped before the menu is built.
+
+  @param  config  Configuration receiving the entries.
+
+  @return EFI_SUCCESS, or an error status from the underlying scan.
+**/
 EFI_STATUS detect_entries(config_t *config) {
     if (!show_names_set)  config->show_names = 0;
     if (!center_info_set) config->center_info = 1;
@@ -443,6 +678,8 @@ EFI_STATUS detect_entries(config_t *config) {
         efi_log(L"config: starting FS drivers before auto-detection");
         efi_start_deferred_drivers();
     }
+
+    ensure_self_image();
 
     int quick = (config->scan_mode == SCAN_MODE_QUICK);
     if (quick) efi_log(L"config: quick scan - ESP and /boot partitions only");
@@ -457,5 +694,7 @@ EFI_STATUS detect_entries(config_t *config) {
     }
 
     if (!found && !bls) return EFI_NOT_FOUND;
+
+    config_exclude_self_entries(config);
     return EFI_SUCCESS;
 }
