@@ -485,7 +485,7 @@ static int path_is_self(boot_entry_t *e, const CHAR16 *path) {
    A BLS entry normally holds current + rollback + older kernels, so removing
    the whole entry because one deployment points at the loader would throw away
    working boots. Returns the number of deployments dropped. */
-static UINTN prune_self_deployments(boot_entry_t *e) {
+static UINTN prune_self_deployments(config_t *config, boot_entry_t *e) {
     if (!e->deploy_count) return 0;
 
     /* Compare against the indices as they are now: decrementing inside the loop
@@ -494,6 +494,14 @@ static UINTN prune_self_deployments(boot_entry_t *e) {
     UINTN orig_sel     = e->deploy_sel;
     UINTN below_default = 0, below_sel = 0;
     UINTN keep = 0, dropped = 0;
+
+    /* config_add_entry() gives the entry its own copy of the default command
+       line when the deployment had no options of its own. That copy is not
+       part of the deployment array, so it has to be carried over (or released)
+       by hand when the default deployment changes. */
+    CHAR16 *own_cmdline = e->cmdline;
+    for (UINTN i = 0; own_cmdline && i < e->deploy_count; i++)
+        if (e->deployments[i].cmdline == e->cmdline) own_cmdline = NULL;
 
     for (UINTN i = 0; i < e->deploy_count; i++) {
         deployment_t *d = &e->deployments[i];
@@ -526,9 +534,28 @@ static UINTN prune_self_deployments(boot_entry_t *e) {
     e->deploy_sel     = orig_sel - below_sel;
     if (e->deploy_default >= keep) e->deploy_default = keep - 1;
     if (e->deploy_sel >= keep) e->deploy_sel = keep - 1;
-    e->kernel_path = e->deployments[e->deploy_default].kernel;
-    e->initrd_path = e->deployments[e->deploy_default].initrd;
-    e->cmdline     = e->deployments[e->deploy_default].cmdline;
+    deployment_t *d = &e->deployments[e->deploy_default];
+    e->kernel_path = d->kernel;
+    e->initrd_path = d->initrd;
+    if (d->cmdline) {
+        /* The surviving deployment brings its own options: drop the copy. */
+        if (own_cmdline) efi_free_pool(own_cmdline);
+        e->cmdline = d->cmdline;
+    } else if (own_cmdline) {
+        /* Keep the copy only if the surviving kernel still wants it. */
+        if (entry_takes_default_cmdline(d->kernel, e->type)) {
+            e->cmdline = own_cmdline;
+        } else {
+            efi_free_pool(own_cmdline);
+            e->cmdline = NULL;
+        }
+    } else if (config->def_cmdline && entry_takes_default_cmdline(d->kernel, e->type)) {
+        /* The old default did not want the default command line, the new one
+           does: give it the same text config_add_entry() would have. */
+        e->cmdline = efi_strdup(config->def_cmdline);
+    } else {
+        e->cmdline = NULL;
+    }
     return dropped;
 }
 
@@ -561,7 +588,7 @@ void config_exclude_self_entries(config_t *config) {
         int remove = 0;
 
         if (e->deploy_count) {
-            if (prune_self_deployments(e)) {
+            if (prune_self_deployments(config, e)) {
                 efi_log(L"config: dropped deployments that load the running image");
                 efi_log(e->name);
                 remove = (e->deploy_count == 0);
