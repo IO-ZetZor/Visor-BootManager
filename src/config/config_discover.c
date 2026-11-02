@@ -658,7 +658,18 @@ void config_exclude_self_entries(config_t *config) {
     if (config->default_entry >= config->entry_count)
         config->default_entry = config->entry_count ? config->entry_count - 1 : 0;
 }
+/**
+  Discover every boot entry this firmware and these volumes offer.
 
+  Runs the BLS/UKI scan first, then the plain kernels, vendor loaders and
+  Windows probes, falling back to a raw kernel scan when BLS found nothing.
+  Ends with the self-exclusion pass so entries that would reload Visor are
+  dropped before the menu is built.
+
+  @param  config  Configuration receiving the entries.
+
+  @return EFI_SUCCESS, or an error status from the underlying scan.
+**/
 EFI_STATUS detect_entries(config_t *config) {
     if (!show_names_set)  config->show_names = 0;
     if (!center_info_set) config->center_info = 1;

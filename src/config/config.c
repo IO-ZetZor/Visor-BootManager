@@ -51,7 +51,17 @@ int config_early_file_log_enabled(void) {
     efi_free_pool(buf);
     return enabled;
 }
+/**
+  Read boot.conf and fill in the configuration, then discover boot entries.
 
+  Defaults are set first, then the file is parsed over them, then entries are
+  collected and filtered (including the self-exclusion pass at the end).
+
+  @param  config  Configuration to fill in.
+
+  @return EFI_SUCCESS when the configuration is usable, an error status
+          otherwise.
+**/
 EFI_STATUS config_parse(config_t *config) {
 
     config->timeout = 5;
