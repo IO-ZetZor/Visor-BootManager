@@ -450,10 +450,15 @@ static int detect_scan_volumes(config_t *config, int bls, int quick) {
     efi_free_pool(vols);
     return (int)(config->entry_count - start_count);
 }
+/**
+  Compare two paths the way the FAT driver would: case-insensitively.
 
-/* Case-insensitive path compare: FAT lookups ignore case, so two spellings of
-   one path can name the same file. Kept local - nvsh_paths_equal16 is shared
-   with self-heal and must keep its exact-match meaning. */
+  @param  a  First path.
+  @param  b  Second path.
+
+  @retval 1  The paths name the same file.
+  @retval 0  They differ, or either pointer is NULL.
+**/
 static int path_ci_equal(const CHAR16 *a, const CHAR16 *b) {
     if (!a || !b) return 0;
     for (;; a++, b++) {
@@ -463,10 +468,20 @@ static int path_ci_equal(const CHAR16 *a, const CHAR16 *b) {
         if (!ca) return 1;
     }
 }
+/**
+  Decide whether an entry would simply load the running loader again.
 
-/* True when two paths name the running image. Path alone is not enough: every
-   volume can carry a \EFI\visor\visor_x64.efi, and removing another disk's
-   copy would delete a real chainload entry. So the volume must match as well. */
+  The path alone is not enough: every volume may carry the same
+  \EFI\visor\visor_x64.efi, and dropping another disk's copy would remove a
+  real chainload entry. The volume has to match too, falling back to the
+  partition uuid for entries parsed from boot.conf, which carry no handle.
+
+  @param  e     Entry being examined.
+  @param  path  Kernel or EFI path the entry would load.
+
+  @retval 1  The entry points at this loader on this volume.
+  @retval 0  It does not, or the running image is still unknown.
+**/
 static int path_is_self(boot_entry_t *e, const CHAR16 *path) {
     if (!path || !dc_self_image) return 0;
     if (!path_ci_equal(path, dc_self_image)) return 0;
@@ -480,11 +495,21 @@ static int path_is_self(boot_entry_t *e, const CHAR16 *path) {
     }
     return 1;
 }
+/**
+  Remove the deployments of one BLS/UKI group that load the running loader.
 
-/* Drop the deployments that load Visor itself, keeping the rest of the group.
-   A BLS entry normally holds current + rollback + older kernels, so removing
-   the whole entry because one deployment points at the loader would throw away
-   working boots. Returns the number of deployments dropped. */
+  A group normally holds current plus rollback and older kernels, so dropping
+  the whole entry because one deployment points at the loader would throw away
+  working boots. Survivors are compacted in place; the default and selected
+  indices are resolved against the pre-prune numbering, and the entry keeps
+  (or releases) its own copy of the default command line depending on the
+  deployment that becomes the new default.
+
+  @param  config  Parsed configuration, for the default command line text.
+  @param  e       Entry whose deployments are filtered.
+
+  @return Number of deployments removed.
+**/
 static UINTN prune_self_deployments(config_t *config, boot_entry_t *e) {
     if (!e->deploy_count) return 0;
 
@@ -558,7 +583,9 @@ static UINTN prune_self_deployments(config_t *config, boot_entry_t *e) {
     }
     return dropped;
 }
-
+/**
+  Resolve the running image path and volume once, caching both.
+**/
 static void ensure_self_image(void) {
     if (dc_self_image) return;
     dc_self_image = self_image_path();
@@ -569,9 +596,16 @@ static void ensure_self_image(void) {
     efi_log(L"config: running image");
     efi_log(dc_self_image);
 }
+/**
+  Remove every entry that would load Visor itself.
 
-/* Drop entries that would just reload the loader. Runs after discovery and
-   after explicit boot.conf entries, so every source is covered. */
+  Runs after discovery and after boot.conf entries, so both sources are
+  covered. Entries with deployments are pruned per deployment first; an entry
+  is only removed once nothing is left in it. ``default_entry`` is recomputed
+  from the pre-removal numbering and clamped to the surviving count.
+
+  @param  config  Parsed configuration, filtered in place.
+**/
 void config_exclude_self_entries(config_t *config) {
     ensure_self_image();
     if (!config->exclude_self || !dc_self_image) return;
