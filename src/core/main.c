@@ -51,18 +51,23 @@ static void visor_run_dtors(void) {
     }
 }
 
-/*
- * gnu-efi's stock _entry() calls InitializeLib() before efi_main(); we keep
- * our own so the constructor/destructor contract stays explicit and the
- * service pointers are installed by us.
+/**
+ * _entry - PE entry point, called by the firmware before gnu-efi is set up.
+ *
+ * Runs constructors, then efi_main.  gnu-efi's stock _entry() calls
+ * InitializeLib() first; we keep our own so the constructor/destructor
+ * contract stays explicit and the service pointers are installed by us.
  *
  * Deliberately no console output here.  ConOut->OutputString is a privileged
  * protocol call: on firmware where Visor is the first PE image to run, it can
  * bind console device drivers before GOP is up, and that is a known freeze on
- * some consumer boards.  Production builds stay silent until efi_main(),
- * which runs after InitializeLib(); a diagnostic build that needs a checkpoint
- * from the PE entry point uses VISOR_EARLY_DIAG in early_start_x86_64.S,
- * which runs even earlier than this function.
+ * some consumer boards.  Production builds stay silent until efi_main();
+ * diagnostic builds get a stage-0 checkpoint from VISOR_EARLY_DIAG in
+ * early_start_x86_64.S, which runs even earlier than this function.
+ *
+ * @param image_handle this image's handle
+ * @param system_table firmware system table
+ * @return efi_main's status
  */
 EFI_STATUS _entry(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     /*
@@ -177,6 +182,18 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         return out;
     }
 
+    /**
+     * efi_main - bring up logging, the GUI and the menu, then boot an entry.
+     *
+     * Order matters for diagnosis: the console checkpoints and the log header
+     * are written before the first RT->GetTime call, so a hang in the firmware
+     * clock leaves a named checkpoint on screen and a non-empty boot.log
+     * instead of a silent freeze.
+     *
+     * @param image_handle this image's handle
+     * @param system_table firmware system table
+     * @return EFI_SUCCESS when an entry was started, an error status otherwise
+     */
     EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         /* Our _entry() already ran InitializeLib(NULL, ...), so this call returns
          * immediately.  Keep it for stock-entry builds and set the globals again

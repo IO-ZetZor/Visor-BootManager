@@ -14,11 +14,25 @@ void efi_log_set_console(int enabled) {
     visor_log_to_console = enabled ? 1 : 0;
 }
 
+/**
+ * efi_log_set_file - turn ESP logging on or off.
+ *
+ * An enable request is ignored once a write, flush or rotation has failed:
+ * the file driver is wedged for this boot and every extra call is another
+ * chance to hang.  Disable requests always go through.
+ *
+ * @param enabled non-zero to enable file logging
+ */
 void efi_log_set_file(int enabled) {
     if (enabled && log_write_failed) return;
     visor_log_to_file = enabled ? 1 : 0;
 }
 
+/**
+ * efi_log_write_failed - report whether file logging was latched off.
+ *
+ * @return non-zero once any write, flush or rotation failure happened
+ */
 int efi_log_write_failed(void) {
     return log_write_failed;
 }
@@ -115,6 +129,15 @@ static EFI_FILE_PROTOCOL *log_file_open(void) {
 /* Boot-scoped latch: set once, checked by efi_log_set_file() and by
  * efi_log_rotate(), never cleared.  Every path that touches the log file after
  * a failure would be another firmware call to the driver that already failed. */
+/**
+ * log_latch_off - stop file logging for the rest of the boot.
+ *
+ * Used by every path that talks to the log file (efi_log and
+ * efi_log_rotate), so the latch cannot be bypassed by a caller that writes
+ * through the driver directly.
+ *
+ * @param why short description of the failed step, shown on the console
+ */
 static void log_latch_off(CHAR16 *why) {
     log_write_failed = 1;
     efi_log_close();
@@ -126,6 +149,16 @@ static void log_latch_off(CHAR16 *why) {
     }
 }
 
+/**
+ * efi_log - print a line to the console, the boot log, or both.
+ *
+ * Console output is gated by visor_log_to_console and visor_quiet.  File
+ * output re-opens the log lazily, stamps the line with seconds since
+ * loader_mark_init(), and checks Write/Flush: a failure latches file logging
+ * off instead of retrying a wedged FAT driver on every later line.
+ *
+ * @param msg NUL-terminated UTF-16 message
+ */
 void efi_log(CHAR16 *msg) {
     if (!msg) return;
     if (!visor_boot_services_active) return;
@@ -184,6 +217,14 @@ void efi_log_begin(void) {
     efi_log(LOG_MARKER_W);
 }
 
+/**
+ * efi_log_rotate - keep boot.log under the size cap.
+ *
+ * Reads the file, keeps the tail from the last few boot headers, then
+ * deletes and rewrites it.  Rotation owns its own error handling because it
+ * writes through the driver directly; a failed rewrite latches file logging
+ * off so the following efi_log() cannot re-open a wedged driver.
+ */
 void efi_log_rotate(void) {
     if (!visor_log_to_file) return;
 
