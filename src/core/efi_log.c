@@ -112,6 +112,20 @@ static EFI_FILE_PROTOCOL *log_file_open(void) {
     return f;
 }
 
+/* Boot-scoped latch: set once, checked by efi_log_set_file() and by
+ * efi_log_rotate(), never cleared.  Every path that touches the log file after
+ * a failure would be another firmware call to the driver that already failed. */
+static void log_latch_off(CHAR16 *why) {
+    log_write_failed = 1;
+    efi_log_close();
+    visor_log_to_file = 0;
+    if (ST && ST->ConOut) {
+        ST->ConOut->OutputString(ST->ConOut, L"Visor: boot.log ");
+        ST->ConOut->OutputString(ST->ConOut, why);
+        ST->ConOut->OutputString(ST->ConOut, L" failed - file logging disabled\r\n");
+    }
+}
+
 void efi_log(CHAR16 *msg) {
     if (!msg) return;
     if (!visor_boot_services_active) return;
@@ -154,21 +168,9 @@ void efi_log(CHAR16 *msg) {
          * later one too; stop retrying (each retry is a firmware call that
          * can hang) and say so on the console instead.  The latch keeps
          * later efi_log_set_file(1) calls from re-arming a wedged driver. */
-        log_write_failed = 1;
-        efi_log_close();
-        visor_log_to_file = 0;
-        if (ST && ST->ConOut) {
-            ST->ConOut->OutputString(ST->ConOut,
-                L"Visor: boot.log write failed - file logging disabled\r\n");
-        }
+        log_latch_off(L"write");
     } else if (EFI_ERROR(f->Flush(f))) {
-        log_write_failed = 1;
-        efi_log_close();
-        visor_log_to_file = 0;
-        if (ST && ST->ConOut) {
-            ST->ConOut->OutputString(ST->ConOut,
-                L"Visor: boot.log flush failed - file logging disabled\r\n");
-        }
+        log_latch_off(L"flush");
     }
     in_log = 0;
 }
@@ -233,12 +235,24 @@ void efi_log_rotate(void) {
         f = NULL;
         if (!EFI_ERROR(root->Open(root, &f, LOG_PATH,
                 EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f) {
+            EFI_STATUS rs = EFI_SUCCESS;
             if (keep && keep_len > 0) {
                 UINTN w = keep_len;
-                f->Write(f, &w, keep);
+                rs = f->Write(f, &w, keep);
+                if (!EFI_ERROR(rs) && w != keep_len) rs = EFI_DEVICE_ERROR;
             }
-            f->Flush(f);
+            if (!EFI_ERROR(rs)) rs = f->Flush(f);
             f->Close(f);
+            if (EFI_ERROR(rs)) {
+                /* Rotation talks to the driver directly, so it has to set the
+                 * latch itself; otherwise efi_log() would reopen the same
+                 * wedged file on the next line. */
+                root->Close(root);
+                efi_free_pool(buf->data);
+                efi_free_pool(buf);
+                log_latch_off(L"rewrite");
+                return;
+            }
         }
         root->Close(root);
     }
