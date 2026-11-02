@@ -51,19 +51,25 @@ static void visor_run_dtors(void) {
     }
 }
 
-/*
- * gnu-efi's stock _entry() calls InitializeLib() before efi_main().  That
- * means a banner at the top of efi_main() is too late to tell a firmware PE
- * loader failure apart from a hang inside gnu-efi itself.  Keep our own
- * entry point so the first console write happens before any library setup.
+/**
+ * _entry - PE entry point, called by the firmware before gnu-efi is set up.
+ *
+ * Runs constructors, then efi_main.  gnu-efi's stock _entry() calls
+ * InitializeLib() first; we keep our own so the constructor/destructor
+ * contract stays explicit and the service pointers are installed by us.
+ *
+ * Deliberately no console output here.  ConOut->OutputString is a privileged
+ * protocol call: on firmware where Visor is the first PE image to run, it can
+ * bind console device drivers before GOP is up, and that is a known freeze on
+ * some consumer boards.  Production builds stay silent until efi_main();
+ * diagnostic builds get a stage-0 checkpoint from VISOR_EARLY_DIAG in
+ * early_start_x86_64.S, which runs even earlier than this function.
+ *
+ * @param image_handle this image's handle
+ * @param system_table firmware system table
+ * @return efi_main's status
  */
 EFI_STATUS _entry(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
-    if (system_table && system_table->ConOut &&
-        system_table->ConOut->OutputString) {
-        system_table->ConOut->OutputString(system_table->ConOut,
-            L"Visor: self-relocation complete\r\n");
-    }
-
     /*
      * Passing a NULL image handle deliberately skips gnu-efi's early
      * HandleProtocol/GetVariable/LocateHandle probing.  Those calls used to
@@ -176,6 +182,18 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         return out;
     }
 
+    /**
+     * efi_main - bring up logging, the GUI and the menu, then boot an entry.
+     *
+     * Order matters for diagnosis: the console checkpoints and the log header
+     * are written before the first RT->GetTime call, so a hang in the firmware
+     * clock leaves a named checkpoint on screen and a non-empty boot.log
+     * instead of a silent freeze.
+     *
+     * @param image_handle this image's handle
+     * @param system_table firmware system table
+     * @return EFI_SUCCESS when an entry was started, an error status otherwise
+     */
     EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
         /* Our _entry() already ran InitializeLib(NULL, ...), so this call returns
          * immediately.  Keep it for stock-entry builds and set the globals again
@@ -187,24 +205,53 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         RT = system_table->RuntimeServices;
         IH = image_handle;
 
-        /* Second checkpoint.  _entry() printed the first one immediately after
-         * self-relocation; a diagnostic build also prints a stage-0 line from the
-         * PE entry point.  If this line appears and the machine still freezes, the
-         * fault is after console setup; if it never appears, it is in the entry
-         * path or the safe library initialization above. */
+        /* Checkpoint: this line is the last thing printed before any firmware
+         * call that is not a plain protocol lookup.  If it appears and the
+         * machine still freezes, the fault is in the file/log or GUI setup
+         * below; if it never appears, it is in the entry path, the safe
+         * library initialization above, or the constructor run.  A diagnostic
+         * build also prints a stage-0 line from the PE entry point. */
         efi_print(L"Visor loading...\r\n");
 
-        loader_mark_init();
-
+        /* Every step below up to the GUI touches the ESP through the FAT
+         * driver, and that driver may itself ask RT->GetTime for file
+         * timestamps.  These console checkpoints cost nothing and split the
+         * file-system path into named steps without using the file system. */
+        efi_print(L"Visor: reading boot.conf\r\n");
         efi_log_set_file(0);
         int early_file_log = config_early_file_log_enabled();
         efi_log_set_file(early_file_log);
-        if (early_file_log) efi_log_begin();
-        else efi_print(L"Visor: boot logging disabled by config\r\n");
+        if (early_file_log) {
+            efi_print(L"Visor: opening boot.log\r\n");
+            efi_log_begin();
+        } else {
+            efi_print(L"Visor: boot logging disabled by config\r\n");
+        }
         efi_log(L"main: efi_main entered, services initialised");
+
+        /*
+         * Stamp the boot time only after the log file is open and the first
+         * line is on disk.  loader_mark_init() calls RT->GetTime(), a firmware
+         * RuntimeServices call that hangs on some boards; running it first made
+         * that hang look like a silent freeze with an empty boot.log.
+         *
+         * The log file alone is not a trustworthy checkpoint for that call:
+         * EnhancedFatDxe asks RT->GetTime for the file timestamp itself, so on
+         * the very firmware this guards against, opening or writing boot.log
+         * can enter the same hang.  The console line below is the checkpoint
+         * that does not need the FAT driver, so the screen shows whether the
+         * machine got past the log setup even when nothing reaches the ESP.
+         */
+        efi_print(L"Visor: log ready, reading the firmware clock\r\n");
+        loader_mark_init();
 
         ST->ConOut->ClearScreen(ST->ConOut);
         ST->ConOut->EnableCursor(ST->ConOut, FALSE);
+        /* ClearScreen just erased the warning efi_log() printed when the first
+         * write failed.  Say it again, otherwise the rest of the boot looks as
+         * if the log is simply empty.  Logging stays off: no retry here. */
+        if (efi_log_write_failed())
+            efi_print(L"WARN: boot.log could not be written - this boot is console only\r\n");
 
         efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
         gui_state_t gui = {0};

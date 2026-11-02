@@ -99,6 +99,10 @@ void efi_log_set_file(int enabled);
 
 int efi_log_file_enabled(void);
 
+/* Non-zero when a write or flush already failed this boot: file logging is off
+ * for the rest of the boot, so the screen is the only record left. */
+int efi_log_write_failed(void);
+
 void efi_log_begin(void);
 
 void efi_log_rotate(void);

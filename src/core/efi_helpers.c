@@ -37,9 +37,19 @@ EFI_HANDLE efi_boot_volume_handle(void) {
     return boot_device_handle();
 }
 
+/**
+ * efi_allocate_pool - allocate EfiLoaderData memory from the firmware pool.
+ *
+ * Boot services may refuse the allocation; callers treat NULL as "out of
+ * memory" and bail out instead of dereferencing whatever the pool pointer
+ * held before the call.
+ *
+ * @param size bytes to allocate
+ * @return pointer on success, NULL on failure
+ */
 void* efi_allocate_pool(UINTN size) {
     void *ptr = NULL;
-    BS->AllocatePool(EfiLoaderData, size, &ptr);
+    if (EFI_ERROR(BS->AllocatePool(EfiLoaderData, size, &ptr))) return NULL;
     return ptr;
 }
 
