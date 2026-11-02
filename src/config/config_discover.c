@@ -488,19 +488,30 @@ static int path_is_self(boot_entry_t *e, const CHAR16 *path) {
 static UINTN prune_self_deployments(boot_entry_t *e) {
     if (!e->deploy_count) return 0;
 
-    UINTN keep = 0;
-    UINTN dropped = 0;
+    /* Compare against the indices as they are now: decrementing inside the loop
+       would compare later removals against an already-shifted default. */
+    UINTN orig_default = e->deploy_default;
+    UINTN orig_sel     = e->deploy_sel;
+    UINTN below_default = 0, below_sel = 0;
+    UINTN keep = 0, dropped = 0;
+
     for (UINTN i = 0; i < e->deploy_count; i++) {
         deployment_t *d = &e->deployments[i];
         if (path_is_self(e, d->kernel)) {
+            if (i < orig_default) below_default++;
+            if (i < orig_sel)     below_sel++;
+            /* The entry's own path fields alias these strings, and
+               free_entry_contents() frees them when the group goes away. Clear
+               the aliases before freeing so nothing is released twice. */
+            if (e->kernel_path == d->kernel) e->kernel_path = NULL;
+            if (e->initrd_path == d->initrd) e->initrd_path = NULL;
+            if (e->cmdline     == d->cmdline) e->cmdline = NULL;
             if (d->version)  efi_free_pool(d->version);
             if (d->kernel)   efi_free_pool(d->kernel);
             if (d->initrd)   efi_free_pool(d->initrd);
             if (d->cmdline)  efi_free_pool(d->cmdline);
             if (d->bls_path) efi_free_pool(d->bls_path);
             d->version = d->kernel = d->initrd = d->cmdline = d->bls_path = NULL;
-            if (i <= e->deploy_default && e->deploy_default > 0) e->deploy_default--;
-            if (i <= e->deploy_sel && e->deploy_sel > 0) e->deploy_sel--;
             dropped++;
             continue;
         }
@@ -509,8 +520,10 @@ static UINTN prune_self_deployments(boot_entry_t *e) {
     }
 
     e->deploy_count = keep;
-    if (keep == 0) return dropped;
+    if (!keep) return dropped;
 
+    e->deploy_default = orig_default - below_default;
+    e->deploy_sel     = orig_sel - below_sel;
     if (e->deploy_default >= keep) e->deploy_default = keep - 1;
     if (e->deploy_sel >= keep) e->deploy_sel = keep - 1;
     e->kernel_path = e->deployments[e->deploy_default].kernel;
@@ -539,6 +552,9 @@ void config_exclude_self_entries(config_t *config) {
     boot_entry_t *prev = NULL;
     boot_entry_t *e = config->entries;
     UINTN dropped = 0;
+    UINTN orig_default = config->default_entry;
+    UINTN below_default = 0;
+    int default_removed = 0;
     while (e) {
         boot_entry_t *next = e->next;
         UINTN index = e->index;
@@ -563,8 +579,8 @@ void config_exclude_self_entries(config_t *config) {
             free_entry_contents(e);
             efi_free_pool(e);
             config->entry_count--;
-            if (index < config->default_entry) config->default_entry--;
-            else if (index == config->default_entry) config->default_entry = 0;
+            if (index < orig_default) below_default++;
+            else if (index == orig_default) default_removed = 1;
             dropped++;
         } else {
             prev = e;
@@ -575,6 +591,9 @@ void config_exclude_self_entries(config_t *config) {
     if (!dropped) return;
     UINTN idx = 0;
     for (boot_entry_t *x = config->entries; x; x = x->next) x->index = idx++;
+    /* Same shifting problem as above, one level up: resolve the original
+       default once, then map it onto the compacted list. */
+    config->default_entry = default_removed ? 0 : orig_default - below_default;
     if (config->default_entry >= config->entry_count)
         config->default_entry = config->entry_count ? config->entry_count - 1 : 0;
 }
