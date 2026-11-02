@@ -14,6 +14,7 @@
 
 extern EFI_BOOT_SERVICES *BS;
 extern EFI_SYSTEM_TABLE *ST;
+extern EFI_HANDLE IH;
 
 CHAR16* trim(CHAR16 *s);
 void strip_inline_comment(CHAR16 *s);
@@ -63,6 +64,7 @@ extern EFI_HANDLE dc_scanned_vols[64];
 extern UINTN      dc_scanned_n;
 extern int show_names_set;
 extern int center_info_set;
+extern CHAR16 *dc_self_image;
 EFI_STATUS detect_entries(config_t *config);
 CHAR16* read_text_file(CHAR16 *path);
 void apply_global(config_t *config, CHAR16 *key, CHAR16 *value);

@@ -154,6 +154,13 @@ quiet=0
 # Entries are pinned to the volume they were found on. 1 = on (default), 0 = off.
 #hotplug=1
 
+# Never offer the running loader back as a boot entry. Discovery compares every
+# candidate image path with the file Visor was started from and drops the match,
+# so a stale firmware entry, a leftover copy of visor_x64.efi under \EFI\Linux,
+# or a BLS record that points at the loader itself does not become a menu icon.
+# 1 = on (default). Set to 0 only if you deliberately chainload Visor.
+#exclude_self=1
+
 # Also sweep media that was ALREADY plugged in when Visor started. Scanning
 # volumes costs time (and, with a filesystem driver installed, a probe of every
 # partition), so by default this happens only when Visor auto-detected the

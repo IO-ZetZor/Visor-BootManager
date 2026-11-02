@@ -84,6 +84,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->file_log = 1;
     config->scan_existing = -1;
     config->scan_mode = SCAN_MODE_DEEP;
+    config->exclude_self = 1;
     config->entries_from_config = 0;
     config->editor = 1;
     config->theme = NULL;

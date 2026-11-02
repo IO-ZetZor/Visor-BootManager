@@ -1,6 +1,21 @@
 /* config_discover.c - automatic entry discovery (feature: autodetect) */
 #include "config_internal.h"
 
+/* Path of the running Visor binary, volume-relative (\EFI\visor\visor_x64.efi).
+   Discovery uses it to avoid offering the loader itself back as a boot target. */
+CHAR16 *dc_self_image;
+
+static CHAR16* self_image_path(void) {
+    EFI_LOADED_IMAGE *li = NULL;
+    if (EFI_ERROR(BS->HandleProtocol(IH, &gEfiLoadedImageProtocolGuid, (void**)&li)) || !li)
+        return NULL;
+    if (!li->FilePath) return NULL;
+    const CHAR16 *path = NULL;
+    if (!nvsh_walk_filepath((const UINT8*)li->FilePath, DevicePathSize(li->FilePath), &path) || !path)
+        return NULL;
+    return efi_strdup((CHAR16*)path);
+}
+
 static int is_loader_efi(CHAR16 *name) {
     static const CHAR16 *skip[] = {
         L"grub", L"refind", L"shim", L"systemd-boot", L"bootx64",
@@ -435,6 +450,49 @@ static int detect_scan_volumes(config_t *config, int bls, int quick) {
     return (int)(config->entry_count - start_count);
 }
 
+/* True when an entry's target is the running Visor binary itself. Covers both
+   plain EFI entries (kernel_path) and BLS/UKI groups (deployment kernels). */
+static int entry_targets_self(boot_entry_t *e) {
+    if (!dc_self_image) return 0;
+    if (e->kernel_path && nvsh_paths_equal16(e->kernel_path, dc_self_image)) return 1;
+    for (UINTN i = 0; i < e->deploy_count; i++)
+        if (e->deployments[i].kernel &&
+            nvsh_paths_equal16(e->deployments[i].kernel, dc_self_image)) return 1;
+    return 0;
+}
+
+/* Drop entries that would just reload the loader. Runs once, after discovery,
+   so every source (UKI dir, vendor dirs, boot.conf, BLS) is covered. */
+static void prune_self_entries(config_t *config) {
+    if (!config->exclude_self || !dc_self_image) return;
+
+    boot_entry_t *prev = NULL;
+    boot_entry_t *e = config->entries;
+    int dropped = 0;
+    while (e) {
+        boot_entry_t *next = e->next;
+        if (entry_targets_self(e)) {
+            efi_log(L"config: dropping entry that points at the running image");
+            efi_log(e->name);
+            if (prev) prev->next = next;
+            else      config->entries = next;
+            if (config->tail == e) config->tail = prev;
+            free_entry_contents(e);
+            efi_free_pool(e);
+            config->entry_count--;
+            dropped++;
+        } else {
+            prev = e;
+        }
+        e = next;
+    }
+
+    if (dropped) {
+        UINTN idx = 0;
+        for (boot_entry_t *x = config->entries; x; x = x->next) x->index = idx++;
+    }
+}
+
 EFI_STATUS detect_entries(config_t *config) {
     if (!show_names_set)  config->show_names = 0;
     if (!center_info_set) config->center_info = 1;
@@ -442,6 +500,11 @@ EFI_STATUS detect_entries(config_t *config) {
     if (efi_fs_drivers_pending()) {
         efi_log(L"config: starting FS drivers before auto-detection");
         efi_start_deferred_drivers();
+    }
+
+    if (!dc_self_image) {
+        dc_self_image = self_image_path();
+        if (dc_self_image) { efi_log(L"config: running image"); efi_log(dc_self_image); }
     }
 
     int quick = (config->scan_mode == SCAN_MODE_QUICK);
@@ -457,5 +520,7 @@ EFI_STATUS detect_entries(config_t *config) {
     }
 
     if (!found && !bls) return EFI_NOT_FOUND;
+
+    prune_self_entries(config);
     return EFI_SUCCESS;
 }

@@ -187,6 +187,8 @@ void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         config->timeout_set = 1;
     } else if (efi_strcmp(key, L"default") == 0) {
         config->default_entry = (INTN)parse_uint(value);
+    } else if (efi_strcmp(key, L"exclude_self") == 0) {
+        config->exclude_self = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"quiet") == 0) {
         config->quiet = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"windows_bootnext") == 0) {
