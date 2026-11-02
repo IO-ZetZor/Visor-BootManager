@@ -181,7 +181,12 @@ void efi_log(CHAR16 *msg) {
     if (!visor_log_to_file) { in_log = 0; return; }
 
     EFI_FILE_PROTOCOL *f = log_file_open();
-    if (!f) { in_log = 0; return; }
+    if (!f) {
+        /* Deliberately not latched: the header is written before
+         * efi_load_fs_drivers() runs, so on some boards the boot volume is
+         * not reachable yet and a later line can still open the file. */
+        in_log = 0; return;
+    }
 
     UINT8 line[320];
     UINTN n = 0;
@@ -267,38 +272,47 @@ void efi_log_rotate(void) {
 
     efi_log_close();
 
+    /* Every step below reports into rs; the shutdown path is single, so an
+     * open failure cannot fall through to the success message.  The old file
+     * is already gone at this point, which is why a failure here has to latch
+     * rather than be retried by the next efi_log() line. */
+    EFI_STATUS rs = EFI_SUCCESS;
     EFI_FILE_PROTOCOL *root = log_open_root();
-    if (root) {
+    if (!root) {
+        rs = EFI_DEVICE_ERROR;
+    } else {
         EFI_FILE_PROTOCOL *f = NULL;
         if (!EFI_ERROR(root->Open(root, &f, LOG_PATH,
-                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f)
+                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f) {
+            /* Delete closes the handle itself.  A failure here is not fatal:
+             * the create below truncates whatever is left. */
             f->Delete(f);
+        }
         f = NULL;
-        if (!EFI_ERROR(root->Open(root, &f, LOG_PATH,
-                EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0)) && f) {
-            EFI_STATUS rs = EFI_SUCCESS;
-            if (keep && keep_len > 0) {
-                UINTN w = keep_len;
-                rs = f->Write(f, &w, keep);
-                if (!EFI_ERROR(rs) && w != keep_len) rs = EFI_DEVICE_ERROR;
-            }
+        EFI_STATUS os = root->Open(root, &f, LOG_PATH,
+            EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+        if (EFI_ERROR(os) || !f) {
+            rs = EFI_ERROR(os) ? os : EFI_DEVICE_ERROR;
+        } else {
+            f->SetPosition(f, 0);
+            UINTN w = keep_len;
+            rs = f->Write(f, &w, keep);
+            if (!EFI_ERROR(rs) && w != keep_len) rs = EFI_DEVICE_ERROR;
             if (!EFI_ERROR(rs)) rs = f->Flush(f);
             f->Close(f);
-            if (EFI_ERROR(rs)) {
-                /* Rotation talks to the driver directly, so it has to set the
-                 * latch itself; otherwise efi_log() would reopen the same
-                 * wedged file on the next line. */
-                root->Close(root);
-                efi_free_pool(buf->data);
-                efi_free_pool(buf);
-                log_latch_off(L"rewrite");
-                return;
-            }
         }
         root->Close(root);
     }
 
     efi_free_pool(buf->data);
     efi_free_pool(buf);
+
+    if (EFI_ERROR(rs)) {
+        /* Rotation talks to the driver directly, so it has to set the latch
+         * itself; otherwise efi_log() would reopen the same wedged file on
+         * the next line and report success that never happened. */
+        log_latch_off(L"rewrite");
+        return;
+    }
     efi_log(L"log: rotated boot.log (size cap reached)");
 }
