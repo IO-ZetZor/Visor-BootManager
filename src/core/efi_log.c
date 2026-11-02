@@ -5,12 +5,17 @@ int visor_quiet = 0;
 int visor_log_to_console = 0;
 int visor_boot_services_active = 1;
 static int visor_log_to_file = 1;
+/* Boot-scoped latch: once a write or flush fails, file logging stays off for
+ * the rest of the boot.  efi_log_set_file() would otherwise let the config
+ * path re-enable it and hand every later line back to the driver that failed. */
+static int log_write_failed = 0;
 
 void efi_log_set_console(int enabled) {
     visor_log_to_console = enabled ? 1 : 0;
 }
 
 void efi_log_set_file(int enabled) {
+    if (enabled && log_write_failed) return;
     visor_log_to_file = enabled ? 1 : 0;
 }
 
@@ -143,7 +148,9 @@ void efi_log(CHAR16 *msg) {
     if (EFI_ERROR(ws) || wsize != n) {
         /* A firmware FAT driver that refuses the write will refuse every
          * later one too; stop retrying (each retry is a firmware call that
-         * can hang) and say so on the console instead. */
+         * can hang) and say so on the console instead.  The latch keeps
+         * later efi_log_set_file(1) calls from re-arming a wedged driver. */
+        log_write_failed = 1;
         efi_log_close();
         visor_log_to_file = 0;
         if (ST && ST->ConOut) {
@@ -151,6 +158,7 @@ void efi_log(CHAR16 *msg) {
                 L"Visor: boot.log write failed - file logging disabled\r\n");
         }
     } else if (EFI_ERROR(f->Flush(f))) {
+        log_write_failed = 1;
         efi_log_close();
         visor_log_to_file = 0;
         if (ST && ST->ConOut) {
@@ -173,9 +181,9 @@ void efi_log_begin(void) {
 void efi_log_rotate(void) {
     if (!visor_log_to_file) return;
 
-    visor_log_to_file = 0;
+    efi_log_set_file(0);
     efi_file_buffer_t *buf = efi_load_file(LOG_PATH);
-    visor_log_to_file = 1;
+    efi_log_set_file(1);
     if (!buf) return;
     if (!buf->data || buf->size <= LOG_MAX_BYTES) {
         if (buf->data) efi_free_pool(buf->data);

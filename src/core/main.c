@@ -196,20 +196,36 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
          * build also prints a stage-0 line from the PE entry point. */
         efi_print(L"Visor loading...\r\n");
 
+        /* Every step below up to the GUI touches the ESP through the FAT
+         * driver, and that driver may itself ask RT->GetTime for file
+         * timestamps.  These console checkpoints cost nothing and split the
+         * file-system path into named steps without using the file system. */
+        efi_print(L"Visor: reading boot.conf\r\n");
         efi_log_set_file(0);
         int early_file_log = config_early_file_log_enabled();
         efi_log_set_file(early_file_log);
-        if (early_file_log) efi_log_begin();
-        else efi_print(L"Visor: boot logging disabled by config\r\n");
+        if (early_file_log) {
+            efi_print(L"Visor: opening boot.log\r\n");
+            efi_log_begin();
+        } else {
+            efi_print(L"Visor: boot logging disabled by config\r\n");
+        }
         efi_log(L"main: efi_main entered, services initialised");
 
         /*
          * Stamp the boot time only after the log file is open and the first
          * line is on disk.  loader_mark_init() calls RT->GetTime(), a firmware
          * RuntimeServices call that hangs on some boards; running it first made
-         * that hang look like a silent freeze with an empty boot.log.  Now a
-         * GetTime hang leaves the header line behind, which names the culprit.
+         * that hang look like a silent freeze with an empty boot.log.
+         *
+         * The log file alone is not a trustworthy checkpoint for that call:
+         * EnhancedFatDxe asks RT->GetTime for the file timestamp itself, so on
+         * the very firmware this guards against, opening or writing boot.log
+         * can enter the same hang.  The console line below is the checkpoint
+         * that does not need the FAT driver, so the screen shows whether the
+         * machine got past the log setup even when nothing reaches the ESP.
          */
+        efi_print(L"Visor: log ready, reading the firmware clock\r\n");
         loader_mark_init();
 
         ST->ConOut->ClearScreen(ST->ConOut);
