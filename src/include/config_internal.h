@@ -65,6 +65,7 @@ extern UINTN      dc_scanned_n;
 extern int show_names_set;
 extern int center_info_set;
 extern CHAR16 *dc_self_image;
+void config_exclude_self_entries(config_t *config);
 EFI_STATUS detect_entries(config_t *config);
 CHAR16* read_text_file(CHAR16 *path);
 void apply_global(config_t *config, CHAR16 *key, CHAR16 *value);

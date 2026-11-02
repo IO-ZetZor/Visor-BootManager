@@ -275,6 +275,7 @@ EFI_STATUS config_parse(config_t *config) {
     } else {
         config->entries_from_config = 1;
         efi_log(L"config: boot.conf supplied the entries - skipping volume scan");
+        config_exclude_self_entries(config);
     }
 
     snapshots_apply(config);
