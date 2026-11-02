@@ -39,7 +39,7 @@ EFI_HANDLE efi_boot_volume_handle(void) {
 
 void* efi_allocate_pool(UINTN size) {
     void *ptr = NULL;
-    BS->AllocatePool(EfiLoaderData, size, &ptr);
+    if (EFI_ERROR(BS->AllocatePool(EfiLoaderData, size, &ptr))) return NULL;
     return ptr;
 }
 

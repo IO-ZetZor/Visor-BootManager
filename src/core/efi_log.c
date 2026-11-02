@@ -139,8 +139,25 @@ void efi_log(CHAR16 *msg) {
     line[n++] = '\n';
 
     UINTN wsize = n;
-    f->Write(f, &wsize, line);
-    f->Flush(f);
+    EFI_STATUS ws = f->Write(f, &wsize, line);
+    if (EFI_ERROR(ws) || wsize != n) {
+        /* A firmware FAT driver that refuses the write will refuse every
+         * later one too; stop retrying (each retry is a firmware call that
+         * can hang) and say so on the console instead. */
+        efi_log_close();
+        visor_log_to_file = 0;
+        if (ST && ST->ConOut) {
+            ST->ConOut->OutputString(ST->ConOut,
+                L"Visor: boot.log write failed - file logging disabled\r\n");
+        }
+    } else if (EFI_ERROR(f->Flush(f))) {
+        efi_log_close();
+        visor_log_to_file = 0;
+        if (ST && ST->ConOut) {
+            ST->ConOut->OutputString(ST->ConOut,
+                L"Visor: boot.log flush failed - file logging disabled\r\n");
+        }
+    }
     in_log = 0;
 }
 

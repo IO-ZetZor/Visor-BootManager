@@ -52,18 +52,19 @@ static void visor_run_dtors(void) {
 }
 
 /*
- * gnu-efi's stock _entry() calls InitializeLib() before efi_main().  That
- * means a banner at the top of efi_main() is too late to tell a firmware PE
- * loader failure apart from a hang inside gnu-efi itself.  Keep our own
- * entry point so the first console write happens before any library setup.
+ * gnu-efi's stock _entry() calls InitializeLib() before efi_main(); we keep
+ * our own so the constructor/destructor contract stays explicit and the
+ * service pointers are installed by us.
+ *
+ * Deliberately no console output here.  ConOut->OutputString is a privileged
+ * protocol call: on firmware where Visor is the first PE image to run, it can
+ * bind console device drivers before GOP is up, and that is a known freeze on
+ * some consumer boards.  Production builds stay silent until efi_main(),
+ * which runs after InitializeLib(); a diagnostic build that needs a checkpoint
+ * from the PE entry point uses VISOR_EARLY_DIAG in early_start_x86_64.S,
+ * which runs even earlier than this function.
  */
 EFI_STATUS _entry(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
-    if (system_table && system_table->ConOut &&
-        system_table->ConOut->OutputString) {
-        system_table->ConOut->OutputString(system_table->ConOut,
-            L"Visor: self-relocation complete\r\n");
-    }
-
     /*
      * Passing a NULL image handle deliberately skips gnu-efi's early
      * HandleProtocol/GetVariable/LocateHandle probing.  Those calls used to
@@ -187,14 +188,13 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         RT = system_table->RuntimeServices;
         IH = image_handle;
 
-        /* Second checkpoint.  _entry() printed the first one immediately after
-         * self-relocation; a diagnostic build also prints a stage-0 line from the
-         * PE entry point.  If this line appears and the machine still freezes, the
-         * fault is after console setup; if it never appears, it is in the entry
-         * path or the safe library initialization above. */
+        /* Checkpoint: this line is the last thing printed before any firmware
+         * call that is not a plain protocol lookup.  If it appears and the
+         * machine still freezes, the fault is in the file/log or GUI setup
+         * below; if it never appears, it is in the entry path, the safe
+         * library initialization above, or the constructor run.  A diagnostic
+         * build also prints a stage-0 line from the PE entry point. */
         efi_print(L"Visor loading...\r\n");
-
-        loader_mark_init();
 
         efi_log_set_file(0);
         int early_file_log = config_early_file_log_enabled();
@@ -202,6 +202,15 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         if (early_file_log) efi_log_begin();
         else efi_print(L"Visor: boot logging disabled by config\r\n");
         efi_log(L"main: efi_main entered, services initialised");
+
+        /*
+         * Stamp the boot time only after the log file is open and the first
+         * line is on disk.  loader_mark_init() calls RT->GetTime(), a firmware
+         * RuntimeServices call that hangs on some boards; running it first made
+         * that hang look like a silent freeze with an empty boot.log.  Now a
+         * GetTime hang leaves the header line behind, which names the culprit.
+         */
+        loader_mark_init();
 
         ST->ConOut->ClearScreen(ST->ConOut);
         ST->ConOut->EnableCursor(ST->ConOut, FALSE);
