@@ -1237,6 +1237,10 @@ boot_selected:
         efi_log(L"recovery: returning to boot menu");
         force_menu = 1;
         retry_selected = 0;
+        /* The entry that just failed still holds the passphrase it was given;
+         * the menu may pick another one, so drop it here.  RETRY keeps it on
+         * purpose, since the retry reuses the same entry and passphrase. */
+        if (selected) wipe_password(&selected->decrypt_password);
         goto select_entry;
     }
     if (action == VISOR_ACTION_SHUTDOWN) {
