@@ -58,12 +58,13 @@ default=0
 # power-on to interrupt and show the menu. 0 = always show the menu (default).
 autoboot=0
 
-# Key that interrupts autoboot and opens the menu: any (default), one printable
+# Key that interrupts autoboot and opens the menu: V (default), any, one printable
 # character, Enter, Esc, Space, Tab, Backspace, arrows, Home/End, Insert/Delete,
 # PageUp/PageDown, or F1-F12. Printable characters are case-insensitive. UEFI reports
 # keystrokes without key-release state, so a tap and a hold both trigger the menu.
-# Example: autoboot=1 with autoboot_key=F2 skips the menu unless F2 is pressed.
-#autoboot_key=any
+# Example: autoboot=1 skips the menu unless V is held during boot; autoboot=1 with
+# autoboot_key=any opens it on any keypress.
+#autoboot_key=V
 
 # One still splash frame, painted as soon as the GUI is up and kept on screen all the
 # way through the handover. It draws the same background, logo and title the menu
@@ -73,8 +74,22 @@ autoboot=0
 # then runs firmware -> this frame -> the distro's own splash.
 # Visor cannot start plymouth (it runs later, inside the initramfs), so add
 # quiet splash to the kernel command line for a continuous handover.
-# 1 = splash on, 0 = off (default).
+# 1 = splash on, 0 = off (default). With autoboot=1 nothing else would ever be
+# drawn, so this is the frame the machine shows until the kernel paints over it.
 #splash=0
+
+# Picture for the splash frame (PNG, BMP or GIF), scaled to cover the screen and
+# centred. Nothing is drawn on top of it, so it is yours to design. Unset, the
+# frame is composed from background, logo and title instead. A picture that fails
+# to decode falls back to the composed frame - never to a failed boot.
+#splash_image=\EFI\visor\splash.png
+
+# Whether the fast path may start the GUI just to paint the splash.
+#   1   initialise the framebuffer and draw splash (default)
+#   0   do not touch the video at all: the firmware's own screen stays up until
+#       the kernel takes over. The fastest boot, but no still frame - and the
+#       key that opens the menu still works, it just starts the GUI on demand.
+#splash_gui=1
 
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)

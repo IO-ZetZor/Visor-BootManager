@@ -317,6 +317,10 @@ typedef struct gui_state {
 
     icon_t *background;
     CHAR16 *background_path;
+    /* Optional splash picture (splash_image in boot.conf).  When set the
+     * splash frame is this image scaled to the screen instead of the composed
+     * wallpaper/logo/title one. */
+    icon_t *splash_img;
     anim_t *bg_anim;
 
     int     version_mode;
@@ -446,6 +450,7 @@ void gui_shutdown(gui_state_t *state);
 void gui_set_background(gui_state_t *state, CHAR16 *path);
 
 void gui_set_logo(gui_state_t *state, CHAR16 *path);
+void gui_set_splash(gui_state_t *state, CHAR16 *path);
 
 /* Paint the boot splash: wallpaper, logo and title, centred, presented once.
  * Unlike the intro it never animates and never yields to the console - it is

@@ -67,6 +67,14 @@ typedef struct {
      * is the frame the kernel paints over, so the machine goes splash to
      * splash with no text screen and no black flash in between. */
     int     splash;
+    /* Optional full-screen splash picture.  Set, it replaces the composed
+     * wallpaper/logo/title frame and is scaled to the screen; unset, the
+     * splash is built from the same pieces the menu draws. */
+    CHAR16 *splash_image;
+    /* Whether the fast path is allowed to bring the GUI up just to paint the
+     * splash.  0 keeps the video firmware's own screen until the kernel takes
+     * over - the fastest boot, at the cost of no still frame. */
+    int     splash_gui;
     UINTN   intro_duration;
     int     intro_loop;
     int     intro_auto_continue;

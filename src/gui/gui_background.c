@@ -83,6 +83,28 @@ void gui_set_logo(gui_state_t *state, CHAR16 *path) {
 
 #define ANIM_MAX_SKIP 8
 
+
+/* Load the optional splash picture.  A path that cannot be decoded is logged
+ * and ignored: the splash then falls back to the composed frame, so a bad
+ * splash_image can never cost a boot. */
+void gui_set_splash(gui_state_t *state, CHAR16 *path) {
+    if (state->splash_img && state->splash_img->pixels) {
+        if (state->splash_img->scaled) efi_free_pool(state->splash_img->scaled);
+        efi_free_pool(state->splash_img->pixels);
+        efi_free_pool(state->splash_img);
+    }
+    state->splash_img = NULL;
+    if (!path || !path[0]) return;
+
+    efi_log(L"  loading splash image");
+    state->splash_img = gui_load_image(path);
+    if (!state->splash_img) {
+        efi_log(L"  WARN: splash_image failed to load/decode - using the composed frame");
+    } else {
+        efi_log(L"  splash image loaded");
+    }
+}
+
 static int anim_build_maps(anim_t *a, UINTN dw, UINTN dh) {
     if (a->xmap && a->ymap && a->map_w == dw && a->map_h == dh) return 1;
 
@@ -201,6 +223,24 @@ int gui_draw_splash(gui_state_t *state) {
 
     UINTN sw = state->screen_width;
     UINTN sh = state->screen_height;
+
+    /* A user-supplied splash picture wins outright: it is theirs to design,
+     * so nothing is composed on top of it.  Scaled to cover, centred. */
+    if (state->splash_img && state->splash_img->pixels &&
+        state->splash_img->width && state->splash_img->height) {
+        UINTN iw = state->splash_img->width, ih = state->splash_img->height;
+        UINTN dw = sw, dh = sh;
+        if (iw * sh > ih * sw) dh = ih * sw / iw;
+        else                   dw = iw * sh / ih;
+        if (!dw) dw = 1;
+        if (!dh) dh = 1;
+        gui_fill_rect(state, 0, 0, (INTN)sw, (INTN)sh, state->bg_color);
+        draw_image_sized(state, state->splash_img,
+                         (sw - dw) / 2, (sh - dh) / 2, dw);
+        gui_present(state);
+        return 1;
+    }
+
     gui_draw_background(state);
 
     UINTN base     = ui_base(state);

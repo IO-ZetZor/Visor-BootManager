@@ -115,6 +115,63 @@ static int autoboot_menu_requested(const config_t *config) {
     return 0;
 }
 
+/* Bring the GUI up after the fast path decided it was not needed.  Used when
+ * the user interrupts autoboot: the menu has to appear in the mode the
+ * configuration asks for, not in the text fallback the fast path selected. */
+static void main_gui_late_start(gui_state_t *gui, config_t *config) {
+    if (config->res_max || (config->res_w && config->res_h))
+        gui_set_mode(gui, config->res_w, config->res_h, config->res_max);
+
+    if (config->power_icons) {
+        if (config->shutdown_icon) gui->shutdown_icon = gui_load_icon(config->shutdown_icon);
+        if (config->reboot_icon)   gui->reboot_icon   = gui_load_icon(config->reboot_icon);
+        if (config->firmware_icon) gui->firmware_icon = gui_load_icon(config->firmware_icon);
+        if ((config->shutdown_icon && !gui->shutdown_icon) ||
+            (config->reboot_icon   && !gui->reboot_icon)   ||
+            (config->firmware_icon && !gui->firmware_icon))
+            efi_log(L"WARN: a power icon failed to load - falling back to text for it");
+    }
+
+    if (config->font) {
+        char name[32]; UINTN i = 0;
+        for (; config->font[i] && i < sizeof(name) - 1; i++) name[i] = (char)config->font[i];
+        name[i] = '\0';
+        gui_set_font(name);
+    }
+
+    cap_session_arm();
+    int rbd_played = rbd_check_and_play(gui);
+    if (!rbd_played &&
+        menu_sound_prepare(config->menu_sound_on, config->menu_sound,
+                           config->menu_sound_volume)) {
+        gui->sound_start = menu_sound_start;
+        gui->sound_poll  = menu_sound_poll;
+    }
+
+    if (config->mouse)
+        gui_set_cursor(gui, config->cursor, config->cursor_size,
+                       config->cursor_hot_x, config->cursor_hot_y);
+}
+
+/* Make sure the menu can actually be drawn: initialise the GUI if the fast
+ * path skipped it, and fall back to text mode when that is impossible. */
+static void main_gui_ensure(gui_state_t *gui, config_t *config,
+                            int *text_mode, int *gui_started) {
+    if (config->text_menu) { *text_mode = 1; return; }
+    if (*gui_started) return;
+
+    EFI_STATUS status = gui_init(gui);
+    if (EFI_ERROR(status)) {
+        efi_log(L"WARN: gui_init failed - showing the text menu instead");
+        efi_print(L"Graphics unavailable - using text menu\r\n");
+        *text_mode = 1;
+        return;
+    }
+    *gui_started = 1;
+    *text_mode = 0;
+    main_gui_late_start(gui, config);
+}
+
 static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
                            UINTN *first_new) {
     config_t *cfg = (config_t*)ctx;
@@ -253,20 +310,12 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         if (efi_log_write_failed())
             efi_print(L"WARN: boot.log could not be written - this boot is console only\r\n");
 
-        efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
         gui_state_t gui = {0};
         int text_mode = 0;
+        int gui_started = 0;
+        int force_menu = 0;
         UINTN loader_pick = (UINTN)-1;
-        EFI_STATUS status = gui_init(&gui);
-        if (EFI_ERROR(status)) {
-            efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
-            efi_print(L"Graphics unavailable - using text menu\r\n");
-            text_mode = 1;
-            gui.selected = 0;
-            gui.timeout_active = 1;
-        } else {
-            efi_log(L"main: GUI ready");
-        }
+        EFI_STATUS status;
 
         efi_log(L"main: loading filesystem drivers from \\EFI\\visor\\drivers");
         efi_load_fs_drivers();
@@ -352,6 +401,41 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         nvram_self_heal(&pol);
     } else {
         efi_log(L"main: selfheal=0 in config - boot self-heal disabled");
+    }
+
+    /* --- Framebuffer ------------------------------------------------------
+     * A fast path that shows nothing (autoboot with no splash, or splash
+     * drawing turned off with splash_gui=0) does not need a framebuffer at
+     * all: skip gui_init so the firmware's own screen stays up until the
+     * kernel takes over.  The menu is only built when it will be shown, and
+     * if the user interrupts autoboot the GUI is started late, in the mode
+     * the configuration asks for. */
+    int fastboot   = !force_menu && config.autoboot && config.entry_count >= 1;
+    int splash_on  = config.splash && config.splash_gui;
+
+    if (!config.text_menu && (!fastboot || splash_on)) {
+        efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
+        status = gui_init(&gui);
+        if (EFI_ERROR(status)) {
+            efi_log(L"WARN: gui_init failed (no GOP or out of memory) - falling back to text mode");
+            efi_print(L"Graphics unavailable - using text menu\r\n");
+            text_mode = 1;
+            gui.selected = 0;
+            gui.timeout_active = 1;
+        } else {
+            gui_started = 1;
+            efi_log(L"main: GUI ready");
+        }
+    } else if (config.text_menu) {
+        efi_log(L"main: text_menu=1 - no framebuffer needed");
+        text_mode = 1;
+        gui.selected = 0;
+        gui.timeout_active = 1;
+    } else {
+        efi_log(L"main: fastboot - no framebuffer needed, skipping the GUI");
+        text_mode = 1;
+        gui.selected = 0;
+        gui.timeout_active = 1;
     }
 
     if (config.text_menu && !text_mode) {
@@ -548,7 +632,6 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
     int action = VISOR_ACTION_BOOT;
     int autobooted = 0;
     int gui_closed = 0;
-    int force_menu = 0;
     int retry_selected = 0;
     int intro_seen = 0;
     int intro_boot = 0;
@@ -575,14 +658,18 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
      * text console - or a black screen - between Visor and the kernel.  It
      * reuses the wallpaper, logo and title the menu would draw, so the frame
      * the kernel paints over already looks like the boot splash. */
-    if (!text_mode && !gui_closed && config.splash) {
-        if (config.background && !gui.background) {
+    if (fastboot && splash_on && !text_mode && !gui_closed) {
+        if (config.splash_image && !gui.splash_img) {
+            efi_log(L"main: splash - loading splash_image");
+            gui_set_splash(&gui, config.splash_image);
+        }
+        if (!gui.splash_img && config.background && !gui.background) {
             efi_log(L"main: splash - loading background image");
             gui_set_background(&gui, config.background);
             if (!gui.background)
                 efi_log(L"WARN: splash background failed to load/decode - using solid colour");
         }
-        if (gui.logo_mode != LOGO_MODE_OFF && !gui.logo)
+        if (!gui.splash_img && gui.logo_mode != LOGO_MODE_OFF && !gui.logo)
             gui_set_logo(&gui, config.logo);
         gui_apply_accent(&gui);
         splash_shown = gui_draw_splash(&gui);
@@ -636,6 +723,10 @@ select_entry:
                 efi_log(L"main: intro_action=boot cancelled by a key - showing menu");
             else
                 efi_log(L"main: autoboot interrupt key pressed - showing menu");
+            /* The fast path boots without ever bringing the video up.  The
+             * user just asked for the menu, so start it now - in the mode the
+             * configuration asks for, not the text fallback chosen above. */
+            main_gui_ensure(&gui, &config, &text_mode, &gui_started);
         }
     }
 
@@ -913,6 +1004,17 @@ boot_selected:
 
         selected->decrypt_password = pw;
         efi_log(L"main: password captured for encrypted/LUKS boot entry");
+    }
+
+    /* Last chance to catch the autoboot key: the splash and the self-heal
+     * work above gave the user a window after the first poll. */
+    if (!gui_closed && autobooted && autoboot_menu_requested(&config)) {
+        efi_log(L"main: autoboot key pressed during boot - opening the menu");
+        main_gui_ensure(&gui, &config, &text_mode, &gui_started);
+        force_menu = 1;
+        autobooted = 0;
+        splash_shown = 0;
+        goto select_entry;
     }
 
     if (!text_mode && !gui_closed && !splash_shown) {

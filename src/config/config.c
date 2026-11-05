@@ -83,7 +83,9 @@ EFI_STATUS config_parse(config_t *config) {
     config->recovery_entries = 0;
     config->snapshots_mode = 1;
     config->autoboot = 0;
-    config->autoboot_key_unicode = 0;
+    /* Fastboot listens for V by default: a letter the user has to hold on
+     * purpose, not any stray key the firmware or a keyboard may deliver. */
+    config->autoboot_key_unicode = L'V';
     config->autoboot_key_scancode = 0;
     config->mouse = 1;
     config->pointer_speed = 4;
@@ -127,6 +129,8 @@ EFI_STATUS config_parse(config_t *config) {
     config->background = NULL;
     config->intro_media = NULL;
     config->splash = 0;
+    config->splash_image = NULL;
+    config->splash_gui = 1;
     config->intro_duration = 2000;
     config->intro_loop = 0;
     config->intro_auto_continue = 1;

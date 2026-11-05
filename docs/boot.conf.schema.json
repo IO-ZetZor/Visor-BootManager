@@ -454,16 +454,29 @@
     "autoboot_key": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Key event that interrupts autoboot and opens the menu. Accepts any, one printable character, Enter, Esc, Space, Tab, Backspace, arrow and navigation keys, or F1-F12. Printable characters are case-insensitive. UEFI input does not expose key-release state, so taps and holds both trigger the menu.",
+      "description": "Key event that interrupts autoboot and opens the menu. Accepts any, one printable character, Enter, Esc, Space, Tab, Backspace, arrow and navigation keys, or F1-F12. Printable characters are case-insensitive. UEFI input does not expose key-release state, so taps and holds both trigger the menu. Defaults to V, so holding V during a fastboot opens the menu.",
       "type": "string",
-      "default": "any"
+      "default": "V"
     },
     "splash": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Paint one still splash frame - the configured background, logo and title - as soon as the GUI exists, and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. Meant for autoboot=1 where the menu never appears: the machine then goes from the firmware straight to the distro's own splash with no text screen and no black flash. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet/splash on the kernel command line if you want them to look continuous. Defaults to false.",
+      "description": "Paint one still splash frame and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. It is meant for autoboot=1, where no menu appears: the machine then goes from the firmware straight to the distro's own splash with no text screen and no black flash. Without splash_image the frame is composed from background, logo and title; with it, the picture is used as-is. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet splash on the kernel command line if you want them to look continuous. Defaults to false.",
       "$ref": "#/$defs/bool",
       "default": false
+    },
+    "splash_gui": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws splash, 0 skips GUI initialisation entirely so the firmware screen stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "splash_image": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Picture used for the splash frame (PNG, BMP, GIF). Scaled to cover the screen and centred; nothing is drawn on top of it. Unset, the frame is composed from background, logo and title. An unreadable or undecodable picture falls back to the composed frame - never to a failed boot.",
+      "$ref": "#/$defs/path"
     },
     "background": {
       "x-feature": "gui",
