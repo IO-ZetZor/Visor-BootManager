@@ -994,6 +994,14 @@
       "x-alias-of": "remember_last",
       "description": "Alias for remember_last."
     },
+    "checkpoints": {
+      "x-feature": "core",
+      "x-group": "boot",
+      "x-aliases": ["startup_text"],
+      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. Off by default, so a fastboot leaves nothing on screen but the firmware's own logo. Turn it on when a machine freezes during boot and the last line on screen is the only clue. The lines still go to boot.log either way, and they always print when boot.conf itself cannot be read.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
     "remember_last": {
       "x-feature": "discover",
       "x-group": "boot",

@@ -92,10 +92,18 @@ autoboot=0
 #       stays up until the kernel takes over. The fastest boot, but no still
 #       frame - and the key that opens the menu still works, it just starts the
 #       GUI on demand.
-# The same GUI-less path is taken whenever autoboot=1 with splash=0. Visor still
-# prints its four startup checkpoints either way - they run before boot.conf can
-# be read - but draws and prints nothing after them, and never clears the screen.
+# The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor draws
+# nothing, never clears the screen and prints no boot text. Whether its startup
+# checkpoints appear on top of the logo is the checkpoints= option below.
 #splash_gui=1
+
+# Startup checkpoints on the console: "Visor loading...", "reading boot.conf",
+# "opening boot.log", "log ready, reading the firmware clock". Off by default, so
+# a fastboot shows the firmware's own logo and nothing else. Set 1 when a machine
+# freezes and you need to know which step it died in - the same lines always go
+# to boot.log, and they always print when boot.conf itself cannot be read.
+# (alias: startup_text)
+#checkpoints=0
 
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)

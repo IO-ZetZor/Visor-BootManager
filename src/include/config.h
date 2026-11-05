@@ -75,6 +75,11 @@ typedef struct {
      * splash.  0 keeps the video firmware's own screen until the kernel takes
      * over - the fastest boot, at the cost of no still frame. */
     int     splash_gui;
+    /* Print the startup checkpoints on the console.  0 (default) keeps the
+     * firmware's own screen free of Visor text; set 1 when a machine freezes
+     * and the last line on screen is the only clue.  Checkpoints always print
+     * when boot.conf itself cannot be read. */
+    int     checkpoints;
     UINTN   intro_duration;
     int     intro_loop;
     int     intro_auto_continue;
@@ -157,7 +162,7 @@ typedef struct {
 
 EFI_STATUS config_parse(config_t *config);
 
-int config_early_file_log_enabled(void);
+void config_early_flags(int *file_log, int *checkpoints);
 
 void config_hotplug_arm(config_t *config);
 

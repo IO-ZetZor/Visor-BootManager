@@ -275,26 +275,36 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         RT = system_table->RuntimeServices;
         IH = image_handle;
 
+        /* boot.conf decides whether these checkpoints print at all, so it has
+         * to be read before the first line.  That read is the one path the
+         * checkpoints no longer cover: on a machine that hangs while reading
+         * the config, nothing appears on screen - which is why an unreadable
+         * config leaves checkpoints on instead of off. */
+        int early_file_log = 1, early_checkpoints = 1;
+        config_early_flags(&early_file_log, &early_checkpoints);
+
         /* Checkpoint: this line is the last thing printed before any firmware
          * call that is not a plain protocol lookup.  If it appears and the
          * machine still freezes, the fault is in the file/log or GUI setup
          * below; if it never appears, it is in the entry path, the safe
          * library initialization above, or the constructor run.  A diagnostic
          * build also prints a stage-0 line from the PE entry point. */
-        efi_print(L"Visor loading...\r\n");
+        if (early_checkpoints)
+            efi_print(L"Visor loading...\r\n");
 
         /* Every step below up to the GUI touches the ESP through the FAT
          * driver, and that driver may itself ask RT->GetTime for file
          * timestamps.  These console checkpoints cost nothing and split the
          * file-system path into named steps without using the file system. */
-        efi_print(L"Visor: reading boot.conf\r\n");
+        if (early_checkpoints)
+            efi_print(L"Visor: reading boot.conf\r\n");
         efi_log_set_file(0);
-        int early_file_log = config_early_file_log_enabled();
         efi_log_set_file(early_file_log);
         if (early_file_log) {
-            efi_print(L"Visor: opening boot.log\r\n");
+            if (early_checkpoints)
+                efi_print(L"Visor: opening boot.log\r\n");
             efi_log_begin();
-        } else {
+        } else if (early_checkpoints) {
             efi_print(L"Visor: boot logging disabled by config\r\n");
         }
         efi_log(L"main: efi_main entered, services initialised");
@@ -312,7 +322,8 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
          * that does not need the FAT driver, so the screen shows whether the
          * machine got past the log setup even when nothing reaches the ESP.
          */
-        efi_print(L"Visor: log ready, reading the firmware clock\r\n");
+        if (early_checkpoints)
+            efi_print(L"Visor: log ready, reading the firmware clock\r\n");
         loader_mark_init();
 
         /* The console is deliberately left alone here.  A boot that shows no
