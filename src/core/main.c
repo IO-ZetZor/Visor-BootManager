@@ -118,9 +118,38 @@ static int autoboot_menu_requested(const config_t *config) {
 /* Bring the GUI up after the fast path decided it was not needed.  Used when
  * the user interrupts autoboot: the menu has to appear in the mode the
  * configuration asks for, not in the text fallback the fast path selected. */
+/* boot.conf is user input; cap display sizes so extreme values cannot push the
+ * menu off-screen or overflow layout arithmetic.  The caps depend on the screen
+ * height, so this has to run after the mode is chosen - in the fast path the
+ * GUI comes up late, and clamping against a zero height would pin every size to
+ * its floor. */
+static void main_clamp_gui_sizes(gui_state_t *gui) {
+    UINTN title_cap = gui->screen_height / 6;
+    if (title_cap < 48) title_cap = 48;
+    if (gui->title_size > title_cap) gui->title_size = title_cap;
+
+    UINTN name_cap = gui->screen_height / 10;
+    if (name_cap < 18) name_cap = 18;
+    if (gui->name_size > name_cap) gui->name_size = name_cap;
+
+    UINTN icon_cap = gui->screen_height * 2 / 5;
+    if (icon_cap < 32) icon_cap = 32;
+    if (icon_cap > 512) icon_cap = 512;
+    if (gui->icon_size > icon_cap) gui->icon_size = icon_cap;
+    if (gui->power_icon_size > icon_cap) gui->power_icon_size = icon_cap;
+}
+
 static void main_gui_late_start(gui_state_t *gui, config_t *config) {
     if (config->res_max || (config->res_w && config->res_h))
         gui_set_mode(gui, config->res_w, config->res_h, config->res_max);
+
+    /* The fast path wired the sizes before a mode existed; put the configured
+     * values back and cap them against the height that is actually in use. */
+    gui->title_size = config->title_size;
+    gui->name_size  = config->name_size;
+    gui->icon_size  = config->icon_size;
+    gui->power_icon_size = config->power_icon_size;
+    main_clamp_gui_sizes(gui);
 
     if (config->power_icons) {
         if (config->shutdown_icon) gui->shutdown_icon = gui_load_icon(config->shutdown_icon);
@@ -169,7 +198,16 @@ static void console_takeover(void) {
 /* Make sure the menu can actually be drawn: initialise the GUI if the fast
  * path skipped it, and fall back to text mode when that is impossible. */
 static void main_gui_ensure(gui_state_t *gui, config_t *config,
-                            int *text_mode, int *gui_started) {
+                            int *text_mode, int *gui_started,
+                            int *keep_firmware_screen) {
+    /* From here on something is drawn over the firmware screen, so take it
+     * over first: the text menu needs a cleared console, and the GUI path
+     * needs the cursor off and the log warning back.  Leaving the flag set
+     * would make the handover suppress the console again after a menu. */
+    if (*keep_firmware_screen) {
+        console_takeover();
+        *keep_firmware_screen = 0;
+    }
     if (config->text_menu) { *text_mode = 1; return; }
     if (*gui_started) return;
 
@@ -541,19 +579,7 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
     gui.power_icons     = config.power_icons;
     gui.power_icon_size = config.power_icon_size;
 
-    /* boot.conf is user input; cap display sizes so extreme values cannot
-     * push the menu off-screen or overflow layout arithmetic. */
-    UINTN title_cap = gui.screen_height / 6;
-    if (title_cap < 48) title_cap = 48;
-    if (gui.title_size > title_cap) gui.title_size = title_cap;
-    UINTN name_cap = gui.screen_height / 10;
-    if (name_cap < 18) name_cap = 18;
-    if (gui.name_size > name_cap) gui.name_size = name_cap;
-    UINTN icon_cap = gui.screen_height * 2 / 5;
-    if (icon_cap < 32) icon_cap = 32;
-    if (icon_cap > 512) icon_cap = 512;
-    if (gui.icon_size > icon_cap) gui.icon_size = icon_cap;
-    if (gui.power_icon_size > icon_cap) gui.power_icon_size = icon_cap;
+    main_clamp_gui_sizes(&gui);
 
     gui.blur            = config.blur;
     gui.blur_title      = config.blur_title;
@@ -677,6 +703,7 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
     int hp_overridden = 0;
     EFI_STATUS cleanup_status = EFI_SUCCESS;
     int splash_shown = 0;
+    int splash_covered = 0;
 
     /* The still splash goes up before the menu, the countdown and any
      * autoboot decision, so an enabled fast boot never shows the firmware's
@@ -751,7 +778,7 @@ select_entry:
             /* The fast path boots without ever bringing the video up.  The
              * user just asked for the menu, so start it now - in the mode the
              * configuration asks for, not the text fallback chosen above. */
-            main_gui_ensure(&gui, &config, &text_mode, &gui_started);
+            main_gui_ensure(&gui, &config, &text_mode, &gui_started, &keep_firmware_screen);
         }
     }
 
@@ -957,6 +984,7 @@ boot_selected:
 
             if (!text_mode && !gui_closed) {
                 EFI_STATUS ps = gui_prompt_password(&gui, prompt, hint, &pw);
+                splash_covered = 1;
                 if (EFI_ERROR(ps)) {
                     efi_log(L"main: encrypted/LUKS boot cancelled at password prompt");
                     efi_print(L"Encrypted boot cancelled\r\n");
@@ -975,6 +1003,13 @@ boot_selected:
                     }
                 }
             } else {
+                /* A prompt is drawn: the firmware screen has to go first, or
+                 * the password is typed over the vendor logo with the cursor
+                 * still hidden and no cleared line to type on. */
+                if (keep_firmware_screen) {
+                    console_takeover();
+                    keep_firmware_screen = 0;
+                }
                 pw = text_prompt_password(L"Password: ");
                 if (!pw) {
                     efi_print(L"\r\nEncrypted boot cancelled\r\n");
@@ -1035,7 +1070,7 @@ boot_selected:
      * work above gave the user a window after the first poll. */
     if (!gui_closed && autobooted && autoboot_menu_requested(&config)) {
         efi_log(L"main: autoboot key pressed during boot - opening the menu");
-        main_gui_ensure(&gui, &config, &text_mode, &gui_started);
+        main_gui_ensure(&gui, &config, &text_mode, &gui_started, &keep_firmware_screen);
         force_menu = 1;
         autobooted = 0;
         splash_shown = 0;
@@ -1055,6 +1090,13 @@ boot_selected:
      * splash continues from an image that already matches it.  The console
      * stays quiet too - text over a splash is worse than no text. */
     if (splash_shown && !gui_closed) {
+        /* A passphrase panel may have been drawn over the splash; repaint so
+         * the frame handed to the kernel is the splash again. */
+        if (splash_covered) {
+            if (gui_draw_splash(&gui))
+                efi_log(L"main: splash repainted after the passphrase prompt");
+            splash_covered = 0;
+        }
         efi_log(L"main: splash retained - handing the framebuffer over as-is");
         gui_closed = 1;
     }

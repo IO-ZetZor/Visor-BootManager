@@ -475,7 +475,7 @@
     "splash_image": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Picture used for the splash frame (PNG, BMP, GIF). Scaled to cover the screen and centred; nothing is drawn on top of it. Unset, the frame is composed from background, logo and title. An unreadable or undecodable picture falls back to the composed frame - never to a failed boot.",
+      "description": "Picture painted as the splash frame instead of the composed background/logo/title. PNG or BMP are decoded directly; GIF, MP4/MOV/M4V and Visor's own VBG are recognised by content and only their first frame is used - the splash is the still image the kernel paints over, not a clip to play. Scaled to cover the screen and centred (overflow is cropped), with nothing drawn on top. A file that cannot be decoded is logged and ignored, and the composed frame is used instead.",
       "$ref": "#/$defs/path"
     },
     "background": {
@@ -998,7 +998,7 @@
       "x-feature": "core",
       "x-group": "boot",
       "x-aliases": ["startup_text"],
-      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. Off by default, so a fastboot leaves nothing on screen but the firmware's own logo. Turn it on when a machine freezes during boot and the last line on screen is the only clue. The lines still go to boot.log either way, and they always print when boot.conf itself cannot be read.",
+      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. They are console output only - they exist to be read off a frozen screen because they run before the boot log is open, so they are never written to boot.log. Off by default, so a fastboot leaves nothing on screen but the firmware's own logo. Turn it on when a machine freezes during boot and the last line on screen is the only clue. Always printed when boot.conf itself cannot be read.",
       "$ref": "#/$defs/bool",
       "default": false
     },

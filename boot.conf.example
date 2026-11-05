@@ -80,10 +80,13 @@ autoboot=0
 # drawn, so this is the frame the machine shows until the kernel paints over it.
 #splash=0
 
-# Picture for the splash frame (PNG, BMP or GIF), scaled to cover the screen and
-# centred. Nothing is drawn on top of it, so it is yours to design. Unset, the
-# frame is composed from background, logo and title instead. A picture that fails
-# to decode falls back to the composed frame - never to a failed boot.
+# Picture for the splash frame, scaled to cover the screen and centred (the
+# overflow is cropped). PNG and BMP are decoded directly; GIF, MP4/MOV/M4V and
+# Visor's own VBG are recognised by content and only their first frame is used -
+# the splash is the still image the kernel paints over, not a clip that plays.
+# Nothing is drawn on top of it, so it is yours to design. Unset, the frame is
+# composed from background, logo and title instead. A picture that fails to
+# decode falls back to the composed frame - never to a failed boot.
 #splash_image=\EFI\visor\splash.png
 
 # Whether the fast path may start the GUI just to paint the splash.
@@ -98,10 +101,11 @@ autoboot=0
 #splash_gui=1
 
 # Startup checkpoints on the console: "Visor loading...", "reading boot.conf",
-# "opening boot.log", "log ready, reading the firmware clock". Off by default, so
-# a fastboot shows the firmware's own logo and nothing else. Set 1 when a machine
-# freezes and you need to know which step it died in - the same lines always go
-# to boot.log, and they always print when boot.conf itself cannot be read.
+# "opening boot.log", "log ready, reading the firmware clock". Console output only
+# - they run before boot.log is open, so they never reach the log. Off by default,
+# so a fastboot shows the firmware's own logo and nothing else. Set 1 when a
+# machine freezes and you need to know which step it died in; they also print
+# when boot.conf itself cannot be read.
 # (alias: startup_text)
 #checkpoints=0
 

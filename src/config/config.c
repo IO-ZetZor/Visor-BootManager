@@ -43,7 +43,8 @@ void config_early_flags(int *file_log, int *checkpoints) {
                 CHAR16 *key = trim(line);
                 strip_inline_comment(eq + 1);
                 CHAR16 *value = trim(eq + 1);
-                int truthy = (*value == '1' || *value == 't' || *value == 'y');
+                int truthy = (*value == '1' || *value == 't' || *value == 'T' ||
+                              *value == 'y' || *value == 'Y');
                 if (efi_strcmp(key, L"log") == 0 ||
                     efi_strcmp(key, L"boot_log") == 0 ||
                     efi_strcmp(key, L"file_log") == 0)

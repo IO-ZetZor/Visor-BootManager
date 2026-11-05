@@ -99,6 +99,16 @@ void gui_set_splash(gui_state_t *state, CHAR16 *path) {
     efi_log(L"  loading splash image");
     state->splash_img = gui_load_image(path);
     if (!state->splash_img) {
+        /* GIF, MP4/MOV/M4V and Visor's own VBG are recognised by content, not
+         * by extension, so the still frame can come from any of them.  Only
+         * the first frame is painted: the splash is the image the kernel
+         * paints over, not a clip to play. */
+        icon_t *first = NULL;
+        anim_t *a = gui_load_anim(path, &first, 0, 0);
+        if (a) anim_free(a);
+        state->splash_img = first;
+    }
+    if (!state->splash_img) {
         efi_log(L"  WARN: splash_image failed to load/decode - using the composed frame");
     } else {
         efi_log(L"  splash image loaded");
@@ -216,6 +226,57 @@ int gui_draw_background(gui_state_t *state) {
  * @retval 1  the splash was painted and presented
  * @retval 0  no usable framebuffer, nothing was drawn
  */
+/* Cover-scale an icon onto the whole screen: keep the aspect ratio, scale by
+ * the larger factor, centre the overflow and let it fall off the edges.  A
+ * square draw would stretch a 16:9 picture, and the icon scaler is limited to
+ * one dimension, so this samples the source per destination pixel instead. */
+static void draw_image_cover(gui_state_t *state, icon_t *icon) {
+    if (!icon || !icon->pixels || !icon->width || !icon->height) return;
+    UINTN sw = state->screen_width, sh = state->screen_height;
+    UINTN iw = icon->width, ih = icon->height;
+    if (!sw || !sh) return;
+
+    /* Scale factors compared without floating point: iw*sh against ih*sw. */
+    UINTN dw, dh;
+    if (iw * sh > ih * sw) {
+        dw = sw;
+        dh = ih * sw / iw;
+    } else {
+        dh = sh;
+        dw = iw * sh / ih;
+    }
+    if (!dw) dw = 1;
+    if (!dh) dh = 1;
+    INTN x0 = (INTN)((sw > dw ? sw - dw : 0) / 2);
+    INTN y0 = (INTN)((sh > dh ? sh - dh : 0) / 2);
+
+    for (UINTN y = 0; y < dh && (y0 + (INTN)y) < (INTN)sh; y++) {
+        INTN py = y0 + (INTN)y;
+        if (py < 0) continue;
+        UINTN sy = y * ih / dh;
+        if (sy >= ih) sy = ih - 1;
+        for (UINTN x = 0; x < dw && (x0 + (INTN)x) < (INTN)sw; x++) {
+            INTN px = x0 + (INTN)x;
+            if (px < 0) continue;
+            UINTN sx = x * iw / dw;
+            if (sx >= iw) sx = iw - 1;
+
+            UINT32 p = icon->pixels[sy * iw + sx];
+            UINTN cov = (p >> 24) & 0xFF;
+            if (cov == 0) continue;
+            UINT8 sr = (p >> 16) & 0xFF, sg = (p >> 8) & 0xFF, sb = p & 0xFF;
+
+            UINT32 *dest = get_pixel(state, (UINTN)px, (UINTN)py);
+            if (!dest) continue;
+            UINT8 br = (*dest >> 16) & 0xFF, bg = (*dest >> 8) & 0xFF, bb = *dest & 0xFF;
+            UINT8 nr = (UINT8)((sr * cov + br * (255 - cov)) / 255);
+            UINT8 ng = (UINT8)((sg * cov + bg * (255 - cov)) / 255);
+            UINT8 nb = (UINT8)((sb * cov + bb * (255 - cov)) / 255);
+            *dest = (0xFFu << 24) | (nr << 16) | (ng << 8) | nb;
+        }
+    }
+}
+
 int gui_draw_splash(gui_state_t *state) {
     if (!state || !state->backbuffer || !state->screen_width ||
         !state->screen_height)
@@ -228,15 +289,8 @@ int gui_draw_splash(gui_state_t *state) {
      * so nothing is composed on top of it.  Scaled to cover, centred. */
     if (state->splash_img && state->splash_img->pixels &&
         state->splash_img->width && state->splash_img->height) {
-        UINTN iw = state->splash_img->width, ih = state->splash_img->height;
-        UINTN dw = sw, dh = sh;
-        if (iw * sh > ih * sw) dh = ih * sw / iw;
-        else                   dw = iw * sh / ih;
-        if (!dw) dw = 1;
-        if (!dh) dh = 1;
         gui_fill_rect(state, 0, 0, (INTN)sw, (INTN)sh, state->bg_color);
-        draw_image_sized(state, state->splash_img,
-                         (sw - dw) / 2, (sh - dh) / 2, dw);
+        draw_image_cover(state, state->splash_img);
         gui_present(state);
         return 1;
     }
@@ -251,7 +305,8 @@ int gui_draw_splash(gui_state_t *state) {
 
     int have_logo  = state->logo && state->logo->pixels &&
                      state->logo_mode != LOGO_MODE_OFF;
-    int have_title = state->show_title;
+    /* Same rule as the menu: a logo set to "only" replaces the title. */
+    int have_title = state->show_title && !(have_logo && state->logo_mode == LOGO_MODE_ONLY);
     CHAR16 *title  = (state->title && state->title[0]) ? state->title : L"Visor";
     UINTN title_maxw = sw * 3 / 4;
     UINTN title_w  = have_title ? text_fit_width_px(title, title_px, title_maxw, NULL) : 0;
