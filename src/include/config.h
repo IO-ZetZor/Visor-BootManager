@@ -62,6 +62,11 @@ typedef struct {
     /* Boot intro: media path, automatic deadline in ms, and what to do when
      * it finishes.  All inert unless intro_media is set. */
     CHAR16 *intro_media;
+    /* Boot splash: one still frame painted as soon as the GUI exists, then
+     * left on the framebuffer through the handover.  With autoboot enabled it
+     * is the frame the kernel paints over, so the machine goes splash to
+     * splash with no text screen and no black flash in between. */
+    int     splash;
     UINTN   intro_duration;
     int     intro_loop;
     int     intro_auto_continue;

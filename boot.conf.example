@@ -65,6 +65,17 @@ autoboot=0
 # Example: autoboot=1 with autoboot_key=F2 skips the menu unless F2 is pressed.
 #autoboot_key=any
 
+# One still splash frame, painted as soon as the GUI is up and kept on screen all the
+# way through the handover. It draws the same background, logo and title the menu
+# would, so the kernel paints over an image that already looks like a boot splash
+# instead of over a black screen or the text console. No fade-out, no mode switch,
+# no "Booting:" line. Made for autoboot=1, where no menu appears at all: the machine
+# then runs firmware -> this frame -> the distro's own splash.
+# Visor cannot start plymouth (it runs later, inside the initramfs), so add
+# quiet splash to the kernel command line for a continuous handover.
+# 1 = splash on, 0 = off (default).
+#splash=0
+
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM
 # variable). When on, this OVERRIDES default=. 0 = always honour default=. (alias: remember)
 #remember_last=0

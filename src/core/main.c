@@ -568,6 +568,29 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
     int uuid_overridden = 0;
     int hp_overridden = 0;
     EFI_STATUS cleanup_status = EFI_SUCCESS;
+    int splash_shown = 0;
+
+    /* The still splash goes up before the menu, the countdown and any
+     * autoboot decision, so an enabled fast boot never shows the firmware's
+     * text console - or a black screen - between Visor and the kernel.  It
+     * reuses the wallpaper, logo and title the menu would draw, so the frame
+     * the kernel paints over already looks like the boot splash. */
+    if (!text_mode && !gui_closed && config.splash) {
+        if (config.background && !gui.background) {
+            efi_log(L"main: splash - loading background image");
+            gui_set_background(&gui, config.background);
+            if (!gui.background)
+                efi_log(L"WARN: splash background failed to load/decode - using solid colour");
+        }
+        if (gui.logo_mode != LOGO_MODE_OFF && !gui.logo)
+            gui_set_logo(&gui, config.logo);
+        gui_apply_accent(&gui);
+        splash_shown = gui_draw_splash(&gui);
+        if (splash_shown)
+            efi_log(L"main: splash painted");
+        else
+            efi_log(L"WARN: splash requested but no framebuffer to paint on");
+    }
 
 select_entry:
     selected = NULL;
@@ -641,6 +664,9 @@ select_entry:
         force_menu = 0;
         menu_sound_stop();
         efi_log(L"main: menu closed");
+        /* The menu painted over the splash frame: from here on the normal
+         * fade-out is the right handover again. */
+        splash_shown = 0;
     }
     retry_selected = 0;
 
@@ -889,18 +915,29 @@ boot_selected:
         efi_log(L"main: password captured for encrypted/LUKS boot entry");
     }
 
-    if (!text_mode && !gui_closed) {
+    if (!text_mode && !gui_closed && !splash_shown) {
         gui_fade_out(&gui);
         gui_shutdown(&gui);
         gui_closed = 1;
         text_mode = 1;
     }
 
+    /* With the splash up, the fade-out, the mode restore and the console
+     * clear are exactly the black flash that makes one boot look like two.
+     * Leave the frame alone: the kernel paints over it, and the distro's own
+     * splash continues from an image that already matches it.  The console
+     * stays quiet too - text over a splash is worse than no text. */
+    if (splash_shown && !gui_closed) {
+        efi_log(L"main: splash retained - handing the framebuffer over as-is");
+        gui_closed = 1;
+    }
+
     visor_quiet = config.quiet;
     if (visor_quiet) {
         efi_log(L"main: quiet mode - suppressing console output");
-        ST->ConOut->ClearScreen(ST->ConOut);
+        if (!splash_shown) ST->ConOut->ClearScreen(ST->ConOut);
     }
+    if (splash_shown) visor_quiet = 1;
     efi_log_set_console(!visor_quiet);
     efi_log(L"main: boot log streaming to console is active");
     efi_log(selected->name);
@@ -917,9 +954,11 @@ boot_selected:
     if (config.loader_vars)
         loader_mark_selected(selected);
 
-    efi_print(L"Booting: ");
-    efi_print(selected->name);
-    efi_print(L"\r\n");
+    if (!splash_shown) {
+        efi_print(L"Booting: ");
+        efi_print(selected->name);
+        efi_print(L"\r\n");
+    }
 
     /* Last chance: visor_boot() may never come back, and a recording that is
      * still open past ExitBootServices is a truncated file. Idempotent, so the
@@ -969,6 +1008,7 @@ boot_selected:
 
     efi_log(L"ERROR: boot returned (control should have transferred to the OS)");
     efi_log_set_console(0);
+    visor_quiet = 0;
 
     efi_print(L"Boot failed - entering recovery\r\n");
     efi_fs_drivers_set_lazy(1);

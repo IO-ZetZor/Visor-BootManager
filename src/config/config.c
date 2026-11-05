@@ -126,6 +126,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->font = NULL;
     config->background = NULL;
     config->intro_media = NULL;
+    config->splash = 0;
     config->intro_duration = 2000;
     config->intro_loop = 0;
     config->intro_auto_continue = 1;

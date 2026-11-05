@@ -458,6 +458,13 @@
       "type": "string",
       "default": "any"
     },
+    "splash": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Paint one still splash frame - the configured background, logo and title - as soon as the GUI exists, and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. Meant for autoboot=1 where the menu never appears: the machine then goes from the firmware straight to the distro's own splash with no text screen and no black flash. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet/splash on the kernel command line if you want them to look continuous. Defaults to false.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
     "background": {
       "x-feature": "gui",
       "x-group": "background",

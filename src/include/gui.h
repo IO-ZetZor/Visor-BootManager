@@ -447,6 +447,11 @@ void gui_set_background(gui_state_t *state, CHAR16 *path);
 
 void gui_set_logo(gui_state_t *state, CHAR16 *path);
 
+/* Paint the boot splash: wallpaper, logo and title, centred, presented once.
+ * Unlike the intro it never animates and never yields to the console - it is
+ * meant to be the last frame Visor draws before the kernel takes over. */
+int gui_draw_splash(gui_state_t *state);
+
 /* Replace the built-in arrow with an image. path NULL/empty restores the
  * arrow; size 0 takes the image's own width. A negative hotspot centres it. */
 #define CURSOR_HOTSPOT_CENTER ((INTN)-1)

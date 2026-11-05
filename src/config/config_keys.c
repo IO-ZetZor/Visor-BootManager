@@ -223,6 +223,8 @@ void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
         } else {
             efi_log(L"WARN: invalid autoboot_key; use any, one printable character, a named key, or F1-F12");
         }
+    } else if (efi_strcmp(key, L"splash") == 0) {
+        config->splash = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"remember_last") == 0 || efi_strcmp(key, L"remember") == 0) {
         config->remember_last = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"selfheal") == 0) {

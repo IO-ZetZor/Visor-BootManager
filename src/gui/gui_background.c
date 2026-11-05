@@ -180,6 +180,60 @@ int gui_draw_background(gui_state_t *state) {
     return 0;
 }
 
+/**
+ * gui_draw_splash - paint the boot splash frame.
+ *
+ * Draws the wallpaper, then the logo and the title centred as one block, and
+ * presents it.  This is a still frame, not an animation: it exists so the
+ * handover to the kernel never shows a text screen, and so the kernel (or the
+ * distro's own splash) paints over an image that already looks like a splash
+ * instead of over a black screen.
+ *
+ * @param  state  GUI state, already wired from the configuration.
+ *
+ * @retval 1  the splash was painted and presented
+ * @retval 0  no usable framebuffer, nothing was drawn
+ */
+int gui_draw_splash(gui_state_t *state) {
+    if (!state || !state->backbuffer || !state->screen_width ||
+        !state->screen_height)
+        return 0;
+
+    UINTN sw = state->screen_width;
+    UINTN sh = state->screen_height;
+    gui_draw_background(state);
+
+    UINTN base     = ui_base(state);
+    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
+    UINTN logo_px  = state->logo_size ? state->logo_size : base / 6;
+    if (logo_px < 24) logo_px = 24;
+    if (logo_px > sw / 3) logo_px = sw / 3;
+
+    int have_logo  = state->logo && state->logo->pixels &&
+                     state->logo_mode != LOGO_MODE_OFF;
+    int have_title = state->show_title;
+    CHAR16 *title  = (state->title && state->title[0]) ? state->title : L"Visor";
+    UINTN title_maxw = sw * 3 / 4;
+    UINTN title_w  = have_title ? text_fit_width_px(title, title_px, title_maxw, NULL) : 0;
+
+    UINTN gap   = title_px / 3;
+    UINTN block = (have_logo ? logo_px : 0) +
+                  ((have_logo && have_title) ? gap : 0) +
+                  (have_title ? title_px : 0);
+    INTN  y = (INTN)((sh > block ? sh - block : 0) / 2);
+
+    if (have_logo) {
+        draw_image_sized(state, state->logo, (sw - logo_px) / 2, (UINTN)y, logo_px);
+        y += (INTN)(logo_px + gap);
+    }
+    if (have_title)
+        draw_text_fit_px_a(state, title, (INTN)((sw - title_w) / 2), y,
+                           state->title_color, title_px, 255, title_maxw);
+
+    gui_present(state);
+    return 1;
+}
+
 int anim_tick(gui_state_t *state) {
     anim_t *a = state->bg_anim;
     if (!a || a->frame_count < 2) return 0;
