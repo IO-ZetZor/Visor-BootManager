@@ -1103,6 +1103,11 @@ boot_selected:
         force_menu = 1;
         autobooted = 0;
         splash_shown = 0;
+        /* The entry that was about to boot may already hold a captured
+         * passphrase.  The menu is about to pick a different entry, and the
+         * cleanup path only visits the one that is finally booted, so wipe it
+         * here instead of leaving the secret in memory. */
+        if (selected) wipe_password(&selected->decrypt_password);
         goto select_entry;
     }
 
