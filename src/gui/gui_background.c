@@ -43,6 +43,7 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
                 anim_free(a);
             }
             state->background = first;
+            a->loops = state->loop_background == 1 ? 0 : 1;
         } else {
             efi_log(L"  ERROR: animation decode failed");
         }

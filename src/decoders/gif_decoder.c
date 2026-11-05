@@ -354,7 +354,6 @@ int gif_advance(anim_t *a) {
         a->cur++;
         return 1;
     }
-
     a->loops_done++;
     if (a->loops && a->loops_done >= a->loops) return 0;
 

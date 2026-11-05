@@ -152,6 +152,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->sp_all.mode = SPEC_UNSET;
     config->font = NULL;
     config->background = NULL;
+    config->loop_background = 1;
     config->intro_media = NULL;
     config->splash = 0;
     config->splash_image = NULL;

@@ -461,9 +461,13 @@ quiet=0
 
 # --- Background -------------------------------------------------------------
 # Full-screen background image (PNG, BMP, GIF or MP4). Omit for a solid
-# backdrop. Animated GIFs and MJPEG MP4s play in a loop; the accent palette
+# backdrop. Animated GIFs and MJPEG MP4s are played in a loop by default; the accent palette
 # is taken from the first frame.
 background=\EFI\visor\backgrounds\default.png
+
+#Option to set looping of the background to true or false.
+#This is useful for more intro like animations that you want as background instead of intro
+loop_background=1
 
 # --- Boot intro --------------------------------------------------------------
 # An optional clip or still shown once before the menu. Unset by default, and

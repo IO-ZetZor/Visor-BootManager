@@ -183,6 +183,8 @@ static void main_apply_gui_config(gui_state_t *gui, config_t *config,
     gui->power_icons     = config->power_icons;
     gui->power_icon_size = config->power_icon_size;
 
+    gui->loop_background = config->loop_background;
+
     main_clamp_gui_sizes(gui);
 
     gui->blur            = config->blur;

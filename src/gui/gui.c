@@ -274,6 +274,7 @@ EFI_STATUS gui_init(gui_state_t *state) {
     state->background_path = NULL;
     state->bg_anim = NULL;
     state->browse = NULL;
+    state->loop_background = 1;
 
     state->version_mode = 0;
     state->ver_fading = 0;

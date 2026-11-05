@@ -439,6 +439,8 @@ void apply_global(config_t *config, CHAR16 *key, CHAR16 *value) {
     } else if (efi_strcmp(key, L"background") == 0) {
         if (config->background) efi_free_pool(config->background);
         config->background = dup_path(value);
+    } else if (efi_strcmp(key, L"loop_background") == 0) {
+        config->loop_background = (*value == '1' || *value == 't' || *value == 'y');
     } else if (efi_strcmp(key, L"intro_media") == 0 ||
                efi_strcmp(key, L"intro_image") == 0) {
         if (config->intro_media) efi_free_pool(config->intro_media);

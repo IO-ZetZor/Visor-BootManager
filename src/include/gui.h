@@ -322,6 +322,7 @@ typedef struct gui_state {
      * wallpaper/logo/title one. */
     icon_t *splash_img;
     anim_t *bg_anim;
+    UINTN   loop_background;
 
     int     version_mode;
     int     ver_fading;

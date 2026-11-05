@@ -484,6 +484,13 @@
       "description": "Path to a full-screen background image (PNG, BMP, GIF or MP4). Animated GIFs and MJPEG MP4s play in a loop. Omit for a solid backdrop.",
       "$ref": "#/$defs/path"
     },
+    "loop_background": {
+      "x-feature": "gui",
+      "x-group": "background",
+      "description": "Loop the background when it is a animation. By default this is set to 1",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
     "intro_media": {
       "x-feature": "intro",
       "x-group": "intro",
