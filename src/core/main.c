@@ -119,6 +119,8 @@ static int autoboot_menu_requested(const config_t *config) {
  * the user interrupts autoboot: the menu has to appear in the mode the
  * configuration asks for, not in the text fallback the fast path selected. */
 static void main_clamp_gui_sizes(gui_state_t *gui);
+static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
+                           UINTN *first_new);
 
 /* Wire the parsed configuration into the GUI state.  gui_init() resets most of
  * the struct - entries, entry count, timeout, colours, callbacks - so this has
@@ -221,6 +223,21 @@ static void main_apply_gui_config(gui_state_t *gui, config_t *config) {
         gui->anim_frames = gui->animation ? 26 - sp * 2 : 1;
         if (gui->animation && gui->anim_frames < 5) gui->anim_frames = 5;
     }
+    /* gui_init() turns the editor and the mouse back on and resets the
+     * hotplug callback, so these belong to the shared wiring too: otherwise an
+     * interrupted fastboot would ignore editor=0 and hand the user an editor
+     * the configuration forbids. */
+    gui->editor_enabled = config->editor;
+    gui->mouse_enabled  = config->mouse;
+    gui->pointer_speed  = config->pointer_speed;
+    if (config->hotplug) {
+        gui->hotplug_poll = hotplug_poll_cb;
+        gui->hotplug_ctx  = config;
+    } else {
+        gui->hotplug_poll = NULL;
+        gui->hotplug_ctx  = NULL;
+    }
+
     if (config->default_entry < gui->entry_count)
         gui->selected = config->default_entry;
 }
@@ -684,9 +701,6 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         }
     }
 
-    gui.editor_enabled = config.editor;
-    gui.mouse_enabled  = config.mouse;
-    gui.pointer_speed  = config.pointer_speed;
     if (!text_mode && config.mouse)
         gui_set_cursor(&gui, config.cursor, config.cursor_size,
                        config.cursor_hot_x, config.cursor_hot_y);
@@ -701,11 +715,6 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
             efi_free_pool(last);
             efi_log(L"main: remember_last - preselected previously booted entry");
         }
-    }
-
-    if (config.hotplug) {
-        gui.hotplug_poll = hotplug_poll_cb;
-        gui.hotplug_ctx  = &config;
     }
 
     boot_entry_t *selected = NULL;
