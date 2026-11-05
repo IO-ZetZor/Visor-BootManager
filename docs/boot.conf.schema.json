@@ -998,7 +998,7 @@
       "x-feature": "core",
       "x-group": "boot",
       "x-aliases": ["startup_text"],
-      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. They are console output only - they exist to be read off a frozen screen because they run before the boot log is open, so they are never written to boot.log. Off by default, so a fastboot leaves nothing on screen but the firmware's own logo. Turn it on when a machine freezes during boot and the last line on screen is the only clue. Always printed when boot.conf itself cannot be read.",
+      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. They are console output only - they exist to be read off a frozen screen because they run before the boot log is open, so they are never written to boot.log. On by default: the last line on screen names the step that died, which is the only clue a frozen machine gives. Set it to 0 for a completely clean screen when nothing is wrong. Always printed when boot.conf itself cannot be read.",
       "$ref": "#/$defs/bool",
       "default": false
     },

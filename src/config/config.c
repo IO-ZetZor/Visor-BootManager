@@ -25,7 +25,7 @@ void config_early_flags(int *file_log, int *checkpoints) {
     if (!buf) return;
 
     int enabled = 1;
-    int points = 0;
+    int points = 1;
     int in_entry = 0;
     CHAR16 *start = buf;
     while (*start) {
@@ -156,7 +156,7 @@ EFI_STATUS config_parse(config_t *config) {
     config->splash = 0;
     config->splash_image = NULL;
     config->splash_gui = 1;
-    config->checkpoints = 0;
+    config->checkpoints = 1;
     config->intro_duration = 2000;
     config->intro_loop = 0;
     config->intro_auto_continue = 1;
