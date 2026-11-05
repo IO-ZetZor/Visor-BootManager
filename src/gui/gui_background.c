@@ -83,6 +83,47 @@ void gui_set_logo(gui_state_t *state, CHAR16 *path) {
 
 #define ANIM_MAX_SKIP 8
 
+
+/**
+ * Load the optional splash picture.
+ *
+ * PNG and BMP decode directly; GIF, MP4/MOV/M4V and VBG are decoded through
+ * the animation loaders and only their first frame is kept - the splash is a
+ * still. A path that cannot be decoded is logged and ignored: the splash then
+ * falls back to the composed frame, so a bad splash_image can never cost a
+ * boot.
+ *
+ * @param[in,out] state GUI state that receives the image.
+ * @param[in]     path  Path to the picture, or an empty string to clear it.
+ */
+void gui_set_splash(gui_state_t *state, CHAR16 *path) {
+    if (state->splash_img && state->splash_img->pixels) {
+        if (state->splash_img->scaled) efi_free_pool(state->splash_img->scaled);
+        efi_free_pool(state->splash_img->pixels);
+        efi_free_pool(state->splash_img);
+    }
+    state->splash_img = NULL;
+    if (!path || !path[0]) return;
+
+    efi_log(L"  loading splash image");
+    state->splash_img = gui_load_image(path);
+    if (!state->splash_img) {
+        /* GIF, MP4/MOV/M4V and Visor's own VBG are recognised by content, not
+         * by extension, so the still frame can come from any of them.  Only
+         * the first frame is painted: the splash is the image the kernel
+         * paints over, not a clip to play. */
+        icon_t *first = NULL;
+        anim_t *a = gui_load_anim(path, &first, 0, 0);
+        if (a) anim_free(a);
+        state->splash_img = first;
+    }
+    if (!state->splash_img) {
+        efi_log(L"  WARN: splash_image failed to load/decode - using the composed frame");
+    } else {
+        efi_log(L"  splash image loaded");
+    }
+}
+
 static int anim_build_maps(anim_t *a, UINTN dw, UINTN dh) {
     if (a->xmap && a->ymap && a->map_w == dw && a->map_h == dh) return 1;
 
@@ -178,6 +219,135 @@ int gui_draw_background(gui_state_t *state) {
         }
     }
     return 0;
+}
+
+
+/**
+ * Cover-scale an icon onto the whole screen.
+ *
+ * Keeps the aspect ratio, scales by the larger factor, centres the overflow
+ * and lets it fall off the edges: a square draw would stretch a 16:9 picture,
+ * and the icon scaler only takes one dimension, so this samples the source
+ * per destination pixel instead. Source alpha is blended over the pixels that
+ * are already there.
+ *
+ * @param[in,out] state GUI state whose backbuffer is drawn into.
+ * @param[in]     icon  Image to draw; NULL or empty is a no-op.
+ */
+static void draw_image_cover(gui_state_t *state, icon_t *icon) {
+    if (!icon || !icon->pixels || !icon->width || !icon->height) return;
+    UINTN sw = state->screen_width, sh = state->screen_height;
+    UINTN iw = icon->width, ih = icon->height;
+    if (!sw || !sh) return;
+
+    /* Cover scale compared without floating point: sw/iw against sh/ih
+     * becomes sw*ih against sh*iw. */
+    UINTN dw, dh;
+    if (sh * iw >= sw * ih) {
+        dh = sh;
+        dw = iw * sh / ih;
+    } else {
+        dw = sw;
+        dh = ih * sw / iw;
+    }
+    if (!dw) dw = 1;
+    if (!dh) dh = 1;
+    /* Cover fit overflows on at least one axis; the overflow is centred, so the
+     * offsets go negative and the loops below skip the off-screen rows. */
+    INTN x0 = ((INTN)sw - (INTN)dw) / 2;
+    INTN y0 = ((INTN)sh - (INTN)dh) / 2;
+
+    for (UINTN y = 0; y < dh && (y0 + (INTN)y) < (INTN)sh; y++) {
+        INTN py = y0 + (INTN)y;
+        if (py < 0) continue;
+        UINTN sy = y * ih / dh;
+        if (sy >= ih) sy = ih - 1;
+        for (UINTN x = 0; x < dw && (x0 + (INTN)x) < (INTN)sw; x++) {
+            INTN px = x0 + (INTN)x;
+            if (px < 0) continue;
+            UINTN sx = x * iw / dw;
+            if (sx >= iw) sx = iw - 1;
+
+            UINT32 p = icon->pixels[sy * iw + sx];
+            UINTN cov = (p >> 24) & 0xFF;
+            if (cov == 0) continue;
+            UINT8 sr = (p >> 16) & 0xFF, sg = (p >> 8) & 0xFF, sb = p & 0xFF;
+
+            UINT32 *dest = get_pixel(state, (UINTN)px, (UINTN)py);
+            if (!dest) continue;
+            UINT8 br = (*dest >> 16) & 0xFF, bg = (*dest >> 8) & 0xFF, bb = *dest & 0xFF;
+            UINT8 nr = (UINT8)((sr * cov + br * (255 - cov)) / 255);
+            UINT8 ng = (UINT8)((sg * cov + bg * (255 - cov)) / 255);
+            UINT8 nb = (UINT8)((sb * cov + bb * (255 - cov)) / 255);
+            *dest = (0xFFu << 24) | (nr << 16) | (ng << 8) | nb;
+        }
+    }
+}
+
+/**
+ * gui_draw_splash - paint the boot splash frame.
+ *
+ * Draws the wallpaper, then the logo and the title centred as one block, and
+ * presents it.  This is a still frame, not an animation: it exists so the
+ * handover to the kernel never shows a text screen, and so the kernel (or the
+ * distro's own splash) paints over an image that already looks like a splash
+ * instead of over a black screen.
+ *
+ * @param  state  GUI state, already wired from the configuration.
+ *
+ * @retval 1  the splash was painted and presented
+ * @retval 0  no usable framebuffer, nothing was drawn
+ */
+int gui_draw_splash(gui_state_t *state) {
+    if (!state || !state->backbuffer || !state->screen_width ||
+        !state->screen_height)
+        return 0;
+
+    UINTN sw = state->screen_width;
+    UINTN sh = state->screen_height;
+
+    /* A user-supplied splash picture wins outright: it is theirs to design,
+     * so nothing is composed on top of it.  Scaled to cover, centred. */
+    if (state->splash_img && state->splash_img->pixels &&
+        state->splash_img->width && state->splash_img->height) {
+        gui_fill_rect(state, 0, 0, (INTN)sw, (INTN)sh, state->bg_color);
+        draw_image_cover(state, state->splash_img);
+        gui_present(state);
+        return 1;
+    }
+
+    gui_draw_background(state);
+
+    UINTN base     = ui_base(state);
+    UINTN title_px = state->title_size ? state->title_size : default_title_px(state);
+    UINTN logo_px  = state->logo_size ? state->logo_size : base / 6;
+    if (logo_px < 24) logo_px = 24;
+    if (logo_px > sw / 3) logo_px = sw / 3;
+
+    int have_logo  = state->logo && state->logo->pixels &&
+                     state->logo_mode != LOGO_MODE_OFF;
+    /* Same rule as the menu: a logo set to "only" replaces the title. */
+    int have_title = state->show_title && !(have_logo && state->logo_mode == LOGO_MODE_ONLY);
+    CHAR16 *title  = (state->title && state->title[0]) ? state->title : L"Visor";
+    UINTN title_maxw = sw * 3 / 4;
+    UINTN title_w  = have_title ? text_fit_width_px(title, title_px, title_maxw, NULL) : 0;
+
+    UINTN gap   = title_px / 3;
+    UINTN block = (have_logo ? logo_px : 0) +
+                  ((have_logo && have_title) ? gap : 0) +
+                  (have_title ? title_px : 0);
+    INTN  y = (INTN)((sh > block ? sh - block : 0) / 2);
+
+    if (have_logo) {
+        draw_image_sized(state, state->logo, (sw - logo_px) / 2, (UINTN)y, logo_px);
+        y += (INTN)(logo_px + gap);
+    }
+    if (have_title)
+        draw_text_fit_px_a(state, title, (INTN)((sw - title_w) / 2), y,
+                           state->title_color, title_px, 255, title_maxw);
+
+    gui_present(state);
+    return 1;
 }
 
 int anim_tick(gui_state_t *state) {

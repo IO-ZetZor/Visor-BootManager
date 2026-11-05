@@ -62,6 +62,24 @@ typedef struct {
     /* Boot intro: media path, automatic deadline in ms, and what to do when
      * it finishes.  All inert unless intro_media is set. */
     CHAR16 *intro_media;
+    /* Boot splash: one still frame painted as soon as the GUI exists, then
+     * left on the framebuffer through the handover.  With autoboot enabled it
+     * is the frame the kernel paints over, so the machine goes splash to
+     * splash with no text screen and no black flash in between. */
+    int     splash;
+    /* Optional full-screen splash picture.  Set, it replaces the composed
+     * wallpaper/logo/title frame and is scaled to the screen; unset, the
+     * splash is built from the same pieces the menu draws. */
+    CHAR16 *splash_image;
+    /* Whether the fast path is allowed to bring the GUI up just to paint the
+     * splash.  0 keeps the video firmware's own screen until the kernel takes
+     * over - the fastest boot, at the cost of no still frame. */
+    int     splash_gui;
+    /* Print the startup checkpoints on the console.  0 (default) keeps the
+     * firmware's own screen free of Visor text; set 1 when a machine freezes
+     * and the last line on screen is the only clue.  Checkpoints always print
+     * when boot.conf itself cannot be read. */
+    int     checkpoints;
     UINTN   intro_duration;
     int     intro_loop;
     int     intro_auto_continue;
@@ -144,7 +162,7 @@ typedef struct {
 
 EFI_STATUS config_parse(config_t *config);
 
-int config_early_file_log_enabled(void);
+void config_early_flags(int *file_log, int *checkpoints);
 
 void config_hotplug_arm(config_t *config);
 

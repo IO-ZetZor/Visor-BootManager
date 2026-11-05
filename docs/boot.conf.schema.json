@@ -447,16 +447,36 @@
     "autoboot": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one). Defaults to false; set autoboot_key to choose the key event that opens the menu during autoboot.",
+      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one), without waiting for timeout. Defaults to false; set autoboot_key to choose the key event that opens the menu during autoboot.",
       "$ref": "#/$defs/bool",
       "default": false
     },
     "autoboot_key": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Key event that interrupts autoboot and opens the menu. Accepts any, one printable character, Enter, Esc, Space, Tab, Backspace, arrow and navigation keys, or F1-F12. Printable characters are case-insensitive. UEFI input does not expose key-release state, so taps and holds both trigger the menu.",
+      "description": "Key event that interrupts autoboot and opens the menu. Accepts any, one printable character, Enter, Esc, Space, Tab, Backspace, arrow and navigation keys, or F1-F12. Printable characters are case-insensitive. UEFI input does not expose key-release state, so taps and holds both trigger the menu. Defaults to V, so holding V during a fastboot opens the menu.",
       "type": "string",
-      "default": "any"
+      "default": "V"
+    },
+    "splash": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Paint one still splash frame and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. It is meant for autoboot=1, where no menu appears: the machine then goes from the firmware straight to the distro's own splash with no black flash. Without splash_image the frame is composed from background, logo and title; with it, the picture is used as-is. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet splash on the kernel command line if you want them to look continuous. Defaults to false.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
+    "splash_gui": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws it; 0 skips GUI initialisation entirely, so the firmware's own screen (usually the vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor reads this file first, prints its four startup checkpoints only when checkpoints=1 (or when this file cannot be read at all), and otherwise draws nothing, never clears the screen and prints no boot text.",
+      "$ref": "#/$defs/bool",
+      "default": true
+    },
+    "splash_image": {
+      "x-feature": "gui",
+      "x-group": "boot",
+      "description": "Picture painted as the splash frame instead of the composed background/logo/title. PNG or BMP are decoded directly; GIF, MP4/MOV/M4V and Visor's own VBG are recognised by content and only their first frame is used - the splash is the still image the kernel paints over, not a clip to play. Scaled to cover the screen and centred (overflow is cropped), with nothing drawn on top. A file that cannot be decoded is logged and ignored, and the composed frame is used instead.",
+      "$ref": "#/$defs/path"
     },
     "background": {
       "x-feature": "gui",
@@ -974,6 +994,14 @@
       "x-alias-of": "remember_last",
       "description": "Alias for remember_last."
     },
+    "checkpoints": {
+      "x-feature": "core",
+      "x-group": "boot",
+      "x-aliases": ["startup_text"],
+      "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. They are console output only - they exist to be read off a frozen screen because they run before the boot log is open, so they are never written to boot.log. Off by default, so a fastboot leaves nothing on screen but the firmware's own logo. Turn it on when a machine freezes during boot and the last line on screen is the only clue. Always printed when boot.conf itself cannot be read.",
+      "$ref": "#/$defs/bool",
+      "default": false
+    },
     "remember_last": {
       "x-feature": "discover",
       "x-group": "boot",
@@ -1128,7 +1156,7 @@
     "timeout": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Seconds before the default entry auto-boots. -1 waits forever; 0 boots the default instantly with no menu.",
+      "description": "Seconds before the default entry auto-boots. Only values above 0 count down: 0 and -1 both wait forever for a choice. For an instant, menu-less boot use autoboot=1.",
       "type": "integer",
       "minimum": -1,
       "default": 5
