@@ -51,8 +51,10 @@ void config_early_flags(int *file_log, int *checkpoints) {
                 CHAR16 *key = trim(line);
                 strip_inline_comment(eq + 1);
                 CHAR16 *value = trim(eq + 1);
-                int truthy = (*value == '1' || *value == 't' || *value == 'T' ||
-                              *value == 'y' || *value == 'Y');
+                /* The log keys keep the parser's lowercase-only rule, otherwise
+                 * log=Yes would enable the file here and disable it again once
+                 * config_parse() runs - two passes disagreeing about one line. */
+                int truthy = (*value == '1' || *value == 't' || *value == 'y');
                 if (efi_strcmp(key, L"log") == 0 ||
                     efi_strcmp(key, L"boot_log") == 0 ||
                     efi_strcmp(key, L"file_log") == 0)
@@ -61,7 +63,8 @@ void config_early_flags(int *file_log, int *checkpoints) {
                     enabled = !truthy;
                 else if (efi_strcmp(key, L"checkpoints") == 0 ||
                          efi_strcmp(key, L"startup_text") == 0)
-                    points = truthy;
+                    points = (*value == '1' || *value == 't' || *value == 'T' ||
+                              *value == 'y' || *value == 'Y');
             }
         }
 

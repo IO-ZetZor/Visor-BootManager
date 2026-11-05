@@ -126,7 +126,8 @@ static int hotplug_poll_cb(void *ctx, boot_entry_t **head, UINTN *count,
  * the struct - entries, entry count, timeout, colours, callbacks - so this has
  * to run after every gui_init(), including the late one on the fast path,
  * where the menu would otherwise come up with no entries at all. */
-static void main_apply_gui_config(gui_state_t *gui, config_t *config) {
+static void main_apply_gui_config(gui_state_t *gui, config_t *config,
+                                  UINTN loader_pick) {
     gui->entries         = config->entries;
     gui->entry_count     = config->entry_count;
     gui->per_page        = config->entries_per_page ? config->entries_per_page : 3;
@@ -238,8 +239,24 @@ static void main_apply_gui_config(gui_state_t *gui, config_t *config) {
         gui->hotplug_ctx  = NULL;
     }
 
+    gui->selected = 0;
     if (config->default_entry < gui->entry_count)
         gui->selected = config->default_entry;
+
+    /* remember_last overrides default=, so it has to be re-applied here too:
+     * gui_init() zeroes selected, and an interrupted fastboot would otherwise
+     * open on the configured default instead of the remembered entry. */
+    if (config->remember_last && loader_pick == (UINTN)-1) {
+        CHAR16 *last = efi_get_var_str(L"VisorLastEntry");
+        if (last) {
+            UINTN i = 0;
+            for (boot_entry_t *e = gui->entries; e; e = e->next, i++) {
+                if (efi_strcmp(e->name, last) == 0) { gui->selected = i; break; }
+            }
+            efi_free_pool(last);
+            efi_log(L"main: remember_last - preselected previously booted entry");
+        }
+    }
 }
 
 /* boot.conf is user input; cap display sizes so extreme values cannot push the
@@ -334,7 +351,7 @@ static void console_takeover(void) {
 
 /* Make sure the menu can actually be drawn: initialise the GUI if the fast
  * path skipped it, and fall back to text mode when that is impossible. */
-static void main_gui_ensure(gui_state_t *gui, config_t *config,
+static void main_gui_ensure(gui_state_t *gui, config_t *config, UINTN loader_pick,
                             int *text_mode, int *gui_started,
                             int *keep_firmware_screen) {
     /* From here on something is drawn over the firmware screen, so take it
@@ -360,7 +377,7 @@ static void main_gui_ensure(gui_state_t *gui, config_t *config,
     /* gui_init() just reset the struct: re-apply the configuration (entries,
      * timeout, colours, hotplug callback) before anything draws a menu, then
      * do the mode/font/cursor work that needs a framebuffer. */
-    main_apply_gui_config(gui, config);
+    main_apply_gui_config(gui, config, loader_pick);
     main_gui_late_start(gui, config);
 }
 
@@ -665,7 +682,7 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         config_hotplug_arm(&config);
         efi_log(L"main: hotplug volume watch armed");
     }
-    main_apply_gui_config(&gui, &config);
+    main_apply_gui_config(&gui, &config, loader_pick);
     if (!text_mode && config.power_icons) {
         if (config.shutdown_icon) gui.shutdown_icon = gui_load_icon(config.shutdown_icon);
         if (config.reboot_icon)   gui.reboot_icon   = gui_load_icon(config.reboot_icon);
@@ -683,9 +700,6 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         gui_set_font(name);
     }
 
-    if (config.default_entry < gui.entry_count) {
-        gui.selected = config.default_entry;
-    }
 
     if (!text_mode) {
         /* Before the first pixel: if the ESP is armed, everything drawn from
@@ -705,17 +719,6 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         gui_set_cursor(&gui, config.cursor, config.cursor_size,
                        config.cursor_hot_x, config.cursor_hot_y);
 
-    if (config.remember_last && loader_pick == (UINTN)-1) {
-        CHAR16 *last = efi_get_var_str(L"VisorLastEntry");
-        if (last) {
-            UINTN i = 0;
-            for (boot_entry_t *e = gui.entries; e; e = e->next, i++) {
-                if (efi_strcmp(e->name, last) == 0) { gui.selected = i; break; }
-            }
-            efi_free_pool(last);
-            efi_log(L"main: remember_last - preselected previously booted entry");
-        }
-    }
 
     boot_entry_t *selected = NULL;
     int action = VISOR_ACTION_BOOT;
@@ -816,7 +819,8 @@ select_entry:
             /* The fast path boots without ever bringing the video up.  The
              * user just asked for the menu, so start it now - in the mode the
              * configuration asks for, not the text fallback chosen above. */
-            main_gui_ensure(&gui, &config, &text_mode, &gui_started, &keep_firmware_screen);
+            main_gui_ensure(&gui, &config, loader_pick, &text_mode, &gui_started,
+                        &keep_firmware_screen);
         }
     }
 
@@ -1108,7 +1112,8 @@ boot_selected:
      * work above gave the user a window after the first poll. */
     if (!gui_closed && autobooted && autoboot_menu_requested(&config)) {
         efi_log(L"main: autoboot key pressed during boot - opening the menu");
-        main_gui_ensure(&gui, &config, &text_mode, &gui_started, &keep_firmware_screen);
+        main_gui_ensure(&gui, &config, loader_pick, &text_mode, &gui_started,
+                        &keep_firmware_screen);
         force_menu = 1;
         autobooted = 0;
         splash_shown = 0;

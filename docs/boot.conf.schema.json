@@ -468,7 +468,7 @@
     "splash_gui": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws splash; 0 skips GUI initialisation entirely, so the firmware's own screen (vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor still prints its four startup checkpoints before it can read this file, but draws nothing else, never clears the screen and prints no boot text.",
+      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws it; 0 skips GUI initialisation entirely, so the firmware's own screen (usually the vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor reads this file first, prints its four startup checkpoints only when checkpoints=1 (or when this file cannot be read at all), and otherwise draws nothing, never clears the screen and prints no boot text.",
       "$ref": "#/$defs/bool",
       "default": true
     },

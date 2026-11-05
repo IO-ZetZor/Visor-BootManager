@@ -240,19 +240,22 @@ static void draw_image_cover(gui_state_t *state, icon_t *icon) {
     UINTN iw = icon->width, ih = icon->height;
     if (!sw || !sh) return;
 
-    /* Scale factors compared without floating point: iw*sh against ih*sw. */
+    /* Cover scale compared without floating point: sw/iw against sh/ih
+     * becomes sw*ih against sh*iw. */
     UINTN dw, dh;
-    if (iw * sh > ih * sw) {
-        dw = sw;
-        dh = ih * sw / iw;
-    } else {
+    if (sh * iw >= sw * ih) {
         dh = sh;
         dw = iw * sh / ih;
+    } else {
+        dw = sw;
+        dh = ih * sw / iw;
     }
     if (!dw) dw = 1;
     if (!dh) dh = 1;
-    INTN x0 = (INTN)((sw > dw ? sw - dw : 0) / 2);
-    INTN y0 = (INTN)((sh > dh ? sh - dh : 0) / 2);
+    /* Cover fit overflows on at least one axis; the overflow is centred, so the
+     * offsets go negative and the loops below skip the off-screen rows. */
+    INTN x0 = ((INTN)sw - (INTN)dw) / 2;
+    INTN y0 = ((INTN)sh - (INTN)dh) / 2;
 
     for (UINTN y = 0; y < dh && (y0 + (INTN)y) < (INTN)sh; y++) {
         INTN py = y0 + (INTN)y;
