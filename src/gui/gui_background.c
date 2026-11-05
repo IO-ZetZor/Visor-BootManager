@@ -84,9 +84,18 @@ void gui_set_logo(gui_state_t *state, CHAR16 *path) {
 #define ANIM_MAX_SKIP 8
 
 
-/* Load the optional splash picture.  A path that cannot be decoded is logged
- * and ignored: the splash then falls back to the composed frame, so a bad
- * splash_image can never cost a boot. */
+/**
+ * Load the optional splash picture.
+ *
+ * PNG and BMP decode directly; GIF, MP4/MOV/M4V and VBG are decoded through
+ * the animation loaders and only their first frame is kept - the splash is a
+ * still. A path that cannot be decoded is logged and ignored: the splash then
+ * falls back to the composed frame, so a bad splash_image can never cost a
+ * boot.
+ *
+ * @param[in,out] state GUI state that receives the image.
+ * @param[in]     path  Path to the picture, or an empty string to clear it.
+ */
 void gui_set_splash(gui_state_t *state, CHAR16 *path) {
     if (state->splash_img && state->splash_img->pixels) {
         if (state->splash_img->scaled) efi_free_pool(state->splash_img->scaled);
@@ -212,24 +221,19 @@ int gui_draw_background(gui_state_t *state) {
     return 0;
 }
 
+
 /**
- * gui_draw_splash - paint the boot splash frame.
+ * Cover-scale an icon onto the whole screen.
  *
- * Draws the wallpaper, then the logo and the title centred as one block, and
- * presents it.  This is a still frame, not an animation: it exists so the
- * handover to the kernel never shows a text screen, and so the kernel (or the
- * distro's own splash) paints over an image that already looks like a splash
- * instead of over a black screen.
+ * Keeps the aspect ratio, scales by the larger factor, centres the overflow
+ * and lets it fall off the edges: a square draw would stretch a 16:9 picture,
+ * and the icon scaler only takes one dimension, so this samples the source
+ * per destination pixel instead. Source alpha is blended over the pixels that
+ * are already there.
  *
- * @param  state  GUI state, already wired from the configuration.
- *
- * @retval 1  the splash was painted and presented
- * @retval 0  no usable framebuffer, nothing was drawn
+ * @param[in,out] state GUI state whose backbuffer is drawn into.
+ * @param[in]     icon  Image to draw; NULL or empty is a no-op.
  */
-/* Cover-scale an icon onto the whole screen: keep the aspect ratio, scale by
- * the larger factor, centre the overflow and let it fall off the edges.  A
- * square draw would stretch a 16:9 picture, and the icon scaler is limited to
- * one dimension, so this samples the source per destination pixel instead. */
 static void draw_image_cover(gui_state_t *state, icon_t *icon) {
     if (!icon || !icon->pixels || !icon->width || !icon->height) return;
     UINTN sw = state->screen_width, sh = state->screen_height;
@@ -277,6 +281,20 @@ static void draw_image_cover(gui_state_t *state, icon_t *icon) {
     }
 }
 
+/**
+ * gui_draw_splash - paint the boot splash frame.
+ *
+ * Draws the wallpaper, then the logo and the title centred as one block, and
+ * presents it.  This is a still frame, not an animation: it exists so the
+ * handover to the kernel never shows a text screen, and so the kernel (or the
+ * distro's own splash) paints over an image that already looks like a splash
+ * instead of over a black screen.
+ *
+ * @param  state  GUI state, already wired from the configuration.
+ *
+ * @retval 1  the splash was painted and presented
+ * @retval 0  no usable framebuffer, nothing was drawn
+ */
 int gui_draw_splash(gui_state_t *state) {
     if (!state || !state->backbuffer || !state->screen_width ||
         !state->screen_height)

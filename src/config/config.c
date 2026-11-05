@@ -1,12 +1,20 @@
 /* config.c - boot.conf parsing entry point */
 #include "config_internal.h"
 
-/* Read boot.conf before the very first console line, so the startup
- * checkpoints can be switched off without making the config unreadable for
- * everything else.  Both flags come out of one pass: the file log (log=,
- * boot_log=, file_log=, no_log=) and the checkpoints (checkpoints=,
- * startup_text=).  If the file cannot be read at all, both stay on - an
- * unreadable config is exactly when a visible trail is worth having. */
+/**
+ * Read boot.conf before the very first console line.
+ *
+ * The startup checkpoints can be switched off without making the config
+ * unreadable for everything else, which is why this is a separate early pass:
+ * both flags come out of one read of the file - the file log (log=, boot_log=,
+ * file_log=, no_log=) and the checkpoints (checkpoints=, startup_text=).
+ * If the file cannot be read at all, both stay on: an unreadable config is
+ * exactly when a visible trail is worth having.
+ *
+ * @param[out] file_log   1 when boot.log should be written, 0 when disabled.
+ * @param[out] checkpoints 1 when the startup lines should be printed.
+ */
+
 void config_early_flags(int *file_log, int *checkpoints) {
     int previous = efi_log_file_enabled();
     efi_log_set_file(0);

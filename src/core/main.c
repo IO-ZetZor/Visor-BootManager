@@ -118,6 +118,113 @@ static int autoboot_menu_requested(const config_t *config) {
 /* Bring the GUI up after the fast path decided it was not needed.  Used when
  * the user interrupts autoboot: the menu has to appear in the mode the
  * configuration asks for, not in the text fallback the fast path selected. */
+static void main_clamp_gui_sizes(gui_state_t *gui);
+
+/* Wire the parsed configuration into the GUI state.  gui_init() resets most of
+ * the struct - entries, entry count, timeout, colours, callbacks - so this has
+ * to run after every gui_init(), including the late one on the fast path,
+ * where the menu would otherwise come up with no entries at all. */
+static void main_apply_gui_config(gui_state_t *gui, config_t *config) {
+    gui->entries         = config->entries;
+    gui->entry_count     = config->entry_count;
+    gui->per_page        = config->entries_per_page ? config->entries_per_page : 3;
+    gui->timeout         = config->timeout;
+    gui->bg_color        = config->bg_color;
+    gui->fg_color        = config->fg_color;
+    gui->highlight_color = config->highlight_color;
+    gui->title           = config->title;
+    gui->show_title      = !config->no_title;
+    gui->logo_mode       = config->no_logo ? LOGO_MODE_OFF : config->logo_mode;
+    gui->logo_size       = config->logo_size;
+    gui->logo_gap        = config->logo_gap;
+    gui->accent_logo     = config->has_accent_logo ? config->accent_logo
+                                                 : config->accent_text;
+    gui->sp_logo         = config->sp_logo;
+    gui->sp_underline    = config->sp_underline;
+    gui->sp_highlight    = config->sp_highlight;
+    gui->sp_title        = config->sp_title;
+    gui->sp_name         = config->sp_name;
+    gui->sp_info         = config->sp_info;
+    gui->sp_shutdown     = config->sp_shutdown;
+    gui->sp_reboot       = config->sp_reboot;
+    gui->sp_firmware     = config->sp_firmware;
+    gui->sp_os_icons     = config->sp_os_icons;
+    gui->sp_blur         = config->sp_blur;
+    gui->sp_bg           = config->sp_bg;
+    gui->sp_g_text       = config->sp_g_text;
+    gui->sp_g_icons      = config->sp_g_icons;
+    gui->sp_g_underline  = config->sp_g_underline;
+    gui->sp_all          = config->sp_all;
+    gui->show_names      = config->show_names;
+    gui->center_info     = config->center_info;
+    gui->box_radius      = config->box_radius;
+    gui->title_color     = config->title_color;
+    gui->name_color      = config->name_color;
+    gui->title_size      = config->title_size;
+    gui->name_size       = config->name_size;
+    gui->icon_size       = config->icon_size;
+    gui->icon_spacing    = config->icon_spacing;
+    gui->icon_y          = config->icon_y;
+    gui->underline_thickness = config->underline_thickness;
+    gui->underline_length    = config->underline_length;
+    gui->underline_color = config->has_underline_color ? config->underline_color
+                                                     : config->highlight_color;
+    gui->power_position  = config->power_position;
+    gui->shutdown_color  = config->has_shutdown_color ? config->shutdown_color
+                                                    : config->highlight_color;
+    gui->reboot_color    = config->has_reboot_color   ? config->reboot_color
+                                                    : config->highlight_color;
+    gui->firmware_color  = config->has_firmware_color ? config->firmware_color
+                                                    : config->highlight_color;
+
+    gui->power_icons     = config->power_icons;
+    gui->power_icon_size = config->power_icon_size;
+
+    main_clamp_gui_sizes(gui);
+
+    gui->blur            = config->blur;
+    gui->blur_title      = config->blur_title;
+    gui->blur_color      = config->has_blur_color ? config->blur_color : COLOR_WHITE;
+    gui->blur_color_set  = config->has_blur_color;
+    gui->accent_enabled   = config->accent_enabled;
+    gui->accent_icons     = config->accent_icons;
+    gui->accent_underline = config->accent_underline;
+    gui->accent_text      = config->accent_text;
+    gui->accent_os_icons  = config->accent_os_icons;
+    gui->accent_variant   = config->accent_variant;
+    gui->show_clock       = config->show_clock;
+    gui->accent_clock     = config->accent_clock;
+    gui->clock_color      = config->has_clock_color ? config->clock_color
+                                                   : config->highlight_color;
+    gui->clock_size       = config->clock_size;
+    gui->sp_clock         = config->sp_clock;
+    gui->clock_24h        = config->clock_24h;
+    gui->clock_seconds    = config->clock_seconds;
+    gui->clock_position   = config->clock_position;
+    gui->clock_date       = config->clock_date;
+    gui->clock_date_format = config->clock_date_format;
+    gui->clock_blur       = config->clock_blur;
+    gui->clock_shadow     = config->clock_shadow;
+    gui->clock_sync       = config->clock_sync;
+    gui->screensaver      = config->screensaver;
+    gui->ss_delay_ms      = config->screensaver_delay * 1000;
+    gui->ss_blank_ms      = config->screensaver_blank * 1000;
+    gui->ss_keep_clock    = config->screensaver_clock;
+    gui->record_seconds   = config->record_seconds;
+    gui->animation       = config->animation;
+    gui->anim_speed      = config->anim_speed;
+    gui->fade_speed      = config->fade_speed;
+    {
+        int sp = config->anim_speed;
+        if (sp < 1) sp = 8;
+        if (sp > 10) sp = 10;
+        gui->anim_frames = gui->animation ? 26 - sp * 2 : 1;
+        if (gui->animation && gui->anim_frames < 5) gui->anim_frames = 5;
+    }
+    if (config->default_entry < gui->entry_count)
+        gui->selected = config->default_entry;
+}
+
 /* boot.conf is user input; cap display sizes so extreme values cannot push the
  * menu off-screen or overflow layout arithmetic.  The caps depend on the screen
  * height, so this has to run after the mode is chosen - in the fast path the
@@ -139,6 +246,19 @@ static void main_clamp_gui_sizes(gui_state_t *gui) {
     if (gui->power_icon_size > icon_cap) gui->power_icon_size = icon_cap;
 }
 
+/**
+ * Bring the configured display mode up and do whatever the menu needs a
+ * framebuffer for.
+ *
+ * Runs on the normal path right after the GUI is initialised, and again from
+ * main_gui_ensure() when a user interrupts a fastboot and asks for the menu.
+ * The configured title, name and icon sizes are restored first, because the
+ * fast path wired them while no mode was known, then re-capped against the
+ * height that is actually in use.
+ *
+ * @param[in,out] gui    GUI state returned by gui_init().
+ * @param[in]     config Parsed configuration.
+ */
 static void main_gui_late_start(gui_state_t *gui, config_t *config) {
     if (config->res_max || (config->res_w && config->res_h))
         gui_set_mode(gui, config->res_w, config->res_h, config->res_max);
@@ -220,6 +340,10 @@ static void main_gui_ensure(gui_state_t *gui, config_t *config,
     }
     *gui_started = 1;
     *text_mode = 0;
+    /* gui_init() just reset the struct: re-apply the configuration (entries,
+     * timeout, colours, hotplug callback) before anything draws a menu, then
+     * do the mode/font/cursor work that needs a framebuffer. */
+    main_apply_gui_config(gui, config);
     main_gui_late_start(gui, config);
 }
 
@@ -524,102 +648,7 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         config_hotplug_arm(&config);
         efi_log(L"main: hotplug volume watch armed");
     }
-    gui.entries         = config.entries;
-    gui.entry_count     = config.entry_count;
-    gui.per_page        = config.entries_per_page ? config.entries_per_page : 3;
-    gui.timeout         = config.timeout;
-    gui.bg_color        = config.bg_color;
-    gui.fg_color        = config.fg_color;
-    gui.highlight_color = config.highlight_color;
-    gui.title           = config.title;
-    gui.show_title      = !config.no_title;
-    gui.logo_mode       = config.no_logo ? LOGO_MODE_OFF : config.logo_mode;
-    gui.logo_size       = config.logo_size;
-    gui.logo_gap        = config.logo_gap;
-    gui.accent_logo     = config.has_accent_logo ? config.accent_logo
-                                                 : config.accent_text;
-    gui.sp_logo         = config.sp_logo;
-    gui.sp_underline    = config.sp_underline;
-    gui.sp_highlight    = config.sp_highlight;
-    gui.sp_title        = config.sp_title;
-    gui.sp_name         = config.sp_name;
-    gui.sp_info         = config.sp_info;
-    gui.sp_shutdown     = config.sp_shutdown;
-    gui.sp_reboot       = config.sp_reboot;
-    gui.sp_firmware     = config.sp_firmware;
-    gui.sp_os_icons     = config.sp_os_icons;
-    gui.sp_blur         = config.sp_blur;
-    gui.sp_bg           = config.sp_bg;
-    gui.sp_g_text       = config.sp_g_text;
-    gui.sp_g_icons      = config.sp_g_icons;
-    gui.sp_g_underline  = config.sp_g_underline;
-    gui.sp_all          = config.sp_all;
-    gui.show_names      = config.show_names;
-    gui.center_info     = config.center_info;
-    gui.box_radius      = config.box_radius;
-    gui.title_color     = config.title_color;
-    gui.name_color      = config.name_color;
-    gui.title_size      = config.title_size;
-    gui.name_size       = config.name_size;
-    gui.icon_size       = config.icon_size;
-    gui.icon_spacing    = config.icon_spacing;
-    gui.icon_y          = config.icon_y;
-    gui.underline_thickness = config.underline_thickness;
-    gui.underline_length    = config.underline_length;
-    gui.underline_color = config.has_underline_color ? config.underline_color
-                                                     : config.highlight_color;
-    gui.power_position  = config.power_position;
-    gui.shutdown_color  = config.has_shutdown_color ? config.shutdown_color
-                                                    : config.highlight_color;
-    gui.reboot_color    = config.has_reboot_color   ? config.reboot_color
-                                                    : config.highlight_color;
-    gui.firmware_color  = config.has_firmware_color ? config.firmware_color
-                                                    : config.highlight_color;
-
-    gui.power_icons     = config.power_icons;
-    gui.power_icon_size = config.power_icon_size;
-
-    main_clamp_gui_sizes(&gui);
-
-    gui.blur            = config.blur;
-    gui.blur_title      = config.blur_title;
-    gui.blur_color      = config.has_blur_color ? config.blur_color : COLOR_WHITE;
-    gui.blur_color_set  = config.has_blur_color;
-    gui.accent_enabled   = config.accent_enabled;
-    gui.accent_icons     = config.accent_icons;
-    gui.accent_underline = config.accent_underline;
-    gui.accent_text      = config.accent_text;
-    gui.accent_os_icons  = config.accent_os_icons;
-    gui.accent_variant   = config.accent_variant;
-    gui.show_clock       = config.show_clock;
-    gui.accent_clock     = config.accent_clock;
-    gui.clock_color      = config.has_clock_color ? config.clock_color
-                                                   : config.highlight_color;
-    gui.clock_size       = config.clock_size;
-    gui.sp_clock         = config.sp_clock;
-    gui.clock_24h        = config.clock_24h;
-    gui.clock_seconds    = config.clock_seconds;
-    gui.clock_position   = config.clock_position;
-    gui.clock_date       = config.clock_date;
-    gui.clock_date_format = config.clock_date_format;
-    gui.clock_blur       = config.clock_blur;
-    gui.clock_shadow     = config.clock_shadow;
-    gui.clock_sync       = config.clock_sync;
-    gui.screensaver      = config.screensaver;
-    gui.ss_delay_ms      = config.screensaver_delay * 1000;
-    gui.ss_blank_ms      = config.screensaver_blank * 1000;
-    gui.ss_keep_clock    = config.screensaver_clock;
-    gui.record_seconds   = config.record_seconds;
-    gui.animation       = config.animation;
-    gui.anim_speed      = config.anim_speed;
-    gui.fade_speed      = config.fade_speed;
-    {
-        int sp = config.anim_speed;
-        if (sp < 1) sp = 8;
-        if (sp > 10) sp = 10;
-        gui.anim_frames = gui.animation ? 26 - sp * 2 : 1;
-        if (gui.animation && gui.anim_frames < 5) gui.anim_frames = 5;
-    }
+    main_apply_gui_config(&gui, &config);
     if (!text_mode && config.power_icons) {
         if (config.shutdown_icon) gui.shutdown_icon = gui_load_icon(config.shutdown_icon);
         if (config.reboot_icon)   gui.reboot_icon   = gui_load_icon(config.reboot_icon);
