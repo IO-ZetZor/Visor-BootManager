@@ -1,0 +1,6 @@
+esp/
+build/
+esp-aarch64/
+vars.fd
+visor_x64.efi
+visor_aa64.efi
