@@ -46,7 +46,9 @@
 # Seconds before the default entry auto-boots:
 #    N   wait N seconds, then boot the default entry
 #   -1   never auto-boot - wait for the user to choose
-#    0   boot the default entry immediately (skips the menu entirely)
+#    0   same as -1: no countdown, the menu waits for a choice
+# For an instant menu-less boot set autoboot=1 instead; the timeout is not used
+# on that path.
 timeout=5
 
 # Index of the default entry (0-based, in the order entries appear below).
@@ -86,9 +88,13 @@ autoboot=0
 
 # Whether the fast path may start the GUI just to paint the splash.
 #   1   initialise the framebuffer and draw splash (default)
-#   0   do not touch the video at all: the firmware's own screen stays up until
-#       the kernel takes over. The fastest boot, but no still frame - and the
-#       key that opens the menu still works, it just starts the GUI on demand.
+#   0   do not touch the video at all: the firmware's own screen (vendor logo)
+#       stays up until the kernel takes over. The fastest boot, but no still
+#       frame - and the key that opens the menu still works, it just starts the
+#       GUI on demand.
+# The same GUI-less path is taken whenever autoboot=1 with splash=0. Visor still
+# prints its four startup checkpoints either way - they run before boot.conf can
+# be read - but draws and prints nothing after them, and never clears the screen.
 #splash_gui=1
 
 # Remember the last-booted entry and preselect it next time (persisted in an NVRAM

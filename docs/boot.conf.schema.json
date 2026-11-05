@@ -447,7 +447,7 @@
     "autoboot": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one). Defaults to false; set autoboot_key to choose the key event that opens the menu during autoboot.",
+      "description": "Skip the menu and boot immediately (the single entry, or the remembered/default one), without waiting for timeout. Defaults to false; set autoboot_key to choose the key event that opens the menu during autoboot.",
       "$ref": "#/$defs/bool",
       "default": false
     },
@@ -461,14 +461,14 @@
     "splash": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Paint one still splash frame and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. It is meant for autoboot=1, where no menu appears: the machine then goes from the firmware straight to the distro's own splash with no text screen and no black flash. Without splash_image the frame is composed from background, logo and title; with it, the picture is used as-is. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet splash on the kernel command line if you want them to look continuous. Defaults to false.",
+      "description": "Paint one still splash frame and leave it on screen through the handover instead of fading out, restoring text mode and printing to the console. It is meant for autoboot=1, where no menu appears: the machine then goes from the firmware straight to the distro's own splash with no black flash. Without splash_image the frame is composed from background, logo and title; with it, the picture is used as-is. The frame is only a picture - Visor cannot start plymouth, which lives in the initramfs - so pair it with quiet splash on the kernel command line if you want them to look continuous. Defaults to false.",
       "$ref": "#/$defs/bool",
       "default": false
     },
     "splash_gui": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws splash, 0 skips GUI initialisation entirely so the firmware screen stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1.",
+      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws splash; 0 skips GUI initialisation entirely, so the firmware's own screen (vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor still prints its four startup checkpoints before it can read this file, but draws nothing else, never clears the screen and prints no boot text.",
       "$ref": "#/$defs/bool",
       "default": true
     },
@@ -1148,7 +1148,7 @@
     "timeout": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Seconds before the default entry auto-boots. -1 waits forever; 0 boots the default instantly with no menu.",
+      "description": "Seconds before the default entry auto-boots. Only values above 0 count down: 0 and -1 both wait forever for a choice. For an instant, menu-less boot use autoboot=1.",
       "type": "integer",
       "minimum": -1,
       "default": 5

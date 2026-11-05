@@ -153,6 +153,19 @@ static void main_gui_late_start(gui_state_t *gui, config_t *config) {
                        config->cursor_hot_x, config->cursor_hot_y);
 }
 
+/* Take the screen over for the code that is about to draw.  Until this runs
+ * the firmware's own screen is still up, which is what a boot that shows no
+ * menu and no splash wants to hand to the kernel. */
+static void console_takeover(void) {
+    ST->ConOut->ClearScreen(ST->ConOut);
+    ST->ConOut->EnableCursor(ST->ConOut, FALSE);
+    /* ClearScreen just erased the warning efi_log() printed when the first
+     * write failed.  Say it again, otherwise the rest of the boot looks as if
+     * the log is simply empty.  Logging stays off: no retry here. */
+    if (efi_log_write_failed())
+        efi_print(L"WARN: boot.log could not be written - this boot is console only\r\n");
+}
+
 /* Make sure the menu can actually be drawn: initialise the GUI if the fast
  * path skipped it, and fall back to text mode when that is impossible. */
 static void main_gui_ensure(gui_state_t *gui, config_t *config,
@@ -302,18 +315,16 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
         efi_print(L"Visor: log ready, reading the firmware clock\r\n");
         loader_mark_init();
 
-        ST->ConOut->ClearScreen(ST->ConOut);
-        ST->ConOut->EnableCursor(ST->ConOut, FALSE);
-        /* ClearScreen just erased the warning efi_log() printed when the first
-         * write failed.  Say it again, otherwise the rest of the boot looks as
-         * if the log is simply empty.  Logging stays off: no retry here. */
-        if (efi_log_write_failed())
-            efi_print(L"WARN: boot.log could not be written - this boot is console only\r\n");
+        /* The console is deliberately left alone here.  A boot that shows no
+         * menu or splash never touches the video, so the firmware's own screen
+         * stays up until the kernel takes over; whichever branch below does
+         * draw calls console_takeover() first. */
 
         gui_state_t gui = {0};
         int text_mode = 0;
         int gui_started = 0;
         int force_menu = 0;
+        int keep_firmware_screen = 0;
         UINTN loader_pick = (UINTN)-1;
         EFI_STATUS status;
 
@@ -414,6 +425,7 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
     int splash_on  = config.splash && config.splash_gui;
 
     if (!config.text_menu && (!fastboot || splash_on)) {
+        console_takeover();
         efi_log(L"main: initialising GUI (locating GOP, allocating back buffer)");
         status = gui_init(&gui);
         if (EFI_ERROR(status)) {
@@ -427,12 +439,14 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
             efi_log(L"main: GUI ready");
         }
     } else if (config.text_menu) {
+        console_takeover();
         efi_log(L"main: text_menu=1 - no framebuffer needed");
         text_mode = 1;
         gui.selected = 0;
         gui.timeout_active = 1;
     } else {
-        efi_log(L"main: fastboot - no framebuffer needed, skipping the GUI");
+        efi_log(L"main: fastboot - no framebuffer needed, leaving the firmware screen up");
+        keep_firmware_screen = 1;
         text_mode = 1;
         gui.selected = 0;
         gui.timeout_active = 1;
@@ -1034,12 +1048,20 @@ boot_selected:
         gui_closed = 1;
     }
 
+    /* Nothing was drawn, so there is nothing to undo and nothing that should
+     * paint over the firmware's own screen: clear it and the user sees black
+     * where the vendor logo used to be. */
+    if (keep_firmware_screen && !gui_closed) {
+        efi_log(L"main: fastboot - leaving the firmware screen in place");
+        gui_closed = 1;
+    }
+
     visor_quiet = config.quiet;
     if (visor_quiet) {
         efi_log(L"main: quiet mode - suppressing console output");
-        if (!splash_shown) ST->ConOut->ClearScreen(ST->ConOut);
+        if (!splash_shown && !keep_firmware_screen) ST->ConOut->ClearScreen(ST->ConOut);
     }
-    if (splash_shown) visor_quiet = 1;
+    if (splash_shown || keep_firmware_screen) visor_quiet = 1;
     efi_log_set_console(!visor_quiet);
     efi_log(L"main: boot log streaming to console is active");
     efi_log(selected->name);
@@ -1056,7 +1078,7 @@ boot_selected:
     if (config.loader_vars)
         loader_mark_selected(selected);
 
-    if (!splash_shown) {
+    if (!splash_shown && !keep_firmware_screen) {
         efi_print(L"Booting: ");
         efi_print(selected->name);
         efi_print(L"\r\n");
