@@ -17,7 +17,7 @@ optdepends=('sbctl: Secure Boot signing with sbctl'
             'python-numpy: VBG backgrounds (visor convert --vbg)')
 install=visor.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('8b1d3ac63724e4a59f8c7e6f45c0a7cf9dc385289ec31c207d4da4fa8d73b5bd')
 
 _dir="Visor-BootManager-$pkgver"
 

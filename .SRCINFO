@@ -16,6 +16,6 @@ pkgbase = visor
 	optdepends = ffmpeg: animated backgrounds (visor convert)
 	optdepends = python-numpy: VBG backgrounds (visor convert --vbg)
 	source = visor-1.6.1.tar.gz::https://github.com/IO-ZetZor/Visor-BootManager/archive/refs/tags/v1.6.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = 8b1d3ac63724e4a59f8c7e6f45c0a7cf9dc385289ec31c207d4da4fa8d73b5bd
 
 pkgname = visor
