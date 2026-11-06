@@ -1,5 +1,5 @@
-esp/
 build/
+esp-x86_64/
 esp-aarch64/
 vars.fd
 visor_x64.efi

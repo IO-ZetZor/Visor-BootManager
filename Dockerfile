@@ -1,6 +1,6 @@
 FROM debian:bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential make git ca-certificates \
+      build-essential make git ca-certificates python3 \
       gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
       libc6-dev-arm64-cross gnu-efi \
  && rm -rf /var/lib/apt/lists/*

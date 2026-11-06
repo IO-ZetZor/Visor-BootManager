@@ -26,6 +26,9 @@ if [ "$ARCH" = x86_64 ]; then
     for s in "" ".4m"; do
       [ -f "$d/OVMF_CODE$s.fd" ] && CODE="$d/OVMF_CODE$s.fd" && VARS="$d/OVMF_VARS$s.fd" && break 2
     done
+    for s in "" "_4M.fd"; do
+      [ -f "$d/OVMF_CODE$s.fd" ] && CODE="$d/OVMF_CODE$s.fd" && VARS="$d/OVMF_VARS$s.fd" && break 2
+    done
   done
   [ -n "$CODE" ] || { echo "OVMF not found"; exit 1; }
   [ -f vars.fd ] || cp "$VARS" vars.fd
