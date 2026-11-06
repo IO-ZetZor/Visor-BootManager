@@ -18,10 +18,6 @@ boot_entry_t* gui_run(gui_state_t *state) {
     if (!state->gptw_suppressed)
         gpt_warn_run(state);
 
-    if (state->timeout == 0) {
-        state->running = 0;
-    }
-
     INTN last_remaining = -2;
     int  need_redraw = 1;
     int  full_redraw = 1;
@@ -624,6 +620,8 @@ void gui_shutdown(gui_state_t *state) {
     state->browse = NULL;
     free_icon(state->logo);
     state->logo = NULL;
+    free_icon(state->splash_img);
+    state->splash_img = NULL;
     free_icon(state->shutdown_icon);
     state->shutdown_icon = NULL;
     free_icon(state->reboot_icon);

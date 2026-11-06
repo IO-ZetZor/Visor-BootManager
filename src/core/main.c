@@ -750,8 +750,9 @@ static CHAR16* text_prompt_password(CHAR16 *label) {
      * autoboot decision, so an enabled fast boot never shows the firmware's
      * text console - or a black screen - between Visor and the kernel.  It
      * reuses the wallpaper, logo and title the menu would draw, so the frame
-     * the kernel paints over already looks like the boot splash. */
-    if (fastboot && splash_on && !text_mode && !gui_closed) {
+     * the kernel paints over already looks like the boot splash.  Once a
+     * forced menu is requested, do not paint it again on the way back here. */
+    if (!force_menu && fastboot && splash_on && !text_mode && !gui_closed) {
         if (config.splash_image && !gui.splash_img) {
             efi_log(L"main: splash - loading splash_image");
             gui_set_splash(&gui, config.splash_image);
@@ -781,10 +782,10 @@ select_entry:
     intro_boot = 0;
 
     /* The splash plays once, before the first menu, and only when there is a
-     * menu to get to.  autoboot=1 and timeout=0 mean "no menu", so they
-     * bypass it rather than delaying a boot that was never going to wait. */
+     * menu to get to.  autoboot=1 means "no menu", so it bypasses the intro
+     * rather than delaying a boot that was never going to wait. */
     if (!intro_seen && !retry_selected && !text_mode && !gui_closed &&
-        config.intro_media && !config.autoboot && gui.timeout != 0) {
+        config.intro_media && !config.autoboot) {
         intro_seen = 1;
         int intro_result = gui_show_intro(&gui, config.intro_media,
                                           config.intro_duration,

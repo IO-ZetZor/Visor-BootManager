@@ -468,7 +468,7 @@
     "splash_gui": {
       "x-feature": "gui",
       "x-group": "boot",
-      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws it; 0 skips GUI initialisation entirely, so the firmware's own screen (usually the vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor reads this file first, prints its four startup checkpoints only when checkpoints=1 (or when this file cannot be read at all), and otherwise draws nothing, never clears the screen and prints no boot text.",
+      "description": "Whether the fast path may bring the GUI up just to paint the splash. 1 (default) initialises the framebuffer and draws it; 0 skips GUI initialisation entirely, so the firmware's own screen (usually the vendor logo) stays up until the kernel takes over - the fastest boot, with no still frame. Only matters when splash=1 and autoboot=1. The same GUI-less path is taken whenever autoboot=1 with splash=0: Visor draws nothing, never clears the screen and prints no boot text. Whether its startup checkpoints appear on top of the logo is controlled by checkpoints.",
       "$ref": "#/$defs/bool",
       "default": true
     },
@@ -1000,7 +1000,7 @@
       "x-aliases": ["startup_text"],
       "description": "Print Visor's startup checkpoints (Visor loading..., reading boot.conf, opening boot.log, log ready) on the console. They are console output only - they exist to be read off a frozen screen because they run before the boot log is open, so they are never written to boot.log. On by default: the last line on screen names the step that died, which is the only clue a frozen machine gives. Set it to 0 for a completely clean screen when nothing is wrong. Always printed when boot.conf itself cannot be read.",
       "$ref": "#/$defs/bool",
-      "default": false
+      "default": true
     },
     "remember_last": {
       "x-feature": "discover",
