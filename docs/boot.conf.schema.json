@@ -1156,7 +1156,7 @@
     "timeout": {
       "x-feature": "core",
       "x-group": "boot",
-      "description": "Seconds before the default entry auto-boots. Only values above 0 count down: 0 and -1 both wait forever for a choice. For an instant, menu-less boot use autoboot=1.",
+      "description": "Seconds before the default entry auto-boots. -1 waits forever; 0 boots the default instantly with no menu.",
       "type": "integer",
       "minimum": -1,
       "default": 5

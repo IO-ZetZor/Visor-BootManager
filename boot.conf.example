@@ -46,9 +46,7 @@
 # Seconds before the default entry auto-boots:
 #    N   wait N seconds, then boot the default entry
 #   -1   never auto-boot - wait for the user to choose
-#    0   same as -1: no countdown, the menu waits for a choice
-# For an instant menu-less boot set autoboot=1 instead; the timeout is not used
-# on that path.
+#    0   boot the default entry immediately (skips the menu entirely)
 timeout=5
 
 # Index of the default entry (0-based, in the order entries appear below).

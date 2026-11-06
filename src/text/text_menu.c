@@ -177,6 +177,7 @@ boot_entry_t* text_menu_run(gui_state_t *state) {
     BS->SetWatchdogTimer(0, 0, 0, NULL);
 
     state->timeout_start = efi_get_tick();
+    if (state->timeout == 0) state->running = 0;
 
     INTN last_remaining = -2;
     int  need_redraw = 1;

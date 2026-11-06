@@ -782,10 +782,10 @@ select_entry:
     intro_boot = 0;
 
     /* The splash plays once, before the first menu, and only when there is a
-     * menu to get to.  autoboot=1 means "no menu", so it bypasses the intro
-     * rather than delaying a boot that was never going to wait. */
+     * menu to get to.  autoboot=1 and timeout=0 mean "no menu", so they
+     * bypass it rather than delaying a boot that was never going to wait. */
     if (!intro_seen && !retry_selected && !text_mode && !gui_closed &&
-        config.intro_media && !config.autoboot) {
+        config.intro_media && !config.autoboot && gui.timeout != 0) {
         intro_seen = 1;
         int intro_result = gui_show_intro(&gui, config.intro_media,
                                           config.intro_duration,

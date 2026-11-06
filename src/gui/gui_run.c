@@ -18,6 +18,10 @@ boot_entry_t* gui_run(gui_state_t *state) {
     if (!state->gptw_suppressed)
         gpt_warn_run(state);
 
+    if (state->timeout == 0) {
+        state->running = 0;
+    }
+
     INTN last_remaining = -2;
     int  need_redraw = 1;
     int  full_redraw = 1;
