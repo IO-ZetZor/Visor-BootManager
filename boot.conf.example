@@ -465,7 +465,7 @@ quiet=0
 # is taken from the first frame.
 background=\EFI\visor\backgrounds\default.png
 
-#Option to set looping of the background to true or false.
+#Option to set looping of the background active or not
 #This is useful for more intro like animations that you want as background instead of intro
 loop_background=1
 

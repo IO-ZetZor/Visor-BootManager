@@ -37,13 +37,13 @@ void gui_set_background(gui_state_t *state, CHAR16 *path) {
         anim_t *a = gui_load_anim(path, &first,
                                   state->screen_width, state->screen_height);
         if (a) {
+            a->loops = state->loop_background == 1 ? 0 : 1;
             if (a->frame_count > 1) {
                 state->bg_anim = a;
             } else {
                 anim_free(a);
             }
             state->background = first;
-            a->loops = state->loop_background == 1 ? 0 : 1;
         } else {
             efi_log(L"  ERROR: animation decode failed");
         }
