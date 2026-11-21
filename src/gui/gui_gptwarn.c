@@ -278,8 +278,17 @@ static void gptw_draw(gui_state_t *state) {
             SPrint(line, sizeof(line), L"Reason: %s", gpt_reason_text(r->reason));
             gptw_fit(line, c.body_px, c.w - 2 * c.pad);
             card_line(state, &c, line, COLOR_WHITE, c.body_px, 235);
-            card_line(state, &c, L"The disk was not modified.",
-                      COLOR_GRAY, c.body_px, 225);
+            if (r->wrote_entries || r->wrote_header) {
+                /* gpt_execute_plan writes the entries (and possibly the
+                 * header) before several of its failure returns; never
+                 * claim an untouched disk in that case. */
+                card_line(state, &c,
+                          L"Parts of the GPT were already written to the disk.",
+                          COLOR_ORANGE, c.body_px, 225);
+            } else {
+                card_line(state, &c, L"The disk was not modified.",
+                          COLOR_GRAY, c.body_px, 225);
+            }
             card_hints(state, &c, hints, 1);
         }
     }
