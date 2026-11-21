@@ -267,8 +267,15 @@ static void gptw_draw(gui_state_t *state) {
 
             card_hints(state, &c, hints, 1);
         } else {
+            /* card_line neither wraps nor clips, so the wider status
+             * lines below are drawn as two rows; one long row would run
+             * past the card edge at larger name_size values. Size the
+             * card for the number of rows actually drawn. */
+            int status_rows =
+                (r->wrote_entries || r->wrote_header ||
+                 r->entries_write_attempted) ? 2 : 1;
             INTN bh = c.pad + (INTN)c.title_px + 11 + 13
-                    + 2 * ((INTN)c.body_px + 5) + 10
+                    + (1 + status_rows) * ((INTN)c.body_px + 5) + 10
                     + card_hints_h(&c) + c.pad / 2;
             card_open(state, &c, bw, bh);
 
@@ -282,16 +289,17 @@ static void gptw_draw(gui_state_t *state) {
                 /* gpt_execute_plan writes the entries (and possibly the
                  * header) before several of its failure returns; never
                  * claim an untouched disk in that case. */
-                card_line(state, &c,
-                          L"Parts of the GPT were already written to the disk.",
+                card_line(state, &c, L"Parts of the GPT",
+                          COLOR_ORANGE, c.body_px, 225);
+                card_line(state, &c, L"were already written to the disk.",
                           COLOR_ORANGE, c.body_px, 225);
             } else if (r->entries_write_attempted) {
                 /* The entry-array write was issued but failed: a
                  * multi-sector write can fail partway, so the disk may
                  * still be modified. */
-                card_line(state, &c,
-                          L"The write was started; the disk may have been "
-                          L"modified.",
+                card_line(state, &c, L"The write was started;",
+                          COLOR_ORANGE, c.body_px, 225);
+                card_line(state, &c, L"the disk may have been modified.",
                           COLOR_ORANGE, c.body_px, 225);
             } else {
                 card_line(state, &c, L"The disk was not modified.",
