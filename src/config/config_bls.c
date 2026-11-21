@@ -28,8 +28,27 @@ static CHAR16* bls_path_dup(CHAR16 *p) {
     return o;
 }
 
+/* Drop GRUB variable tokens ("$tuned_params", "${foo}") in place. Fedora's
+ * BLS entries carry them for GRUB to expand from grubenv; they are usually
+ * unset (empty), and passing them through breaks initrd paths. */
+static void bls_strip_vars(CHAR16 *s) {
+    UINTN r = 0, w = 0;
+    while (s[r]) {
+        while (s[r] == ' ' || s[r] == '\t') r++;
+        if (!s[r]) break;
+        UINTN start = r;
+        while (s[r] && s[r] != ' ' && s[r] != '\t') r++;
+        if (s[start] == '$') continue;
+        if (w) s[w++] = ' ';
+        for (UINTN i = start; i < r; i++) s[w++] = s[i];
+    }
+    s[w] = 0;
+}
+
 static void bls_accum(CHAR16 **dst, CHAR16 *val) {
-    if (!val || !val[0]) return;
+    if (!val) return;
+    bls_strip_vars(val);
+    if (!val[0]) return;
     if (!*dst) { *dst = efi_strdup(val); return; }
     UINTN la = 0; while ((*dst)[la]) la++;
     UINTN lb = 0; while (val[lb]) lb++;
@@ -56,6 +75,43 @@ static int bls_arch_ok(CHAR16 *arch) {
 #endif
 }
 
+/* Version compare with numeric runs compared as numbers ("7.3.10" > "7.3.4").
+ * Returns <0, 0, >0 like strcmp. */
+static int bls_vercmp(const CHAR16 *a, const CHAR16 *b) {
+    while (*a && *b) {
+        if (*a >= '0' && *a <= '9' && *b >= '0' && *b <= '9') {
+            while (*a == '0') a++;
+            while (*b == '0') b++;
+            UINTN la = 0, lb = 0;
+            while (a[la] >= '0' && a[la] <= '9') la++;
+            while (b[lb] >= '0' && b[lb] <= '9') lb++;
+            if (la != lb) return la < lb ? -1 : 1;
+            for (UINTN i = 0; i < la; i++)
+                if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+            a += la; b += lb;
+        } else {
+            if (*a != *b) return *a < *b ? -1 : 1;
+            a++; b++;
+        }
+    }
+    return *a ? 1 : (*b ? -1 : 0);
+}
+
+/* Fedora-style entries ("<32-hex machine-id>-<version>.conf") carry the
+ * machine-id only in the filename. Returns a copy of it, or NULL. */
+static CHAR16* bls_machine_from_name(const CHAR16 *name) {
+    for (UINTN i = 0; i < 32; i++) {
+        CHAR16 c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return NULL;
+    }
+    if (name[32] != '-') return NULL;
+    CHAR16 *o = efi_allocate_pool(33 * sizeof(CHAR16));
+    if (!o) return NULL;
+    for (UINTN i = 0; i < 32; i++) o[i] = name[i];
+    o[32] = 0;
+    return o;
+}
+
 static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
     int oa = a->ot_idx, ob = b->ot_idx;
     if (oa >= 0 || ob >= 0) {
@@ -72,6 +128,11 @@ static int bls_deploy_precedes(bls_rec_t *a, bls_rec_t *b, int ia, int ib) {
     }
     if (a->sort_key && !b->sort_key) return 1;
     if (!a->sort_key && b->sort_key) return 0;
+    /* Newest version first, as the BLS spec asks when sort-key is absent. */
+    if (a->version && b->version) {
+        int c = bls_vercmp(a->version, b->version);
+        if (c != 0) return c > 0;
+    }
     return ia < ib;
 }
 
@@ -175,6 +236,7 @@ static void bls_scan(EFI_FILE_PROTOCOL *root, EFI_HANDLE volume, CHAR16 *dir,
         if (!r.kernel && r.efi) { r.kernel = r.efi; r.efi = NULL; }
         if (r.title && r.kernel && bls_arch_ok(r.arch)) {
             r.conf = efi_strdup(path);
+            if (!r.machine) r.machine = bls_machine_from_name(name);
             bls_tries(name, &r.tries_left, &r.tries_done);
             r.ot_idx = bls_ostree_idx(r.title);
             recs[(*nrec)++] = r;
