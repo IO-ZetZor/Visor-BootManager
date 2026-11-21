@@ -461,6 +461,16 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
         return;
     }
     n = cnt;
+    if (n > NVSH_SLOTS) {
+        /* The rewrite below packs at most NVSH_SLOTS + 2 entries into a
+         * fixed stack buffer. A longer order is corrupt firmware data;
+         * leave it untouched like a malformed one instead of overflowing. */
+        nsh_log(L"selfheal: BootOrder too large (%d entries) - leaving it untouched",
+                (int)n);
+        efi_free_pool(list);
+        efi_free_pool(od);
+        return;
+    }
     int in = 0;
     for (UINTN i = 0; i < n; i++) if (list[i] == slot) in = 1;
     rep->entry_in_order = in;
