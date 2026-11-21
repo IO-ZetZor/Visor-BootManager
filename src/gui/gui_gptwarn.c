@@ -285,6 +285,14 @@ static void gptw_draw(gui_state_t *state) {
                 card_line(state, &c,
                           L"Parts of the GPT were already written to the disk.",
                           COLOR_ORANGE, c.body_px, 225);
+            } else if (r->entries_write_attempted) {
+                /* The entry-array write was issued but failed: a
+                 * multi-sector write can fail partway, so the disk may
+                 * still be modified. */
+                card_line(state, &c,
+                          L"The write was started; the disk may have been "
+                          L"modified.",
+                          COLOR_ORANGE, c.body_px, 225);
             } else {
                 card_line(state, &c, L"The disk was not modified.",
                           COLOR_GRAY, c.body_px, 225);
