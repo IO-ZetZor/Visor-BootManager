@@ -103,6 +103,10 @@ int nvsh_parse_load_option(const UINT8 *buf, UINTN size, UINT32 *attributes,
     return 0;
 }
 
+static UINT16 nvsh_bootorder_entry(const UINT8 *buf, UINTN i) {
+    return (UINT16)(buf[2 * i] | (buf[2 * i + 1] << 8));
+}
+
 int nvsh_parse_bootorder(const UINT8 *buf, UINTN size, UINT16 *list,
                          UINTN cap, UINTN *count) {
     if (!buf || size % 2) return -1;
@@ -110,7 +114,7 @@ int nvsh_parse_bootorder(const UINT8 *buf, UINTN size, UINT16 *list,
     if (count) *count = n;
     if (!list || n > cap) return (n > cap) ? -2 : 0;
     for (UINTN i = 0; i < n; i++)
-        list[i] = (UINT16)(buf[2 * i] | (buf[2 * i + 1] << 8));
+        list[i] = nvsh_bootorder_entry(buf, i);
     return 0;
 }
 
@@ -289,6 +293,19 @@ static void nvsh_stamp_write(const CHAR16 *path, int val) {
     root->Close(root);
 }
 
+static void nvsh_report_entry_status(nvsh_report_t *rep, const UINT8 *order,
+                                     UINTN n, UINT16 slot, int have_bc,
+                                     UINT16 bootcurrent) {
+    rep->normal_boot = have_bc && bootcurrent == slot;
+    rep->entry_in_order = 0;
+    for (UINTN i = 0; i < n; i++) {
+        if (nvsh_bootorder_entry(order, i) == slot) {
+            rep->entry_in_order = 1;
+            break;
+        }
+    }
+}
+
 static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                             nvsh_report_t *rep) {
     UINT8 *bc = NULL;
@@ -360,6 +377,59 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
     rep->entry_present = present;
     rep->our_entry = present ? slot : 0xFFFF;
 
+    /* Read and validate BootOrder before creating anything: the entry
+     * creation below only makes sense when the order that must reference
+     * the new entry is usable. */
+    UINT8 *od = NULL;
+    UINTN ord_sz = 0;
+    UINT32 oat = 0;
+    EFI_STATUS os = nvsh_var_get(L"BootOrder", &gEfiGlobalVariableGuid,
+                                 &oat, &od, &ord_sz);
+    if (os == EFI_NOT_FOUND) {
+        rep->order_missing = 1;
+        nsh_log(L"selfheal: BootOrder absent - not inventing one; fallback copy"
+                L" guards reachability");
+        efi_free_pool(od);
+        return;
+    }
+    if (EFI_ERROR(os)) {
+        nsh_log(L"selfheal: cannot read BootOrder");
+        efi_free_pool(od);
+        return;
+    }
+
+    UINTN n = 0;
+    int parsed = nvsh_parse_bootorder(od, ord_sz, NULL, NVSH_SLOTS, &n);
+    if (present && parsed != -1)
+        nvsh_report_entry_status(rep, od, n, slot, have_bc, bootcurrent);
+    if (parsed) {
+        if (parsed == -2)
+            nsh_log(L"selfheal: BootOrder too large - leaving it untouched");
+        else
+            nsh_log(L"selfheal: cannot parse BootOrder (%d) - leaving it untouched",
+                    parsed);
+        efi_free_pool(od);
+        return;
+    }
+
+    /* At the limit only an existing, listed entry can be kept or promoted.
+     * Reject growth before creating Boot#### so the next pass can still
+     * accept every order we write. */
+    if (n == NVSH_SLOTS && !rep->entry_in_order) {
+        nsh_log(L"selfheal: BootOrder is full - leaving NVRAM untouched");
+        efi_free_pool(od);
+        return;
+    }
+
+    UINT16 *list = efi_allocate_pool((n + 1) * sizeof(*list));
+    if (!list) {
+        nsh_log(L"selfheal: out of memory parsing BootOrder");
+        efi_free_pool(od);
+        return;
+    }
+    /* The count-only call already validated the same buffer and capacity. */
+    nvsh_parse_bootorder(od, ord_sz, list, n, NULL);
+
     if (!present) {
         UINT16 could = 0xFFFF;
         for (UINT16 i = 0; i < NVSH_SLOTS; i++)
@@ -367,6 +437,8 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
         if (could == 0xFFFF) {
             rep->error = NVSH_ERR_NOSLOT;
             nsh_log(L"selfheal: no free Boot#### slot - cannot create our entry");
+            efi_free_pool(list);
+            efi_free_pool(od);
             return;
         }
         if (dry_run) {
@@ -379,6 +451,8 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
             if (!full) {
                 rep->error = NVSH_ERR_BOOTMGR;
                 nsh_log(L"selfheal: cannot build a device path for our own entry");
+                efi_free_pool(list);
+                efi_free_pool(od);
                 return;
             }
             UINTN full_len = DevicePathSize(full);
@@ -417,54 +491,18 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
                 }
             }
             efi_free_pool(full);
-            if (!present) return;
+            if (!present) {
+                efi_free_pool(list);
+                efi_free_pool(od);
+                return;
+            }
         }
+        nvsh_report_entry_status(rep, od, n, slot, have_bc, bootcurrent);
     } else {
         CHAR16 bn[9]; efi_boot_var_name(bn, (UINT16)slot);
         nsh_log(L"selfheal: found existing entry %s for %s", bn, run);
     }
 
-    UINT8 *od = NULL;
-    UINTN osz = 0;
-    UINT32 oat = 0;
-    EFI_STATUS os = nvsh_var_get(L"BootOrder", &gEfiGlobalVariableGuid,
-                                 &oat, &od, &osz);
-    if (os == EFI_NOT_FOUND) {
-        rep->order_missing = 1;
-        nsh_log(L"selfheal: BootOrder absent - not inventing one; fallback copy"
-                L" guards reachability");
-        efi_free_pool(od);
-        return;
-    }
-    if (EFI_ERROR(os)) {
-        nsh_log(L"selfheal: cannot read BootOrder");
-        efi_free_pool(od);
-        return;
-    }
-
-    UINTN n = osz / 2;
-    UINT16 *list = efi_allocate_pool((n + 2) * sizeof(UINT16));
-    if (!list) {
-        nsh_log(L"selfheal: out of memory parsing BootOrder");
-        efi_free_pool(od);
-        return;
-    }
-    UINTN cnt = 0;
-    int parsed = nvsh_parse_bootorder(od, osz, list, n + 2, &cnt);
-    if (parsed != 0) {
-        /* A malformed or oversized BootOrder must never be replaced by a
-         * single-entry list: that silently hides every other boot target. */
-        nsh_log(L"selfheal: cannot parse BootOrder (%d) - leaving it untouched",
-                parsed);
-        efi_free_pool(list);
-        efi_free_pool(od);
-        return;
-    }
-    n = cnt;
-    int in = 0;
-    for (UINTN i = 0; i < n; i++) if (list[i] == slot) in = 1;
-    rep->entry_in_order = in;
-    rep->normal_boot = have_bc && bootcurrent == slot;
     if (rep->normal_boot)
         nsh_log(L"selfheal: normal boot-manager boot of our entry");
     else
@@ -495,7 +533,7 @@ static void nvsh_nvram_pass(const CHAR16 *run, int mode, int dry_run,
             nsh_log(L"selfheal: BootOrder needs %s (entry %s)",
                     rep->normal_boot ? L"promotion to head" : L"re-add", bn);
             if (!dry_run) {
-                UINT8 ob[(NVSH_SLOTS + 2) * 2];
+                UINT8 ob[NVSH_SLOTS * sizeof(UINT16)];
                 UINTN k = 0;
                 for (UINTN i = 0; i < nn; i++) {
                     ob[k] = (UINT8)list[i];
