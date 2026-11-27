@@ -289,9 +289,9 @@ static void gptw_draw(gui_state_t *state) {
                 /* gpt_execute_plan writes the entries (and possibly the
                  * header) before several of its failure returns; never
                  * claim an untouched disk in that case. */
-                card_line(state, &c, L"Parts of the GPT",
+                card_line(state, &c, L"GPT writes were accepted.",
                           COLOR_ORANGE, c.body_px, 225);
-                card_line(state, &c, L"were already written to the disk.",
+                card_line(state, &c, L"Verify the disk.",
                           COLOR_ORANGE, c.body_px, 225);
             } else if (r->entries_write_attempted) {
                 /* The entry-array write was issued but failed: a
