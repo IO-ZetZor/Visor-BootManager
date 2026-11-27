@@ -270,6 +270,10 @@ EFI_STATUS gpt_execute_plan(gpt_dev_t *dev, const gpt_plan_t *plan,
 
     EFI_STATUS st;
 
+    /* Record that the entry-array write was issued even if it fails: a
+     * multi-sector WriteBlocks error can still leave sectors written, so
+     * callers must not report an untouched disk afterwards. */
+    result->entries_write_attempted = 1;
     st = dev->write(dev, plan->dst_entries_lba, (UINTN)plan->entry_array_sectors,
                     plan->entry_bytes);
     if (EFI_ERROR(st)) { result->reason = GPT_R_DISK_WRITE_FAILED; result->status = st; return st; }

@@ -285,6 +285,7 @@ typedef struct {
     gpt_reason_t reason;
     EFI_STATUS status;          
 
+    int entries_write_attempted;
     int wrote_entries;
     int wrote_header;
     int flushed;
