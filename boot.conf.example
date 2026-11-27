@@ -230,10 +230,14 @@ quiet=0
 #   efi   initrd options       program; efi-only entries are chainloaded
 #   machine-id architecture    arch mismatch (e.g. EFIARM on x86_64) is skipped
 #   sort-key                   groups sort by ostree index (newest first) then
-#                              alphabetically by sort-key; repeated initrd and
-#                              options lines accumulate in order. Entry
-#                              basenames ending in +N-M drive the boot-counter
-#                              (tries-left) rollback behaviour.
+#                              alphabetically by sort-key, then newest version
+#                              first; repeated initrd and options lines
+#                              accumulate in order. Entry basenames ending in
+#                              +N-M drive the boot-counter (tries-left)
+#                              rollback behaviour.
+# Without a machine-id line, a Fedora-style "<machine-id>-<version>.conf"
+# filename supplies it. GRUB variables in initrd/options ($tuned_initrd,
+# $tuned_params) are dropped, as GRUB does when they are unset.
 #
 
 
